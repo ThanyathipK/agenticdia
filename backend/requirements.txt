@@ -1,0 +1,12 @@
+fastapi[standard]
+uvicorn
+sqlalchemy
+asyncpg
+pydantic
+pydantic-settings
+openai
+langgraph
+langchain
+langchain-openai
+langchain>=0.3
+greenlet>=3.1

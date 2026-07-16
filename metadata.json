@@ -1,0 +1,6 @@
+{
+  "name": "Enterprise Requirements Schema",
+  "description": "PostgreSQL schema designed for banking-grade requirement engineering systems with UUID v4, audit trails, and snapshot ledger.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

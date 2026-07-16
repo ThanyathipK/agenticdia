@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@media print {
+  /* Hide all interactive and layout items that are not part of the printed content */
+  header,
+  section:first-of-type,
+  .no-print,
+  button,
+  nav,
+  .absolute {
+    display: none !important;
+  }
+
+  /* Reset outer container heights and overflows so the whole report can span multiple pages */
+  body, html, #app-container, #root {
+    overflow: visible !important;
+    height: auto !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* Make the printable document occupy the whole paper surface with pristine margins */
+  #printable-document {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  /* Ensure text is high-contrast and readable on white paper */
+  article {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+
+  /* Force page break safety on critical headings and lists */
+  h1, h2, h3, h4 {
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+
+  p, li, pre, blockquote {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+}
