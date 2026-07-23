@@ -1,8 +1,9 @@
 import logging
 import uuid
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 
 from app.database import AsyncSessionLocal
 from app.models import (
@@ -16,7 +17,9 @@ from app.models import (
     ClarificationQuestionModel,
     AuditResultModel,
     PRDDocumentModel,
-    VersionHistoryModel
+    VersionHistoryModel,
+    ConversationMessageModel,
+    PendingActionModel
 )
 
 logger = logging.getLogger("app.repository")
@@ -132,6 +135,55 @@ class EpicRepository:
     """
     Handles Epics of the project.
     """
+    @staticmethod
+    async def get_active_by_project(project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(EpicModel).where(EpicModel.project_id == pid, EpicModel.status == "active").order_by(EpicModel.updated_at.desc())
+        result = await session.execute(stmt)
+        epic = result.scalars().first()
+        if epic:
+            return {
+                "id": str(epic.id),
+                "project_id": str(epic.project_id),
+                "epic_name": epic.epic_name,
+                "version": epic.version,
+                "status": epic.status
+            }
+        return None
+
+    @staticmethod
+    async def save_or_update_epic(project_id: str, epic_name: str, session: AsyncSession, version: int = 1) -> Dict[str, Any]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(EpicModel).where(EpicModel.project_id == pid, EpicModel.status == "active").order_by(EpicModel.updated_at.desc())
+        result = await session.execute(stmt)
+        epic = result.scalars().first()
+        
+        name_to_use = epic_name.strip() if (epic_name and epic_name.strip()) else "Untitled Epic"
+        if epic:
+            if epic_name and epic_name.strip():
+                epic.epic_name = name_to_use
+            epic.version = version
+            await session.flush()
+            await session.refresh(epic)
+        else:
+            epic = EpicModel(
+                project_id=pid,
+                epic_name=name_to_use,
+                version=version,
+                status="active"
+            )
+            session.add(epic)
+            await session.flush()
+            await session.refresh(epic)
+            
+        return {
+            "id": str(epic.id),
+            "project_id": str(epic.project_id),
+            "epic_name": epic.epic_name,
+            "version": epic.version,
+            "status": epic.status
+        }
+
     @staticmethod
     async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
@@ -321,7 +373,24 @@ class RequirementRepository:
         result = await session.execute(stmt)
         req = result.scalar_one_or_none()
         if req:
-            await session.delete(req)
+            req.status = "deleted"
+            # Archive User Stories and Acceptance Criteria related to that Requirement
+            stmt_stories = select(UserStoryModel).where(UserStoryModel.requirement_id == rid)
+            res_stories = await session.execute(stmt_stories)
+            stories = res_stories.scalars().all()
+            for story in stories:
+                story.status = "archived"
+                story.change_type = "archived"
+                story.version = story.version + 1
+                
+                stmt_ac = select(AcceptanceCriteriaModel).where(AcceptanceCriteriaModel.user_story_id == story.id)
+                res_ac = await session.execute(stmt_ac)
+                ac_list = res_ac.scalars().all()
+                for ac in ac_list:
+                    ac.status = "archived"
+                    ac.change_type = "archived"
+                    ac.version = ac.version + 1
+
             await session.flush()
             return True
         return False
@@ -1327,23 +1396,36 @@ class RequirementStateRepository:
         if not model:
             return None
         
+        # Load active epic directly from epics table
+        active_epic = await EpicRepository.get_active_by_project(str(project_id), session)
+        epic_name = active_epic["epic_name"] if active_epic else ""
+
         # Load from all other tables
-        stmt_req = select(RequirementModel).where(RequirementModel.project_id == project_id).order_by(RequirementModel.version.desc())
+        stmt_req = select(RequirementModel).where(
+            RequirementModel.project_id == project_id,
+            func.lower(RequirementModel.status) == "active"
+        ).order_by(RequirementModel.version.desc())
         res_req = await session.execute(stmt_req)
         req = res_req.scalars().first()
         
-        epic_name = ""
         version_num = model.version_number
         req_id = None
         if req:
             req_id = req.id
             version_num = req.version
-            if req.epic_id:
+            if not epic_name and req.epic_id:
                 stmt_epic = select(EpicModel).where(EpicModel.id == req.epic_id)
                 res_epic = await session.execute(stmt_epic)
                 epic = res_epic.scalar_one_or_none()
                 if epic:
                     epic_name = epic.epic_name
+
+        # Fallback if no epic found in epics table but present in model.requirements
+        if not epic_name and model.requirements and isinstance(model.requirements, dict):
+            epic_name = model.requirements.get("epic_name", "")
+            if epic_name:
+                saved_epic = await EpicRepository.save_or_update_epic(str(project_id), epic_name, session, version=version_num)
+                epic_name = saved_epic["epic_name"]
 
         stories = await UserStoryRepository.get_by_project(str(project_id), session, requirement_id=req_id)
         ac_list = await AcceptanceCriteriaRepository.get_by_project(str(project_id), session, requirement_id=req_id)
@@ -1446,35 +1528,49 @@ class RequirementStateRepository:
         
         version_num = model.version_number
         
-        # 1. Resolve or Create the latest RequirementModel record
-        created_req_id = None
+        # 1. Resolve or Create Epic & RequirementModel
+        epic_name_val = None
         if "requirements" in updates and updates["requirements"] is not None:
-            requirements_data = updates["requirements"]
-            epic_name = requirements_data.get("epic_name", "Untitled Epic")
-            
-            # Check if there is an existing requirement for this project and version
-            stmt_exist = select(RequirementModel).where(
-                RequirementModel.project_id == project_id,
-                RequirementModel.version == version_num
-            )
-            res_exist = await session.execute(stmt_exist)
-            existing_req = res_exist.scalars().first()
-            if existing_req:
-                existing_req.epic_name = epic_name
-                await session.flush()
-                created_req_id = existing_req.id
-            else:
-                new_req = await RequirementRepository.create(str(project_id), {"epic_name": epic_name, "version": version_num}, session)
-                created_req_id = uuid.UUID(new_req["id"])
+            reqs_data = updates["requirements"]
+            if isinstance(reqs_data, dict) and reqs_data.get("epic_name"):
+                epic_name_val = reqs_data.get("epic_name")
+
+        # Save or update active Epic in epics table
+        if epic_name_val:
+            epic_rec = await EpicRepository.save_or_update_epic(str(project_id), epic_name_val, session, version=version_num)
         else:
-            stmt_req = select(RequirementModel).where(RequirementModel.project_id == project_id).order_by(RequirementModel.version.desc())
-            res_req = await session.execute(stmt_req)
-            req = res_req.scalars().first()
-            if not req:
-                default_req = await RequirementRepository.create(str(project_id), {"epic_name": "Untitled Epic", "version": version_num}, session)
-                created_req_id = uuid.UUID(default_req["id"])
+            active_epic = await EpicRepository.get_active_by_project(str(project_id), session)
+            if active_epic:
+                epic_rec = active_epic
             else:
-                created_req_id = req.id
+                epic_rec = await EpicRepository.save_or_update_epic(str(project_id), "Untitled Epic", session, version=version_num)
+
+        epic_id_uuid = uuid.UUID(epic_rec["id"])
+
+        # Check if there is an existing requirement for this project and version
+        stmt_exist = select(RequirementModel).where(
+            RequirementModel.project_id == project_id,
+            RequirementModel.version == version_num
+        )
+        res_exist = await session.execute(stmt_exist)
+        existing_req = res_exist.scalars().first()
+        if existing_req:
+            existing_req.epic_id = epic_id_uuid
+            existing_req.title = epic_rec["epic_name"]
+            await session.flush()
+            created_req_id = existing_req.id
+        else:
+            new_req = RequirementModel(
+                project_id=project_id,
+                epic_id=epic_id_uuid,
+                requirement_code="REQ-001",
+                title=epic_rec["epic_name"],
+                version=version_num,
+                status="active"
+            )
+            session.add(new_req)
+            await session.flush()
+            created_req_id = new_req.id
         
         # 2. Propagation for User Stories and Acceptance Criteria
         if "user_stories" in updates and updates["user_stories"] is not None:
@@ -1721,3 +1817,130 @@ class RequirementStateRepository:
         await session.refresh(model)
         
         return await RequirementStateRepository._get_by_project_id_impl(project_id, session)
+
+
+class ConversationMessageRepository:
+    """
+    Handles conversation message persistence in Supabase.
+    """
+    @staticmethod
+    async def save_message(project_id: str, role: str, message: str, session: Optional[AsyncSession] = None) -> Dict[str, Any]:
+        if not message or not message.strip():
+            return {}
+            
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        
+        async def _save(s: AsyncSession):
+            msg_obj = ConversationMessageModel(
+                id=uuid.uuid4(),
+                project_id=pid,
+                role=role,
+                message=message
+            )
+            s.add(msg_obj)
+            await s.flush()
+            await s.commit()
+            return {
+                "id": str(msg_obj.id),
+                "project_id": str(msg_obj.project_id),
+                "role": msg_obj.role,
+                "message": msg_obj.message,
+                "content": msg_obj.message,
+                "timestamp": msg_obj.timestamp.isoformat() if msg_obj.timestamp else ""
+            }
+
+        if session:
+            return await _save(session)
+        async with AsyncSessionLocal() as db_session:
+            return await _save(db_session)
+
+    @staticmethod
+    async def get_conversation_history(project_id: str, session: Optional[AsyncSession] = None) -> List[Dict[str, Any]]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        
+        async def _fetch(s: AsyncSession):
+            stmt = select(ConversationMessageModel).where(ConversationMessageModel.project_id == pid).order_by(ConversationMessageModel.timestamp.asc(), ConversationMessageModel.created_at.asc())
+            res = await s.execute(stmt)
+            messages = res.scalars().all()
+            return [
+                {
+                    "id": str(m.id),
+                    "project_id": str(m.project_id),
+                    "role": m.role,
+                    "message": m.message,
+                    "content": m.message,
+                    "timestamp": m.timestamp.isoformat() if m.timestamp else ""
+                }
+                for m in messages
+            ]
+        
+        if session:
+            return await _fetch(session)
+        async with AsyncSessionLocal() as db_session:
+            return await _fetch(db_session)
+
+class PendingActionRepository:
+    """
+    Handles Pending Actions for Human-in-the-Loop confirmation.
+    """
+    @staticmethod
+    async def create(project_id: str, data: Dict[str, Any], expires_at: datetime, session: AsyncSession) -> Dict[str, Any]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        action = PendingActionModel(
+            project_id=pid,
+            action_type=data.get("action_type", "UPDATE"),
+            target_requirement_id=data.get("target_requirement_id"),
+            original_user_message=data.get("original_user_message", ""),
+            proposed_changes=data.get("proposed_changes", {}),
+            affected_user_story_ids=data.get("affected_user_story_ids", []),
+            affected_acceptance_criteria_ids=data.get("affected_acceptance_criteria_ids", []),
+            workflow_stage=data.get("workflow_stage", "gatherer_node"),
+            expires_at=expires_at
+        )
+        session.add(action)
+        await session.flush()
+        await session.refresh(action)
+        return {
+            "id": str(action.id),
+            "project_id": str(action.project_id),
+            "action_type": action.action_type,
+            "target_requirement_id": action.target_requirement_id,
+            "status": action.status
+        }
+
+    @staticmethod
+    async def get_by_project(project_id: str, session: AsyncSession) -> List[Dict[str, Any]]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(PendingActionModel).where(PendingActionModel.project_id == pid, PendingActionModel.status == "WAITING_CONFIRMATION")
+        result = await session.execute(stmt)
+        actions = result.scalars().all()
+        return [
+            {
+                "id": str(a.id),
+                "project_id": str(a.project_id),
+                "action_type": a.action_type,
+                "target_requirement_id": a.target_requirement_id,
+                "original_user_message": a.original_user_message,
+                "proposed_changes": a.proposed_changes,
+                "affected_user_story_ids": a.affected_user_story_ids,
+                "affected_acceptance_criteria_ids": a.affected_acceptance_criteria_ids,
+                "workflow_stage": a.workflow_stage,
+                "status": a.status,
+                "expires_at": a.expires_at.isoformat()
+            }
+            for a in actions
+        ]
+
+    @staticmethod
+    async def delete(id_val: str, project_id: str, session: AsyncSession) -> bool:
+        aid = uuid.UUID(id_val) if isinstance(id_val, str) else id_val
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(PendingActionModel).where(PendingActionModel.id == aid, PendingActionModel.project_id == pid)
+        result = await session.execute(stmt)
+        action = result.scalar_one_or_none()
+        if action:
+            await session.delete(action)
+            await session.flush()
+            return True
+        return False
+

@@ -63,7 +63,7 @@ class EpicModel(Base):
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
     project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     epic_name = Column(String(255), nullable=False)
-    version = Column("current_version", Integer, nullable=False, default=1)
+    version = Column(Integer, nullable=False, default=1)
     is_locked = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
@@ -205,3 +205,29 @@ class RequirementStateModel(Base):
     current_workflow_state = Column(String(50), nullable=False, default="gatherer_node")
     version_number = Column(Integer, nullable=False, default=1)
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+class ConversationMessageModel(Base):
+    __tablename__ = "conversation_messages"
+    
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(50), nullable=False)
+    message = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+class PendingActionModel(Base):
+    __tablename__ = "pending_actions"
+    
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    action_type = Column(String(50), nullable=False)
+    target_requirement_id = Column(String(50), nullable=True)
+    original_user_message = Column(Text, nullable=False)
+    proposed_changes = Column(JSON, nullable=False, default=dict)
+    affected_user_story_ids = Column(JSON, nullable=False, default=list)
+    affected_acceptance_criteria_ids = Column(JSON, nullable=False, default=list)
+    workflow_stage = Column(String(100), nullable=False)
+    status = Column(String(50), nullable=False, default="WAITING_CONFIRMATION")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)

@@ -2,6 +2,7 @@ import logging
 import json
 from typing import TypedDict, Dict, Any, List, Optional
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 try:
@@ -9,8 +10,9 @@ try:
 except ImportError:
     OutputFixingParser = None
 from langgraph.graph import StateGraph, START, END
-from app.repository import RequirementStateRepository
+from app.repository import RequirementStateRepository, ConversationMessageRepository
 from app.schemas import GatheredRequirements, UserStoryModel
+from app.prompt_loader import load_prompt
 
 
 # Set up logging configuration for the multi-agent framework
@@ -18,126 +20,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app.agents")
 
 # ==========================================
-# SYSTEM PROMPTS
+# SYSTEM PROMPTS (LOADED DYNAMICALLY VIA PROMPT LOADER)
 # ==========================================
-GATHERER_PROMPT = """
-Your role is a Senior Business Analyst and Requirements Engineer. Your task is to process raw, messy, or conversational text from a User/Product Owner and extract them into clean, standardized Agile Requirements.
+class _PromptProxy:
+    def __init__(self, name: str):
+        self.name = name
+    def __str__(self) -> str:
+        return load_prompt(self.name)
+    def __add__(self, other: str) -> str:
+        return load_prompt(self.name) + str(other)
+    def __radd__(self, other: str) -> str:
+        return str(other) + load_prompt(self.name)
 
-<system_constraints>
-- You must output your response 100% strictly in JSON format matching the schema provided below.
-- Do not include any standard AI introductory or trailing pleasantries (e.g., "Sure, here is...").
-- Do not use Markdown, do not use ```json fences, do not use any formatting other than raw JSON.
-- Keep terminology objective, precise, and structured according to corporate banking principles.
-- The output MUST be valid, RFC8259-compliant JSON with no trailing commas, no comments, and using only double quotes.
-</system_constraints>
-
-<instructions>
-1. Evaluate the information inside the `<raw_user_input>` tag.
-2. Formulate a standardized high-level Feature Epic Name.
-3. Break down the core intent into granular "User Stories" following the strict format: "As a [role], I want to [action], So that [value]".
-4. For every User Story generated, write at least two highly detailed, testable "Acceptance Criteria" utilizing the strict behavior-driven syntax: "Given [context], When [action], Then [expected outcome]".
-5. You MUST align your output with the `<semantic_change_recommendations>` provided:
-   - For any "MODIFY_REQUIREMENT", "EXPAND_REQUIREMENT", or "RENAME_REQUIREMENT" recommendation targeting a specific ticket code, find the matching user story in `<current_project_context>`, modify or expand it according to the raw user input, and ensure it retains its exact `ticket_code`.
-   - For any "NEW_REQUIREMENT" recommendation, generate a brand new user story and assign it a new unique ticket code.
-   - For any "REMOVE_REQUIREMENT" recommendation targeting a ticket code, do NOT include that user story in the output.
-   - For any other user story in `<current_project_context>` that has no recommendations or is "NO_CHANGE", preserve it exactly as-is in the output (retaining its ticket code, title, role, want, value, and acceptance criteria).
-</instructions>
-
-<current_project_context>
-{current_context}
-</current_project_context>
-
-<semantic_change_recommendations>
-{recommendations}
-</semantic_change_recommendations>
-
-<raw_user_input>
-{raw_input}
-</raw_user_input>
-
-{format_instructions}
-"""
-
-AUDITOR_PROMPT = """
-Your role is a Principal Software Architect and Risk Compliance Auditor for a Tier-1 Retail Bank. Your task is to audit the provided structured user stories against our rigid internal technical checklist to guarantee high availability, system safety, and absolute data integrity.
-
-<system_constraints>
-- Evaluate the input data strictly against the Mandatory 7-Point Banking Checklist.
-- If ANY checklist metric is missing, unaddressed, or vague, you MUST set "is_valid" to false and write highly specific clarification questions in the array.
-- Only if ALL checklist elements are thoroughly covered by the requirements can you set "is_valid" to true and leave the questions array empty.
-- Output must be purely valid JSON. No open prose.
-</system_constraints>
-
-<mandatory_7_point_banking_checklist>
-1. Idempotency & De-duplication: Does the story specify how back-to-back duplicate transaction payloads are caught? Is there an Explicit Idempotency Key mechanism outlined?
-2. Security & Data Masking: Are sensitive elements (PII, citizen IDs, account balances) masked in app logs and encrypted both in transit and at rest?
-3. Audit Logging & Traceability: Is there an unalterable transaction ledger trail specified? Who, when, and what changed must be logged.
-4. Database Consistency & Rollback: Are database transactions atomic? Is a clear rollback pathway mapped out in case of intermediate network dropouts?
-5. Network Timeouts & Retry Strategies: Is there a designated timeout ceiling and circuit-breaker retry pattern mentioned for dependent 3rd-party node queries?
-6. Financial Regulatory Compliance: Does the workflow adhere strictly to local central banking standards (e.g., Bank of Thailand PromptPay infrastructure, AML/KYC directives)?
-7. Edge-Case Failure Handling: Are system behaviors explicitly mapped out for insufficient funds, frozen accounts, database timeouts, or user dropouts?
-</mandatory_7_point_banking_checklist>
-
-<input_structured_requirements>
-{structured_requirements}
-</input_structured_requirements>
-
-<historical_context>
-Current Requirement Version: {current_version}
-</historical_context>
-
-<instructions>
-1. Conduct a rigorous verification pass over the user stories and acceptance criteria.
-2. Cross-reference them line-by-line with the 7-Point Banking Checklist.
-3. If a requirement misses a check point, generate a direct, highly technical question targeted at that specific user story to prompt the TPO/BA for the missing detail.
-</instructions>
-
-<expected_json_output_schema>
-{{
-  "is_valid": false,
-  "audit_version_reviewed": {current_version},
-  "passed_checks": ["Array of strings matching categories that passed"],
-  "failed_checks": ["Array of strings matching categories that failed or are missing info"],
-  "clarification_questions": [
-    {{
-      "checklist_category": "String (e.g., Idempotency)",
-      "target_user_story_id": "String (e.g., US-001)",
-      "question_text": "String (e.g., The transaction loop for US-001 does not specify an idempotency token duration or key generation logic. Please define how the backend prevents double-posting during timeout retries.)"
-    }}
-  ]
-}}
-</expected_json_output_schema>
-"""
-
-ARCHITECT_PROMPT = """
-Your role is a Chief Technology Officer (CTO) and Enterprise Solutions Architect. The requirements have successfully passed the banking audit. Your job is to compile the final verified requirements into a comprehensive, authoritative Markdown Product Requirement Document (PRD) and generate a matching architectural visualization schema.
-
-<system_constraints>
-- Your output must be a single structured JSON object containing "prd_markdown" and "mermaid_diagram".
-- The "mermaid_diagram" string field must contain ONLY valid, raw Mermaid.js visualization syntax. Do not append markdown backticks inside the JSON value string.
-</system_constraints>
-
-<input_validated_dataset>
-Project ID: {project_id}
-Final Approved Version: {current_version}
-Validated Requirements JSON: {validated_requirements}
-Audit Logs & History References: {version_history_summaries}
-</input_validated_dataset>
-
-<instructions>
-1. **Draft PRD Markdown:** Write a pristine corporate PRD. Use detailed headings (`#`, `##`, `###`). Structure it with: 1. Executive Summary, 2. Technical Architecture & System Constraints, 3. Fully Audited User Stories with explicit Given-When-Then criteria, 4. Critical Error Handling & Database Rollback Matrices, 5. Data Governance & Regulatory Compliance mapping, 6. Revision History Record.
-2. **Draft System Flowcharts:** Write an extensive, syntactically perfect Mermaid.js Sequence Diagram (`sequenceDiagram`) or Flowchart (`graph TD`) mapping out the architecture. Show exactly how a payload moves from Frontend React -> FastAPI Backend Router -> Security Validation Node -> Core Bank API Gateway -> Database Persistency Layer.
-</instructions>
-
-<expected_json_output_schema>
-{{
-  "project_id": "{project_id}",
-  "final_version": {current_version},
-  "prd_markdown": "# PRD - Feature Document Title\n\n## 1. Executive Summary...\n\n## 2. Technical Infrastructure Architecture...\n\n## 3. Audited User Stories...",
-  "mermaid_diagram": "sequenceDiagram\n  autonumber\n  Client Browser->>FastAPI Backend: HTTP POST /api/transaction\n  FastAPI Backend->>Supabase DB: Verify Idempotency Key"
-}}
-</expected_json_output_schema>
-"""
+GATHERER_PROMPT = _PromptProxy("gatherer")
+AUDITOR_PROMPT = _PromptProxy("auditor")
+ARCHITECT_PROMPT = _PromptProxy("architect")
 
 # ==========================================
 # STATE MANAGEMENT
@@ -161,8 +58,9 @@ class RequirementState(TypedDict):
     current_workflow_state: str
     version_number: int
     updated_at: Optional[str]
+    detected_intent: Optional[str]
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     """
     Context safety state tracking dictionary.
     Maintains historic attributes across multi-agent graph workflows.
@@ -177,6 +75,9 @@ class AgentState(TypedDict):
     version_history_summaries: str
     target_agent: str # Supports on-demand agent execution flow
     requirement_state: RequirementState
+    detected_intent: Optional[str]
+    workflow_routing: Optional[dict]
+    agent_message: Optional[str]
 
 # ==========================================
 # LOCAL LLM ORCHESTRATION CLIENT
@@ -218,9 +119,6 @@ async def get_or_init_requirement_state(project_id: str, current_version: int = 
             "version_number": current_version,
             "updated_at": None
         }
-        logger.info(f"[DB LOG] [AGENTS] Saving new project state for {project_id}...")
-        db_state = await RequirementStateRepository.save_or_update(project_id, db_state)
-        logger.info(f"[DB LOG] [AGENTS] Saving new project state for {project_id} complete.")
     return db_state
 
 # ==========================================
@@ -256,6 +154,361 @@ def extract_content_from_response(response) -> str:
     logger.info(f"Extracted content: {content[:500] if content else 'EMPTY'}")
     return content
 
+def normalize_ticket_code(code: Optional[str]) -> str:
+    if not code:
+        return ""
+    code = str(code).strip().upper()
+    if code.startswith("US-"):
+        num_part = code[3:]
+        if num_part.isdigit():
+            return f"US-{int(num_part):03d}"
+    return code
+
+def normalize_title(title: Optional[str]) -> str:
+    if not title:
+        return ""
+    return " ".join(str(title).lower().strip().split())
+
+def generate_next_ticket_code(stories: List[Dict[str, Any]]) -> str:
+    max_num = 0
+    for s in stories:
+        tc = s.get("ticket_code", "")
+        if tc and str(tc).strip().upper().startswith("US-"):
+            num_part = str(tc).strip().upper()[3:]
+            if num_part.isdigit():
+                max_num = max(max_num, int(num_part))
+    return f"US-{max_num + 1:03d}"
+
+def merge_user_stories(
+    existing_stories: List[Dict[str, Any]],
+    new_incoming_stories: List[Dict[str, Any]],
+    semantic_recs: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Merges newly generated user stories with existing user stories.
+    Requirements:
+    - Load all existing User Stories.
+    - Merge newly generated User Stories.
+    - Keep unchanged stories (change_type="unchanged", status="active").
+    - Update modified stories (change_type="updated", status="active").
+    - Insert new stories (change_type="created", status="active").
+    - Archive deleted stories (change_type="archived", status="archived").
+    """
+    semantic_recs = semantic_recs or []
+    
+    rec_by_code = {}
+    rec_by_title = {}
+    for rec in semantic_recs:
+        target_id = rec.get("target_requirement_id")
+        action = rec.get("recommended_action")
+        if target_id and action:
+            norm_target = normalize_ticket_code(target_id)
+            if norm_target:
+                rec_by_code[norm_target] = action
+            else:
+                rec_by_title[normalize_title(target_id)] = action
+
+    existing_by_id = {}
+    existing_by_code = {}
+    existing_by_title = {}
+    
+    active_existing = [s for s in existing_stories if s.get("status", "active") == "active"]
+    
+    for s in active_existing:
+        if s.get("id"):
+            existing_by_id[str(s["id"])] = s
+        code = normalize_ticket_code(s.get("ticket_code"))
+        if code and code != "US-000":
+            existing_by_code[code] = s
+        title = normalize_title(s.get("story_title"))
+        if title:
+            existing_by_title[title] = s
+
+    matched_existing_ptrs = set()
+    merged_stories: List[Dict[str, Any]] = []
+
+    # 1. Process incoming stories
+    for inc in new_incoming_stories:
+        inc_id = str(inc["id"]) if inc.get("id") else None
+        inc_code = normalize_ticket_code(inc.get("ticket_code"))
+        inc_title = normalize_title(inc.get("story_title"))
+        
+        matched = None
+        if inc_id and inc_id in existing_by_id:
+            matched = existing_by_id[inc_id]
+        elif inc_code and inc_code in existing_by_code:
+            matched = existing_by_code[inc_code]
+        elif inc_title and inc_title in existing_by_title:
+            matched = existing_by_title[inc_title]
+
+        if matched:
+            matched_existing_ptrs.add(id(matched))
+            
+            rec_act = rec_by_code.get(inc_code) or rec_by_code.get(normalize_ticket_code(matched.get("ticket_code"))) or rec_by_title.get(inc_title)
+            
+            if rec_act == "ARCHIVE" or inc.get("status") == "archived" or inc.get("change_type") == "archived":
+                archived_story = dict(matched)
+                archived_story["status"] = "archived"
+                archived_story["change_type"] = "archived"
+                merged_stories.append(archived_story)
+                continue
+
+            # Compare fields to check if modified
+            m_title = (matched.get("story_title") or "").strip()
+            m_as_a = (matched.get("as_a") or "").strip()
+            m_i_want = (matched.get("i_want_to") or "").strip()
+            m_so_that = (matched.get("so_that") or "").strip()
+            m_ac = matched.get("acceptance_criteria", [])
+
+            i_title = (inc.get("story_title") or m_title).strip()
+            i_as_a = (inc.get("as_a") or m_as_a).strip()
+            i_i_want = (inc.get("i_want_to") or m_i_want).strip()
+            i_so_that = (inc.get("so_that") or m_so_that).strip()
+            i_ac = inc.get("acceptance_criteria") if "acceptance_criteria" in inc else m_ac
+
+            title_diff = (m_title != i_title)
+            as_a_diff = (m_as_a != i_as_a)
+            i_want_diff = (m_i_want != i_i_want)
+            so_that_diff = (m_so_that != i_so_that)
+            ac_diff = (m_ac != i_ac)
+
+            field_changed = title_diff or as_a_diff or i_want_diff or so_that_diff or ac_diff
+
+            if rec_act == "UPDATE":
+                is_modified = True
+            elif rec_act == "NO_CHANGE":
+                is_modified = False
+            else:
+                is_modified = field_changed
+
+            updated_story = dict(matched)
+            updated_story["story_title"] = i_title
+            updated_story["as_a"] = i_as_a
+            updated_story["i_want_to"] = i_i_want
+            updated_story["so_that"] = i_so_that
+            updated_story["acceptance_criteria"] = i_ac
+            updated_story["status"] = "active"
+            updated_story["change_type"] = "updated" if is_modified else "unchanged"
+
+            if inc_code and inc_code != "US-000":
+                updated_story["ticket_code"] = inc_code
+            elif not updated_story.get("ticket_code"):
+                updated_story["ticket_code"] = matched.get("ticket_code") or "US-001"
+
+            merged_stories.append(updated_story)
+
+        else:
+            # Unmatched incoming -> New story insertion
+            rec_act = rec_by_code.get(inc_code) or rec_by_title.get(inc_title)
+            if rec_act == "ARCHIVE" or inc.get("status") == "archived":
+                continue
+
+            ticket_code = inc_code
+            if not ticket_code or ticket_code == "US-000" or ticket_code in existing_by_code:
+                ticket_code = generate_next_ticket_code(active_existing + merged_stories)
+
+            new_story = {
+                "ticket_code": ticket_code,
+                "story_title": inc.get("story_title", "Untitled Story"),
+                "as_a": inc.get("as_a", ""),
+                "i_want_to": inc.get("i_want_to", ""),
+                "so_that": inc.get("so_that", ""),
+                "acceptance_criteria": inc.get("acceptance_criteria", []),
+                "status": "active",
+                "change_type": "created"
+            }
+            if inc.get("id"):
+                new_story["id"] = inc["id"]
+
+            merged_stories.append(new_story)
+
+    # 2. Process existing active stories that were NOT matched by incoming
+    for ex in active_existing:
+        if id(ex) in matched_existing_ptrs:
+            continue
+
+        ex_code = normalize_ticket_code(ex.get("ticket_code"))
+        ex_title = normalize_title(ex.get("story_title"))
+        rec_act = rec_by_code.get(ex_code) or rec_by_title.get(ex_title)
+
+        if rec_act == "ARCHIVE":
+            archived_story = dict(ex)
+            archived_story["status"] = "archived"
+            archived_story["change_type"] = "archived"
+            merged_stories.append(archived_story)
+        else:
+            # KEEP UNCHANGED!
+            unchanged_story = dict(ex)
+            unchanged_story["status"] = "active"
+            unchanged_story["change_type"] = "unchanged"
+            merged_stories.append(unchanged_story)
+
+    return merged_stories
+
+async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Workflow Router Node:
+    Intercepts user input BEFORE the Gatherer Agent.
+    Classifies incoming user messages into:
+    - CHAT
+    - QUESTION
+    - COMMAND
+    - REQUIREMENT
+    """
+    from app.semantic_service import classify_workflow
+
+    raw_input = state.get("raw_input", "")
+    target_agent = state.get("target_agent", "gatherer")
+
+    logger.info(f"[WORKFLOW ROUTER] Intercepted raw_input: '{raw_input[:100]}'")
+
+    # Run classification
+    router_result = await classify_workflow(raw_input)
+    workflow_type = str(router_result.get("workflow", "REQUIREMENT")).upper()
+    logger.info(f"[WORKFLOW ROUTER] Classification: {router_result}")
+
+    project_id = state.get("project_id", "PROJ-UNKNOWN")
+    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+
+    if workflow_type == "CHAT":
+        logger.info("[WORKFLOW ROUTER] Handling as CHAT. Generating conversational response.")
+        chat_sys = (
+            "You are a helpful, professional AI Business Analyst assistant for core banking projects. "
+            "Respond cordially and politely to conversational greetings or pleasantries. "
+            "Do NOT attempt to generate, create, or update software requirements."
+        )
+        try:
+            resp = await llm.ainvoke([SystemMessage(content=chat_sys), HumanMessage(content=raw_input)])
+            msg_content = resp.content if hasattr(resp, "content") else str(resp)
+        except Exception as e:
+            logger.warning(f"Failed LLM chat invocation: {str(e)}")
+            msg_content = "Hello! How can I assist you with your core banking requirements today?"
+
+        return {
+            "workflow_routing": router_result,
+            "agent_message": msg_content,
+            "requirement_state": req_state
+        }
+
+    elif workflow_type == "QUESTION":
+        logger.info("[WORKFLOW ROUTER] Handling as QUESTION. Answering direct question.")
+        existing_epic = req_state.get("requirements", {}).get("epic_name", "")
+        stories = req_state.get("user_stories", [])
+        stories_summary = "\n".join([f"- {s.get('ticket_code', 'US')}: {s.get('story_title', '')}" for s in stories[:10]])
+
+        q_sys = (
+            "You are an expert Enterprise Software Architect and Business Analyst. "
+            "Answer the user's question clearly, precisely, and directly. "
+            f"Current Project Context: Epic='{existing_epic}'. Stories:\n{stories_summary}\n"
+            "Do NOT create or modify software requirements JSON. Focus purely on answering the question."
+        )
+        try:
+            resp = await llm.ainvoke([SystemMessage(content=q_sys), HumanMessage(content=raw_input)])
+            msg_content = resp.content if hasattr(resp, "content") else str(resp)
+        except Exception as e:
+            logger.warning(f"Failed LLM question invocation: {str(e)}")
+            msg_content = f"Here is the explanation for your question: {raw_input}"
+
+        return {
+            "workflow_routing": router_result,
+            "agent_message": msg_content,
+            "requirement_state": req_state
+        }
+
+    elif workflow_type == "COMMAND":
+        logger.info("[WORKFLOW ROUTER] Handling as COMMAND. Routing backend command.")
+        lower = raw_input.lower()
+        new_target = target_agent
+        if any(w in lower for w in ["audit", "auditor", "validate"]):
+            new_target = "auditor"
+        elif any(w in lower for w in ["prd", "diagram", "architect", "export"]):
+            new_target = "architect"
+
+        return {
+            "workflow_routing": router_result,
+            "target_agent": new_target,
+            "agent_message": f"Command routed successfully: {raw_input}",
+            "requirement_state": req_state
+        }
+
+    else: # REQUIREMENT
+        logger.info("[WORKFLOW ROUTER] Handling as REQUIREMENT. Proceeding to Requirement Matcher & Intent Detection.")
+        return {
+            "workflow_routing": router_result,
+            "requirement_state": req_state
+        }
+
+async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Requirement Matcher Node:
+    Runs between Intent Detection and Gatherer Agent.
+    Determines which existing requirement(s) the user's message refers to before any modification occurs.
+    """
+    from app.semantic_service import detect_requirement_intent, match_requirement
+
+    raw_input = state.get("raw_input", "")
+    project_id = state.get("project_id", "PROJ-UNKNOWN")
+    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+    existing_stories = req_state.get("user_stories", [])
+
+    detected_intent = state.get("detected_intent")
+    if not detected_intent and raw_input:
+        intent_res = await detect_requirement_intent(raw_input, existing_stories)
+        detected_intent = intent_res.get("intent", "UPDATE")
+    elif not detected_intent:
+        detected_intent = "NO_CHANGE"
+
+    match_result = await match_requirement(raw_input, detected_intent, existing_stories)
+    matcher_status = str(match_result.get("status", "MATCHED")).upper()
+    matcher_confidence = float(match_result.get("confidence", 1.0))
+    reason = match_result.get("reason", "")
+    matched_id = match_result.get("matched_requirement_id")
+    candidates = match_result.get("candidates", [])
+
+    logger.info(f"[REQUIREMENT MATCHER] Match Result: {match_result}")
+
+    if raw_input and (matcher_status in ["AMBIGUOUS", "LOW_CONFIDENCE"] or matcher_confidence < 0.75):
+        logger.warning(f"[REQUIREMENT MATCHER] Ambiguous or low confidence match (status={matcher_status}, confidence={matcher_confidence}). Halting and asking clarification.")
+        
+        clarification_text = reason
+        if matcher_status == "AMBIGUOUS" and candidates:
+            clarification_text = f"Your request could refer to multiple requirements: {', '.join(candidates)}. Which requirement did you intend to update or delete?"
+        elif not clarification_text:
+            clarification_text = f"I am not sure which requirement your request refers to (Confidence: {matcher_confidence:.2f}). Please specify the ticket code (e.g. US-001)."
+
+        cqs = [{
+            "checklist_category": "Requirement Matcher Ambiguity",
+            "target_user_story_id": candidates[0] if candidates else None,
+            "question_text": clarification_text,
+            "user_answer": None,
+            "is_resolved": False
+        }]
+        existing_cqs = req_state.get("clarification_questions", []) or []
+        preserved_cqs = [q for q in existing_cqs if not q.get("is_resolved", False)]
+        req_state["clarification_questions"] = preserved_cqs + cqs
+        req_state["validation_status"] = "invalid"
+        req_state["current_workflow_state"] = "requirement_matcher_node"
+        req_state["detected_intent"] = detected_intent
+
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="assistant",
+            message=f"⚠️ **Clarification Needed (Requirement Matcher):**\n{clarification_text}"
+        )
+
+        return {
+            "requirement_state": req_state,
+            "detected_intent": detected_intent,
+            "requirement_match": match_result,
+            "current_version": req_state.get("version_number", 1)
+        }
+
+    return {
+        "requirement_state": req_state,
+        "detected_intent": detected_intent,
+        "requirement_match": match_result
+    }
+
 async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     """
     Standardizes messy Product Owner input into high-quality Agile structures.
@@ -266,26 +519,54 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     raw_input = state.get("raw_input", "")
     req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
     
+    # Store existing user stories before processing passed_structured or raw_input
+    existing_user_stories = list(req_state.get("user_stories", []))
+
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
         req_state["requirements"] = {"epic_name": passed_structured.get("epic_name", "")}
-        req_state["user_stories"] = passed_structured.get("user_stories", [])
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
-        all_ac = []
-        for us in req_state["user_stories"]:
-            all_ac.extend(us.get("acceptance_criteria", []))
-        req_state["acceptance_criteria"] = all_ac
 
     result = None
     parsing_error = None
     
     # Import inside function to prevent circular imports
-    from app.semantic_service import detect_semantic_changes
-    
+    from app.semantic_service import detect_semantic_changes, detect_requirement_intent
+
+    # Detect user intent before running the Gatherer
+    detected_intent = state.get("detected_intent")
+    intent_confidence = 1.0
+    intent_reason = ""
+    if not detected_intent and raw_input:
+        intent_res = await detect_requirement_intent(raw_input, existing_user_stories)
+        detected_intent = intent_res.get("intent", "UPDATE")
+        intent_confidence = float(intent_res.get("confidence", 1.0))
+        intent_reason = intent_res.get("reason", "")
+    elif not detected_intent:
+        detected_intent = "NO_CHANGE"
+
+    logger.info(f"Gatherer received raw_input: '{raw_input[:100]}' with detected_intent: {detected_intent}, confidence: {intent_confidence}")
+
+    # Use requirement_match from Requirement Matcher Agent if available
+    requirement_match = state.get("requirement_match") or {}
+    matched_req_id = requirement_match.get("matched_requirement_id")
+    match_action = requirement_match.get("action")
+
     semantic_recs = []
     if raw_input:
-        # Run Semantic Change Detection
-        semantic_recs = await detect_semantic_changes(raw_input, req_state.get("user_stories", []))
+        if matched_req_id and match_action in ["UPDATE", "DELETE"]:
+            rec_action = "UPDATE" if match_action == "UPDATE" else "ARCHIVE"
+            semantic_recs = [{
+                "change_type": "MODIFY_REQUIREMENT" if rec_action == "UPDATE" else "REMOVE_REQUIREMENT",
+                "target_requirement_id": matched_req_id,
+                "confidence": requirement_match.get("confidence", 0.95),
+                "reason": requirement_match.get("reason", "Matched via Requirement Matcher Agent."),
+                "recommended_action": rec_action
+            }]
+            logger.info(f"Gatherer using Requirement Matcher result: target_id={matched_req_id}, action={rec_action}")
+        else:
+            semantic_recs = await detect_semantic_changes(raw_input, req_state.get("user_stories", []))
+
         
         # Check for low confidence changes
         low_confidence_changes = [c for c in semantic_recs if c.get("confidence", 1.0) < 0.70]
@@ -309,27 +590,23 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             preserved_cqs = [q for q in existing_cqs if not q.get("is_resolved", False)]
             combined_cqs = preserved_cqs + cqs
             
-            updates = {
-                "clarification_questions": combined_cqs,
-                "validation_status": "invalid",
-                "current_workflow_state": "gatherer_node"
-            }
-            logger.info(f"[DB LOG] [GATHERER] Saving clarification questions due to low confidence...")
-            persisted_state = await RequirementStateRepository.save_or_update(project_id, updates)
-            
-            # Synchronize State
-            req_state = persisted_state.copy()
-            req_state["current_workflow_state"] = "gatherer_node"
+            req_state["clarification_questions"] = combined_cqs
             req_state["validation_status"] = "invalid"
+            req_state["current_workflow_state"] = "gatherer_node"
+            req_state["detected_intent"] = detected_intent
             
             return {
                 "requirement_state": req_state,
                 "structured_requirements": passed_structured,
+                "detected_intent": detected_intent,
                 "current_version": req_state.get("version_number", 1)
             }
 
         # Format current stories context
+        existing_epic = req_state.get("requirements", {}).get("epic_name", "")
         context_lines = []
+        if existing_epic:
+            context_lines.append(f"CURRENT ACTIVE EPIC: {existing_epic}\n(Note: DO NOT change this Epic Name unless the user explicitly requests to change or rename the epic)\n")
         for story in req_state.get("user_stories", []):
             context_lines.append(
                 f"- Story {story.get('ticket_code', 'UNKNOWN')}: '{story.get('story_title', '')}'\n"
@@ -342,8 +619,8 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         recs_str = json.dumps(semantic_recs, indent=2)
 
         prompt_template = PromptTemplate(
-            template=GATHERER_PROMPT,
-            input_variables=["raw_input", "current_context", "recommendations", "format_instructions"]
+            template=load_prompt("gatherer"),
+            input_variables=["raw_input", "detected_intent", "current_context", "recommendations", "format_instructions"]
         )
         
         # Prepare components for logging
@@ -351,6 +628,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         format_instructions = pydantic_parser.get_format_instructions()
         prompt_value = prompt_template.format(
             raw_input=raw_input,
+            detected_intent=detected_intent,
             current_context=current_context,
             recommendations=recs_str,
             format_instructions=format_instructions
@@ -367,6 +645,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             chain = prompt_template | llm.with_structured_output(GatheredRequirements)
             parsed_output = await chain.ainvoke({
                 "raw_input": raw_input,
+                "detected_intent": detected_intent,
                 "current_context": current_context,
                 "recommendations": recs_str,
                 "format_instructions": "Output ONLY raw JSON. No markdown."
@@ -381,6 +660,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
                 raw_chain = prompt_template | llm
                 raw_response = await raw_chain.ainvoke({
                     "raw_input": raw_input,
+                    "detected_intent": detected_intent,
                     "current_context": current_context,
                     "recommendations": recs_str,
                     "format_instructions": format_instructions
@@ -422,45 +702,62 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         )
 
     # Modify only its own fields in RequirementState
-    epic_name = result.get("epic_name", "Structured Requirements Draft")
+    existing_epic_name = req_state.get("requirements", {}).get("epic_name", "")
+    llm_epic_name = result.get("epic_name", "")
+    
+    raw_input_lower = raw_input.lower() if raw_input else ""
+    user_explicitly_changed_epic = any(k in raw_input_lower for k in ["rename epic", "change epic", "new epic", "update epic", "epic name"])
+    
+    is_placeholder = existing_epic_name in ["", "Untitled Epic", "Structured Requirements Draft"]
+    if existing_epic_name and not is_placeholder and not user_explicitly_changed_epic:
+        epic_name = existing_epic_name
+    else:
+        epic_name = llm_epic_name or existing_epic_name or "Structured Requirements Draft"
+
     requirements = {"epic_name": epic_name}
-    user_stories = result.get("user_stories", [])
+    newly_generated_stories = result.get("user_stories", [])
+    
+    # Synchronize user stories: merge newly generated user stories with existing user stories
+    merged_stories = merge_user_stories(
+        existing_stories=existing_user_stories,
+        new_incoming_stories=newly_generated_stories,
+        semantic_recs=semantic_recs
+    )
+    
+    active_stories = [s for s in merged_stories if s.get("status", "active") == "active"]
     ac_list = []
-    for story in user_stories:
+    for story in active_stories:
         ac_list.extend(story.get("acceptance_criteria", []))
     version_number = result.get("version", req_state["version_number"])
     
-    # Save to database immediately using repository (isolating direct database communication)
-    # Under Sprint 1 - Prompt 6C, we save user stories and requirements into their dedicated tables
-    updates = {
-        "requirements": requirements,
-        "user_stories": user_stories,
-        "version_number": version_number,
-        "current_workflow_state": "gatherer_node",
-        "semantic_recommendations": semantic_recs
-    }
-    logger.info(f"[DB LOG] [GATHERER] Saving updated requirements for project {project_id}...")
-    persisted_state = await RequirementStateRepository.save_or_update(project_id, updates)
-    logger.info(f"[DB LOG] [GATHERER] Saving updated requirements for project {project_id} complete.")
-    
-    # Sync and preserve newly generated in-memory state for downstream agent nodes and frontend compatibility
-    req_state = persisted_state.copy()
+    # Perform merge in memory
     req_state["requirements"] = requirements
-    req_state["user_stories"] = user_stories
+    req_state["user_stories"] = active_stories
+    req_state["all_merged_stories"] = merged_stories
     req_state["acceptance_criteria"] = ac_list
     req_state["version_number"] = version_number
     req_state["current_workflow_state"] = "gatherer_node"
+    req_state["semantic_recommendations"] = semantic_recs
+    req_state["detected_intent"] = detected_intent
+
+    gatherer_msg = "📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board."
+    await ConversationMessageRepository.save_message(
+        project_id=project_id,
+        role="gatherer",
+        message=gatherer_msg
+    )
     
     # Sync to outer structure for backend/frontend backward compatibility
     structured_out = {
         "epic_name": epic_name,
         "version": version_number,
-        "user_stories": user_stories
+        "user_stories": active_stories
     }
     
     return {
         "requirement_state": req_state,
         "structured_requirements": structured_out,
+        "detected_intent": detected_intent,
         "current_version": version_number
     }
 
@@ -506,14 +803,8 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         }
         
         req_state["current_workflow_state"] = "auditor_node"
-        updates = {
-            "clarification_questions": req_state["clarification_questions"],
-            "validation_status": req_state["validation_status"],
-            "passed_checks": result.get("passed_checks", []),
-            "failed_checks": result.get("failed_checks", []),
-            "current_workflow_state": "auditor_node"
-        }
-        req_state = await RequirementStateRepository.save_or_update(project_id, updates)
+        req_state["passed_checks"] = result.get("passed_checks", [])
+        req_state["failed_checks"] = result.get("failed_checks", [])
         return {
             "requirement_state": req_state,
             "audit_result": result
@@ -527,7 +818,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     }
     
     prompt = PromptTemplate(
-        template=AUDITOR_PROMPT,
+        template=load_prompt("auditor"),
         input_variables=["structured_requirements", "current_version"]
     )
     
@@ -557,22 +848,24 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         is_valid = len(combined_questions) == 0
         result["is_valid"] = is_valid
         
-        # Modify only its own fields in RequirementState
+        # Modify only its own fields in RequirementState in memory
         req_state["clarification_questions"] = combined_questions
         req_state["validation_status"] = "valid" if is_valid else "invalid"
+        req_state["passed_checks"] = result.get("passed_checks", [])
+        req_state["failed_checks"] = result.get("failed_checks", [])
         req_state["current_workflow_state"] = "auditor_node"
-        
-        # Save to database immediately using repository (isolating direct database communication)
-        updates = {
-            "clarification_questions": req_state["clarification_questions"],
-            "validation_status": req_state["validation_status"],
-            "passed_checks": result.get("passed_checks", []),
-            "failed_checks": result.get("failed_checks", []),
-            "current_workflow_state": "auditor_node"
-        }
-        logger.info(f"[DB LOG] [AUDITOR] Saving audit results for project {project_id}...")
-        req_state = await RequirementStateRepository.save_or_update(project_id, updates)
-        logger.info(f"[DB LOG] [AUDITOR] Saving audit results for project {project_id} complete.")
+
+        if is_valid:
+            auditor_msg = "✅ **Compliance Audit Passed!**\nRequirements have successfully validated against all retail banking security and regulatory checks. Ready for PRD compilation."
+        else:
+            q_texts = "\n".join([f"• {q.get('question_text')}" for q in combined_questions if isinstance(q, dict)])
+            auditor_msg = f"⚠️ **Compliance Audit Alert (Auditor Agent):**\nTechnical gaps or missing security constraints were detected in your specifications against our checklist.\n\n**Pending Clarifications:**\n{q_texts or 'None specified'}"
+
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="auditor",
+            message=auditor_msg
+        )
         
         return {
             "requirement_state": req_state,
@@ -595,19 +888,9 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         }
         req_state["clarification_questions"] = fallback_audit["clarification_questions"]
         req_state["validation_status"] = "invalid"
+        req_state["passed_checks"] = []
+        req_state["failed_checks"] = ["AUDIT_PARSE_ERROR"]
         req_state["current_workflow_state"] = "auditor_node"
-        
-        # Save fallback to database
-        updates = {
-            "clarification_questions": req_state["clarification_questions"],
-            "validation_status": req_state["validation_status"],
-            "passed_checks": [],
-            "failed_checks": ["AUDIT_PARSE_ERROR"],
-            "current_workflow_state": "auditor_node"
-        }
-        logger.info(f"[DB LOG] [AUDITOR] Saving fallback audit state for project {project_id}...")
-        req_state = await RequirementStateRepository.save_or_update(project_id, updates)
-        logger.info(f"[DB LOG] [AUDITOR] Saving fallback audit state for project {project_id} complete.")
         
         return {
             "requirement_state": req_state,
@@ -648,12 +931,6 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     if not to_build_stories and existing_prd and existing_diagrams:
         logger.info("Architect Node: All user stories are unchanged. Reusing existing PRD and diagrams without LLM invocation.")
         req_state["current_workflow_state"] = "architect_node"
-        updates = {
-            "generated_prd": existing_prd,
-            "generated_diagrams": existing_diagrams,
-            "current_workflow_state": "architect_node"
-        }
-        req_state = await RequirementStateRepository.save_or_update(project_id, updates)
         return {
             "requirement_state": req_state,
             "prd_markdown": existing_prd,
@@ -680,7 +957,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         )
         
     prompt = PromptTemplate(
-        template=ARCHITECT_PROMPT + dynamic_instructions,
+        template=load_prompt("architect") + dynamic_instructions,
         input_variables=["project_id", "current_version", "validated_requirements", "version_history_summaries"]
     )
     
@@ -695,20 +972,17 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             "version_history_summaries": version_history_summaries
         })
         
-        # Modify only its own fields in RequirementState
+        # Modify only its own fields in RequirementState in memory
         req_state["generated_prd"] = result.get("prd_markdown", "# Core Banking PRD\n\nNo description provided.")
         req_state["generated_diagrams"] = result.get("mermaid_diagram", "graph TD\n  Start --> End")
         req_state["current_workflow_state"] = "architect_node"
-        
-        # Save to database immediately using repository (isolating direct database communication)
-        updates = {
-            "generated_prd": req_state["generated_prd"],
-            "generated_diagrams": req_state["generated_diagrams"],
-            "current_workflow_state": "architect_node"
-        }
-        logger.info(f"[DB LOG] [ARCHITECT] Saving generated PRD/diagrams for project {project_id}...")
-        req_state = await RequirementStateRepository.save_or_update(project_id, updates)
-        logger.info(f"[DB LOG] [ARCHITECT] Saving generated PRD/diagrams for project {project_id} complete.")
+
+        architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="architect",
+            message=architect_msg
+        )
         
         return {
             "requirement_state": req_state,
@@ -720,16 +994,6 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         req_state["generated_prd"] = f"# Core Banking PRD\n\nFailed to compile PRD correctly due to a localized LLM parsing error: {str(e)}."
         req_state["generated_diagrams"] = "graph TD\n  Start --> End"
         req_state["current_workflow_state"] = "architect_node"
-        
-        # Save error outcome to database
-        updates = {
-            "generated_prd": req_state["generated_prd"],
-            "generated_diagrams": req_state["generated_diagrams"],
-            "current_workflow_state": "architect_node"
-        }
-        logger.info(f"[DB LOG] [ARCHITECT] Saving fallback generated PRD/diagrams for project {project_id}...")
-        req_state = await RequirementStateRepository.save_or_update(project_id, updates)
-        logger.info(f"[DB LOG] [ARCHITECT] Saving fallback generated PRD/diagrams for project {project_id} complete.")
         
         return {
             "requirement_state": req_state,
@@ -754,8 +1018,35 @@ def route_on_demand(state: AgentState) -> str:
         logger.info("Routing to architect_node on-demand.")
         return "architect_node"
     else:
-        logger.info("Routing to gatherer_node on-demand.")
-        return "gatherer_node"
+        logger.info("Routing to router_node before Gatherer.")
+        return "router_node"
+
+def route_from_router(state: AgentState) -> str:
+    """
+    Routes based on workflow classification from workflow_router_node.
+    """
+    routing = state.get("workflow_routing") or {}
+    wf = str(routing.get("workflow", "REQUIREMENT")).upper()
+    if wf == "REQUIREMENT":
+        return "requirement_matcher_node"
+    elif wf == "COMMAND":
+        target = state.get("target_agent")
+        if target == "auditor":
+            return "auditor_node"
+        elif target == "architect":
+            return "architect_node"
+        return END
+    else:  # CHAT or QUESTION
+        return END
+
+def route_from_matcher(state: AgentState) -> str:
+    """
+    Routes based on requirement matcher validation status.
+    """
+    req_state = state.get("requirement_state", {})
+    if req_state.get("validation_status") == "invalid":
+        return END
+    return "gatherer_node"
 
 # ==========================================
 # GRAPH COMPILATION
@@ -763,6 +1054,8 @@ def route_on_demand(state: AgentState) -> str:
 workflow = StateGraph(AgentState)
 
 # Append active node configurations
+workflow.add_node("router_node", workflow_router_node)
+workflow.add_node("requirement_matcher_node", requirement_matcher_node)
 workflow.add_node("gatherer_node", gatherer_node)
 workflow.add_node("auditor_node", auditor_node)
 workflow.add_node("architect_node", architect_node)
@@ -772,9 +1065,31 @@ workflow.add_conditional_edges(
     START,
     route_on_demand,
     {
-        "gatherer_node": "gatherer_node",
+        "router_node": "router_node",
         "auditor_node": "auditor_node",
         "architect_node": "architect_node"
+    }
+)
+
+# Route from router_node based on workflow classification
+workflow.add_conditional_edges(
+    "router_node",
+    route_from_router,
+    {
+        "requirement_matcher_node": "requirement_matcher_node",
+        "auditor_node": "auditor_node",
+        "architect_node": "architect_node",
+        END: END
+    }
+)
+
+# Route from requirement_matcher_node to gatherer_node or END (if ambiguous / low confidence)
+workflow.add_conditional_edges(
+    "requirement_matcher_node",
+    route_from_matcher,
+    {
+        "gatherer_node": "gatherer_node",
+        END: END
     }
 )
 
@@ -785,4 +1100,4 @@ workflow.add_edge("architect_node", END)
 
 # Export compiled graph workflow
 prd_workflow = workflow.compile()
-logger.info("StateGraph compiled successfully with on-demand agent routing as `prd_workflow`.")
+logger.info("StateGraph compiled successfully with requirement matcher agent and workflow router.")

@@ -75,3 +75,56 @@ class GatheredRequirements(BaseModel):
     version: int = Field(default=1, description="Incremental version counter")
     user_stories: List[UserStoryModel] = Field(..., description="Granular product backlog items")
 
+
+# ==========================================
+# 4. REQUIREMENT INTENT DETECTION SCHEMA
+# ==========================================
+
+class RequirementIntentDetectionResult(BaseModel):
+    intent: str = Field(..., description="Detected user intent: NEW, UPDATE, DELETE, CLARIFY, or NO_CHANGE.")
+    confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
+    reason: str = Field(default="", description="Detailed reasoning explaining the intent classification.")
+    reasoning: Optional[str] = Field(default="", description="Brief reasoning explaining the intent classification.")
+
+
+# ==========================================
+# 5. WORKFLOW ROUTING SCHEMA
+# ==========================================
+
+class WorkflowRoutingResult(BaseModel):
+    workflow: str = Field(..., description="Classified workflow type: CHAT, QUESTION, COMMAND, or REQUIREMENT")
+    confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
+    reason: str = Field(default="", description="Brief explanation of the workflow classification decision.")
+
+# ==========================================
+# 6. REQUIREMENT MATCHER SCHEMA
+# ==========================================
+
+class RequirementMatcherResult(BaseModel):
+    matched_requirement_id: Optional[str] = Field(None, description="The matched requirement/ticket code (e.g. US-001) if applicable, or null.")
+    confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
+    reason: str = Field(default="", description="Detailed reasoning explaining the match.")
+    action: str = Field(..., description="Action recommendation: NEW, UPDATE, DELETE, or CLARIFY")
+    status: Optional[str] = Field(default="MATCHED", description="Status: MATCHED, AMBIGUOUS, or LOW_CONFIDENCE")
+    candidates: Optional[List[str]] = Field(default=None, description="List of candidate requirement IDs if ambiguous.")
+
+
+# ==========================================
+# 7. PENDING ACTION SCHEMA
+# ==========================================
+
+class PendingAction(BaseModel):
+    project_id: str
+    action_type: str
+    target_requirement_id: Optional[str] = None
+    original_user_message: str
+    proposed_changes: Dict[str, Any]
+    affected_user_story_ids: List[str]
+    affected_acceptance_criteria_ids: List[str]
+    workflow_stage: str
+    created_at: datetime
+    expires_at: datetime
+    status: str = "WAITING_CONFIRMATION"
+
+
+

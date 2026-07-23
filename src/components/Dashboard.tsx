@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  HeadingLevel
+} from 'docx';
+import { ConfirmationPanel } from './ConfirmationPanel';
 import { 
   Send, 
   Bot, 
@@ -28,7 +36,11 @@ import {
   ArrowRight,
   Plus,
   Pencil,
-  Save
+  Save,
+  Search,
+  PanelLeft,
+  MessageSquare,
+  Paperclip
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -65,7 +77,7 @@ interface AuditResult {
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'gatherer' | 'auditor' | 'architect' | string;
   content: string;
   timestamp: string;
   isPendingClarifications?: boolean;
@@ -210,7 +222,7 @@ function convertMarkdownToHtml(md: string): string {
 
     // Headers
     if (trimmed.startsWith('# ')) {
-      html += `<h1 style="color: #0f172a; font-family: 'Segoe UI', Arial, sans-serif; font-size: 22pt; margin-top: 24pt; margin-bottom: 12pt; border-bottom: 2px solid #3b82f6; padding-bottom: 6px; font-weight: 800;">${trimmed.slice(2)}</h1>\n`;
+      html += `<h1 style="color: #0f172a; font-family: 'Segoe UI', Arial, sans-serif; font-size: 22pt; margin-top: 24pt; margin-bottom: 12pt; border-bottom: 2px solid #8a6a50; padding-bottom: 6px; font-weight: 800;">${trimmed.slice(2)}</h1>\n`;
       continue;
     }
     if (trimmed.startsWith('## ')) {
@@ -228,7 +240,7 @@ function convertMarkdownToHtml(md: string): string {
 
     // Blockquotes
     if (trimmed.startsWith('> ')) {
-      html += `<blockquote style="border-left: 4px solid #3b82f6; background-color: #f8fafc; padding: 10px 15px; margin: 15px 0; color: #475569; font-style: italic; border-radius: 0 4px 4px 0;">${trimmed.slice(2)}</blockquote>\n`;
+      html += `<blockquote style="border-left: 4px solid #8a6a50; background-color: #f8fafc; padding: 10px 15px; margin: 15px 0; color: #475569; font-style: italic; border-radius: 0 4px 4px 0;">${trimmed.slice(2)}</blockquote>\n`;
       continue;
     }
 
@@ -275,7 +287,7 @@ function convertMarkdownToHtml(md: string): string {
 
   // Apply inline formatting to completed html segments
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong style="font-weight: 700; color: #0f172a;">$1</strong>');
-  html = html.replace(/`(.*?)`/g, '<code style="background-color: #f1f5f9; color: #2563eb; font-family: Consolas, Monaco, monospace; padding: 2px 4px; border-radius: 3px; font-size: 9.5pt; border: 1px solid #e2e8f0;">$1</code>');
+  html = html.replace(/`(.*?)`/g, '<code style="background-color: #f1f5f9; color: #8a6a50; font-family: Consolas, Monaco, monospace; padding: 2px 4px; border-radius: 3px; font-size: 9.5pt; border: 1px solid #e2e8f0;">$1</code>');
 
   return html;
 }
@@ -406,8 +418,34 @@ export default function Dashboard() {
   // Backend Active State
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<any[]>([]);
+  const [pendingActions, setPendingActions] = useState<any[]>([]);
   const [currentVersion, setCurrentVersion] = useState<number>(1);
   const [rawInput, setRawInput] = useState<string>("");
+  const [splitPct, setSplitPct] = useState<number>(42);
+  const [isDraggingSplit, setIsDraggingSplit] = useState<boolean>(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(false);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isDraggingSplit) return;
+    const handleMove = (e: MouseEvent) => {
+      const container = splitContainerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      let pct = ((e.clientX - rect.left) / rect.width) * 100;
+      pct = Math.min(70, Math.max(24, pct));
+      setSplitPct(pct);
+    };
+    const handleUp = () => setIsDraggingSplit(false);
+    document.body.classList.add('is-resizing');
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => {
+      document.body.classList.remove('is-resizing');
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+  }, [isDraggingSplit]);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "init-1",
@@ -424,15 +462,27 @@ export default function Dashboard() {
   ]);
 
   useEffect(() => {
-    const fetchProjects = async () => {
+    let isMounted = true;
+    const fetchProjects = async (retries = 8, delay = 1000) => {
       try {
         const response = await axios.get("/api/projects");
-        setProjects(response.data);
+        if (isMounted) {
+          const projs = response.data || [];
+          setProjects(projs);
+          if (projs.length > 0) {
+            setProjectId(prev => (prev && projs.some((p: any) => p.id === prev)) ? prev : projs[0].id);
+          }
+        }
       } catch (error) {
-        console.error("Error fetching projects:", error);
+        if (retries > 0 && isMounted) {
+          setTimeout(() => fetchProjects(retries - 1, delay), delay);
+        } else {
+          console.error("Error fetching projects:", error);
+        }
       }
     };
     fetchProjects();
+    return () => { isMounted = false; };
   }, []);
 
   // Current Artifact state
@@ -636,6 +686,14 @@ This document specifies the functional, non-functional, and technical requiremen
               return prev;
             });
           }
+
+          // 7. Sync pending actions
+          try {
+            const actionsResponse = await axios.get(`/api/pending-actions/${projectId}`);
+            setPendingActions(actionsResponse.data || []);
+          } catch (err: any) {
+            console.warn("Error fetching pending actions:", err);
+          }
           
           setSyncStatus("Synced with Supabase Cloud");
         }
@@ -731,7 +789,7 @@ This document specifies the functional, non-functional, and technical requiremen
     setEditingSectionId(null);
   };
 
-  const loadProjectState = async (projId: string) => {
+  const loadProjectState = async (projId: string, retries = 5, delay = 1000) => {
     setIsLoading(true);
     setSyncStatus("Loading project state from Supabase...");
     try {
@@ -769,12 +827,44 @@ This document specifies the functional, non-functional, and technical requiremen
         if (data.current_workflow_state) {
           setCurrentAgentNode(data.current_workflow_state);
         }
+
+        if (data.conversation_history && Array.isArray(data.conversation_history) && data.conversation_history.length > 0) {
+          const loadedMessages: ChatMessage[] = data.conversation_history.map((m: any, idx: number) => {
+            const dateObj = m.timestamp ? new Date(m.timestamp) : null;
+            const timeStr = dateObj && !isNaN(dateObj.getTime())
+              ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              : m.timestamp || "10:24 AM";
+
+            const isAuditor = m.role === 'auditor';
+            const isPending = isAuditor && data.validation_status === 'invalid';
+
+            return {
+              id: m.id || `hist-${idx}`,
+              role: m.role || 'assistant',
+              content: m.message || m.content || "",
+              timestamp: timeStr,
+              isPendingClarifications: isPending,
+              auditResultSnapshot: isAuditor ? {
+                is_valid: data.validation_status === 'valid',
+                audit_version_reviewed: data.version_number || 1,
+                clarification_questions: data.clarification_questions || [],
+                passed_checks: data.validation_status === 'valid' ? ["Financial Regulatory Compliance", "Security & Data Masking"] : [],
+                failed_checks: data.validation_status === 'invalid' ? ["Idempotency & De-duplication", "Network Timeouts & Retry Strategies"] : []
+              } : undefined
+            };
+          });
+          setMessages(loadedMessages);
+        }
         
         setSyncStatus("Synced with Supabase Cloud");
       }
     } catch (err: any) {
-      console.warn("Failed to load project state from Supabase:", err.message || err);
-      setSyncStatus("Failed to sync with Supabase. Working locally.");
+      if (retries > 0) {
+        setTimeout(() => loadProjectState(projId, retries - 1, delay), delay);
+      } else {
+        console.warn("Failed to load project state from Supabase:", err.message || err);
+        setSyncStatus("Failed to sync with Supabase. Working locally.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -1103,26 +1193,35 @@ To run compliance checks on these updated specifications, please click the **Val
   };
 
   // Submit Answer to Clarifications Form
-  const handleSubmitClarifications = (e: React.FormEvent) => {
+  const handleSubmitClarifications = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Concatenate all answers into a descriptive raw text
-    const answersArray = Object.entries(clarificationAnswers)
-      .map(([key, val], idx) => {
-        const question = auditResult.clarification_questions?.[idx];
-        return question ? `[Category: ${question.checklist_category}] Question: ${question.question_text} -> Answer: ${val}` : '';
-      })
-      .filter(item => item !== "");
+    if (Object.keys(clarificationAnswers).length === 0) return;
 
-    if (answersArray.length === 0) return;
-
-    const fullClarificationPrompt = `Here are the formal audit clarifications for version ${currentVersion}:\n\n${answersArray.join("\n\n")}`;
-    
-    // Clear form answers
-    setClarificationAnswers({});
-    
-    // Dispatch as user message to the workflow
-    handleSendMessage(fullClarificationPrompt);
+    try {
+      setSyncStatus("Submitting clarifications...");
+      const res = await axios.post('/api/clarification/submit', {
+        project_id: projectId,
+        answers: clarificationAnswers
+      });
+      if (res.data) {
+        setClarificationAnswers({});
+        if (res.data.current_workflow_state) {
+          setCurrentAgentNode(res.data.current_workflow_state);
+        }
+        if (res.data.clarification_questions) {
+          setAuditResult(prev => ({
+            ...prev,
+            is_valid: res.data.validation_status === "valid",
+            clarification_questions: res.data.clarification_questions
+          }));
+        }
+        if (projectId) loadProjectState(projectId);
+        setSyncStatus("Clarifications submitted successfully");
+      }
+    } catch (err: any) {
+      console.error("Error submitting clarifications:", err);
+      setSyncStatus("Failed to submit clarifications");
+    }
   };
 
   const handleUpdateAnswerValue = (key: string, value: string) => {
@@ -1133,107 +1232,280 @@ To run compliance checks on these updated specifications, please click the **Val
   };
 
   // Export functions
-  const handleDownloadDocx = () => {
-    setSyncStatus("Generating high-fidelity DOCX document...");
-    setTimeout(() => {
-      const formattedHtml = convertMarkdownToHtml(prdMarkdown);
-      const docHtml = `
-        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-        <head>
-          <title>${structuredRequirements.epic_name || "Product Requirement Document"}</title>
-          <!--[if gte mso 9]>
-          <xml>
-            <w:WordDocument>
-              <w:View>Print</w:View>
-              <w:Zoom>100</w:Zoom>
-              <w:DoNotOptimizeForBrowser/>
-            </w:WordDocument>
-          </xml>
-          <![endif]-->
-          <style>
-            @page {
-              size: 8.5in 11in;
-              margin: 1.0in 1.0in 1.0in 1.0in;
-              mso-header-margin: .5in;
-              mso-footer-margin: .5in;
-              mso-paper-source: 0;
-            }
-            body {
-              font-family: "Segoe UI", Arial, sans-serif;
-              font-size: 11pt;
-              line-height: 1.6;
-              color: #334155;
-            }
-            h1 {
-              color: #1e3a8a;
-              font-family: "Segoe UI", Arial, sans-serif;
-              font-size: 24pt;
-              font-weight: bold;
-              margin-top: 24pt;
-              margin-bottom: 12pt;
-              border-bottom: 3px double #3b82f6;
-              padding-bottom: 8pt;
-            }
-            h2 {
-              color: #0f172a;
-              font-family: "Segoe UI", Arial, sans-serif;
-              font-size: 18pt;
-              font-weight: bold;
-              margin-top: 18pt;
-              margin-bottom: 9pt;
-              border-bottom: 1px solid #cbd5e1;
-              padding-bottom: 4px;
-            }
-            h3 {
-              color: #1e293b;
-              font-family: "Segoe UI", Arial, sans-serif;
-              font-size: 14pt;
-              font-weight: bold;
-              margin-top: 14pt;
-              margin-bottom: 6pt;
-            }
-            p, li {
-              color: #334155;
-              font-size: 11pt;
-              line-height: 1.6;
-            }
-            blockquote {
-              border-left: 4px solid #3b82f6;
-              background-color: #f8fafc;
-              padding: 10px 15px;
-              margin: 15px 0;
-              color: #475569;
-              font-style: italic;
-            }
-            code {
-              background-color: #f1f5f9;
-              color: #2563eb;
-              font-family: Consolas, monospace;
-              padding: 2px 4px;
-              border-radius: 3px;
-              font-size: 10pt;
-              border: 1px solid #e2e8f0;
-            }
-          </style>
-        </head>
-        <body>
-          <div style="margin-bottom: 24pt; border-bottom: 3px double #3b82f6; padding-bottom: 12pt;">
-            <p style="font-size: 9pt; text-transform: uppercase; letter-spacing: 0.1em; color: #2563eb; font-weight: bold; margin: 0 0 4pt 0;">Enterprise Requirements Specification</p>
-            <h1 style="font-size: 26pt; font-weight: 800; color: #1e3a8a; margin: 0 0 6pt 0; border: none; padding: 0;">${structuredRequirements.epic_name || "PromptPay Merchant Settlement Engine"}</h1>
-            <p style="font-size: 10pt; color: #64748b; font-style: italic; margin: 0;">Project Reference: ${projectId} &bull; Document Version: V${currentVersion}.0 &bull; Exported: ${new Date().toLocaleDateString()}</p>
-          </div>
-          ${formattedHtml}
-        </body>
-        </html>
-      `;
-      
-      const blob = new Blob(['\ufeff' + docHtml], { type: 'application/msword;charset=utf-8' });
+  const parseInlineFormatting = (text: string): TextRun[] => {
+    if (!text) return [new TextRun({ text: "" })];
+    const runs: TextRun[] = [];
+    const tokens = text.split(/(\*\*.*?\*\*|`.*?`)/g);
+    for (const token of tokens) {
+      if (!token) continue;
+      if (token.startsWith('**') && token.endsWith('**') && token.length > 4) {
+        runs.push(new TextRun({ text: token.slice(2, -2), bold: true }));
+      } else if (token.startsWith('`') && token.endsWith('`') && token.length > 2) {
+        runs.push(new TextRun({
+          text: token.slice(1, -1),
+          font: "Consolas",
+          size: 20,
+          shading: { fill: "F1F5F9" }
+        }));
+      } else {
+        runs.push(new TextRun({ text: token }));
+      }
+    }
+    return runs.length > 0 ? runs : [new TextRun({ text })];
+  };
+
+  const convertMarkdownToDocxParagraphs = (md: string): Paragraph[] => {
+    if (!md) return [];
+    const lines = md.split('\n');
+    const paragraphs: Paragraph[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (trimmed.startsWith('# ')) {
+        paragraphs.push(new Paragraph({
+          text: trimmed.slice(2),
+          heading: HeadingLevel.HEADING_1,
+          spacing: { before: 240, after: 120 }
+        }));
+      } else if (trimmed.startsWith('## ')) {
+        paragraphs.push(new Paragraph({
+          text: trimmed.slice(3),
+          heading: HeadingLevel.HEADING_2,
+          spacing: { before: 200, after: 100 }
+        }));
+      } else if (trimmed.startsWith('### ')) {
+        paragraphs.push(new Paragraph({
+          text: trimmed.slice(4),
+          heading: HeadingLevel.HEADING_3,
+          spacing: { before: 160, after: 80 }
+        }));
+      } else if (trimmed.startsWith('#### ')) {
+        paragraphs.push(new Paragraph({
+          text: trimmed.slice(5),
+          heading: HeadingLevel.HEADING_4,
+          spacing: { before: 120, after: 60 }
+        }));
+      } else if (trimmed.startsWith('> ')) {
+        paragraphs.push(new Paragraph({
+          children: parseInlineFormatting(trimmed.slice(2)),
+          indent: { left: 720 },
+          spacing: { before: 120, after: 120 }
+        }));
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        paragraphs.push(new Paragraph({
+          children: parseInlineFormatting(trimmed.slice(2)),
+          bullet: { level: 0 },
+          spacing: { before: 40, after: 40 }
+        }));
+      } else if (trimmed.match(/^\d+\.\s/)) {
+        const content = trimmed.replace(/^\d+\.\s/, '');
+        paragraphs.push(new Paragraph({
+          children: parseInlineFormatting(content),
+          bullet: { level: 0 },
+          spacing: { before: 40, after: 40 }
+        }));
+      } else {
+        paragraphs.push(new Paragraph({
+          children: parseInlineFormatting(trimmed),
+          spacing: { before: 60, after: 60 }
+        }));
+      }
+    }
+
+    return paragraphs;
+  };
+
+  const handleDownloadDocx = async () => {
+    setSyncStatus("Generating valid Office Open XML (.docx) document...");
+    try {
+      const projectName = projects.find(p => p.id === projectId)?.name || "PromptPay Merchant Settlement Engine";
+      const epicName = structuredRequirements.epic_name || "PromptPay Real-Time Merchant Settlement Engine";
+      const userStories = structuredRequirements.user_stories || [];
+
+      const docChildren: Paragraph[] = [];
+
+      // Header & Project Metadata
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({
+              text: "ENTERPRISE REQUIREMENTS SPECIFICATION",
+              bold: true,
+              size: 18,
+              color: "8A6A50",
+            }),
+          ],
+          spacing: { after: 100 },
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({
+              text: projectName,
+              bold: true,
+              size: 36,
+              color: "0F172A",
+            }),
+          ],
+          spacing: { after: 120 },
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Epic: ", bold: true, size: 20 }),
+            new TextRun({ text: epicName, size: 20 }),
+            new TextRun({ text: "   |   Version: ", bold: true, size: 20 }),
+            new TextRun({ text: `v${currentVersion}.0`, size: 20 }),
+            new TextRun({ text: "   |   Project ID: ", bold: true, size: 20 }),
+            new TextRun({ text: projectId || "N/A", size: 20 }),
+          ],
+          spacing: { after: 240 },
+        })
+      );
+
+      // Section 1: Project & Epic Details
+      docChildren.push(
+        new Paragraph({
+          text: "1. Project & Epic Details",
+          heading: HeadingLevel.HEADING_1,
+          spacing: { before: 240, after: 120 },
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Project Name: ", bold: true }),
+            new TextRun({ text: projectName }),
+          ],
+          spacing: { after: 80 },
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Epic Name: ", bold: true }),
+            new TextRun({ text: epicName }),
+          ],
+          spacing: { after: 80 },
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Document Version: ", bold: true }),
+            new TextRun({ text: `V${currentVersion}.0` }),
+          ],
+          spacing: { after: 160 },
+        })
+      );
+
+      // Section 2: User Stories & Acceptance Criteria
+      docChildren.push(
+        new Paragraph({
+          text: "2. Scope of Requirements & User Stories",
+          heading: HeadingLevel.HEADING_1,
+          spacing: { before: 240, after: 120 },
+        })
+      );
+
+      if (userStories.length > 0) {
+        userStories.forEach((us) => {
+          docChildren.push(
+            new Paragraph({
+              text: `${us.ticket_code}: ${us.story_title}`,
+              heading: HeadingLevel.HEADING_2,
+              spacing: { before: 180, after: 80 },
+            }),
+            new Paragraph({
+              children: [
+                new TextRun({ text: "As a ", bold: true, color: "0F172A" }),
+                new TextRun({ text: us.as_a }),
+              ],
+              spacing: { after: 40 },
+            }),
+            new Paragraph({
+              children: [
+                new TextRun({ text: "I want to ", bold: true, color: "0F172A" }),
+                new TextRun({ text: us.i_want_to }),
+              ],
+              spacing: { after: 40 },
+            }),
+            new Paragraph({
+              children: [
+                new TextRun({ text: "So that ", bold: true, color: "0F172A" }),
+                new TextRun({ text: us.so_that }),
+              ],
+              spacing: { after: 80 },
+            })
+          );
+
+          if (us.acceptance_criteria && us.acceptance_criteria.length > 0) {
+            docChildren.push(
+              new Paragraph({
+                children: [
+                  new TextRun({ text: "Acceptance Criteria:", bold: true, color: "1E293B" }),
+                ],
+                spacing: { before: 80, after: 40 },
+              })
+            );
+            us.acceptance_criteria.forEach((ac) => {
+              docChildren.push(
+                new Paragraph({
+                  children: parseInlineFormatting(ac),
+                  bullet: { level: 0 },
+                  spacing: { before: 20, after: 20 },
+                })
+              );
+            });
+          }
+        });
+      } else {
+        docChildren.push(
+          new Paragraph({
+            text: "No user stories registered.",
+            spacing: { after: 120 },
+          })
+        );
+      }
+
+      // Section 3: Product Requirement Document (PRD)
+      docChildren.push(
+        new Paragraph({
+          text: "3. Product Requirement Document (PRD)",
+          heading: HeadingLevel.HEADING_1,
+          spacing: { before: 280, after: 120 },
+        })
+      );
+
+      if (prdMarkdown) {
+        const prdParagraphs = convertMarkdownToDocxParagraphs(prdMarkdown);
+        docChildren.push(...prdParagraphs);
+      }
+
+      const doc = new Document({
+        sections: [
+          {
+            properties: {
+              page: {
+                margin: {
+                  top: 1440,
+                  right: 1440,
+                  bottom: 1440,
+                  left: 1440,
+                },
+              },
+            },
+            children: docChildren,
+          },
+        ],
+      });
+
+      const blob = await Packer.toBlob(doc);
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = `PRD-${projectId}-V${currentVersion}.docx`;
+      link.download = `PRD-${projectId || "export"}-V${currentVersion}.docx`;
+      document.body.appendChild(link);
       link.click();
+      document.body.removeChild(link);
       setSyncStatus("PRD Word Document (.docx) downloaded.");
-    }, 800);
+    } catch (err) {
+      console.error("Failed to export DOCX document:", err);
+      setSyncStatus("Failed to generate DOCX document.");
+    }
   };
 
   const handlePrintPDF = () => {
@@ -1283,13 +1555,13 @@ To run compliance checks on these updated specifications, please click the **Val
             padding: 0;
           }
           .header-cover {
-            border-bottom: 2px solid #3b82f6;
+            border-bottom: 2px solid #8a6a50;
             padding-bottom: 16px;
             margin-bottom: 28px;
           }
           .header-tag {
             font-size: 8.5pt;
-            color: #2563eb;
+            color: #8a6a50;
             text-transform: uppercase;
             letter-spacing: 0.08em;
             font-weight: 700;
@@ -1343,7 +1615,7 @@ To run compliance checks on these updated specifications, please click the **Val
             margin: 14px 0;
             padding: 10px 14px;
             background-color: #f8fafc;
-            border-left: 4px solid #3b82f6;
+            border-left: 4px solid #8a6a50;
             border-radius: 0 6px 6px 0;
             font-style: italic;
             color: #475569;
@@ -1356,7 +1628,7 @@ To run compliance checks on these updated specifications, please click the **Val
             font-family: 'JetBrains Mono', monospace;
             font-size: 8.5pt;
             background-color: #f1f5f9;
-            color: #2563eb;
+            color: #8a6a50;
             padding: 2px 4px;
             border-radius: 3px;
             border: 1px solid #e2e8f0;
@@ -1419,49 +1691,95 @@ To run compliance checks on these updated specifications, please click the **Val
         <div className="absolute bottom-[10%] right-[-5%] w-[40%] h-[40%] bg-primary/2 blur-[120px] rounded-full"></div>
       </div>
 
+      {/* PROJECT HISTORY SIDEBAR */}
+      <aside
+        className={`flex flex-col bg-background border-r border-outline shrink-0 transition-[width] duration-200 ease-out ${historyCollapsed ? 'w-[68px]' : 'w-[248px]'}`}
+      >
+        <div className="p-3 flex items-center justify-between">
+          <div className={`flex items-center gap-2 overflow-hidden ${historyCollapsed ? 'w-0 opacity-0' : 'opacity-100'}`}>
+            <div className="w-6.5 h-6.5 rounded-lg bg-primary flex items-center justify-center text-on-primary text-[10px] font-bold shrink-0">Ai</div>
+            <span className="text-[13px] font-bold text-on-surface whitespace-nowrap">Agentic-AI</span>
+          </div>
+          <button
+            className="w-8 h-8 rounded-xl border border-outline bg-surface flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+            onClick={() => setHistoryCollapsed(v => !v)}
+            title="ย่อ/ขยายแถบประวัติ"
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-2">
+          <button
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${historyCollapsed ? 'justify-center' : ''}`}
+            title="โปรเจกต์ใหม่"
+            onClick={async () => {
+              const name = prompt("Enter project name:");
+              if (name) {
+                await axios.post("/api/projects", { name });
+                const response = await axios.get("/api/projects");
+                setProjects(response.data);
+              }
+            }}
+          >
+            <Plus className="w-4 h-4 shrink-0" />
+            {!historyCollapsed && <span>โปรเจกต์ใหม่</span>}
+          </button>
+          <button className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors ${historyCollapsed ? 'justify-center' : ''}`}>
+            <Search className="w-4 h-4 shrink-0" />
+            {!historyCollapsed && <span>ค้นหาโปรเจกต์</span>}
+          </button>
+        </div>
+
+        {!historyCollapsed && (
+          <div className="px-4 pt-4 pb-1.5 text-[11px] font-bold tracking-wide uppercase text-on-surface-variant/70">
+            โปรเจกต์ล่าสุด
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
+          {projects.length === 0 && !historyCollapsed && (
+            <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">ยังไม่มีโปรเจกต์</div>
+          )}
+          {projects.map(p => (
+            <button
+              key={p.id}
+              onClick={() => setProjectId(p.id)}
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] mb-0.5 transition-colors truncate ${historyCollapsed ? 'justify-center' : ''} ${
+                projectId === p.id ? 'bg-primary/10 text-primary font-semibold' : 'text-on-surface hover:bg-surface'
+              }`}
+              title={p.name}
+            >
+              <MessageSquare className="w-4 h-4 shrink-0" />
+              {!historyCollapsed && <span className="truncate">{p.name}</span>}
+            </button>
+          ))}
+        </div>
+      </aside>
+
       {/* HORIZONTAL SPLIT GRID WORKSPACE */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden" ref={splitContainerRef}>
         
         {/* LEFT PANEL: 40% Width - Conversational Timeline & Human-In-The-Loop */}
-        <section className="w-[42%] flex flex-col bg-surface border-r border-outline relative z-10 shrink-0">
+        <section className="flex flex-col bg-surface border-r border-outline relative z-10 shrink-0" style={{ width: `${splitPct}%` }}>
           {/* Section Header */}
           <div className="p-4 border-b border-outline flex items-center justify-between bg-glass-bg backdrop-blur-md">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
                 <Network className="text-primary w-4.5 h-4.5" />
               </div>
-              <select 
-                className="text-sm font-bold text-on-surface bg-transparent border border-outline rounded-lg p-2"
-                value={projectId || ""} 
-                onChange={(e) => setProjectId(e.target.value)}
-              >
-                <option value="">Select a project</option>
-                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-              <button 
-                className="text-xs bg-primary text-on-primary px-2 py-1 rounded"
-                onClick={async () => {
-                  const name = prompt("Enter project name:");
-                  if (name) {
-                    await axios.post("/api/projects", { 
-                        name
-                    });
-                    // Refresh projects
-                    const response = await axios.get("/api/projects");
-                    setProjects(response.data);
-                  }
-                }}
-              >
-                + New
-              </button>
-            </div>
-                <h2 className="font-headline-md text-sm font-bold text-on-surface">Conversational Analyst Workspace</h2>
+              <div className="min-w-0">
+                <h2 className="font-headline-md text-sm font-bold text-on-surface truncate">
+                  {projects.find(p => p.id === projectId)?.name || "Conversational Analyst Workspace"}
+                </h2>
                 <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <p className="text-[10.5px] text-on-surface-variant font-mono">Agent Graph Ready • {syncStatus}</p>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+                  <p className="text-[10.5px] text-on-surface-variant font-mono truncate">Agent Graph Ready • {syncStatus}</p>
                 </div>
-            
-            <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+              </div>
+            </div>
+
+            <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider shrink-0 ml-3">
               {isProcessing ? "Processing" : "Idle"}
             </span>
           </div>
@@ -1498,7 +1816,7 @@ To run compliance checks on these updated specifications, please click the **Val
                   >
                     {/* Bot avatar */}
                     {!isUser && (
-                      <div className="w-8.5 h-8.5 rounded-lg bg-primary flex items-center justify-center shrink-0 shadow-md shadow-primary/20">
+                      <div className="w-8.5 h-8.5 rounded-xl bg-primary flex items-center justify-center shrink-0 shadow-md shadow-primary/20">
                         <Bot className="text-on-primary w-5 h-5" />
                       </div>
                     )}
@@ -1510,7 +1828,7 @@ To run compliance checks on these updated specifications, please click the **Val
                       </span>
 
                       {/* Chat text box */}
-                      <div className={`p-4 rounded-xl shadow-sm border text-sm leading-relaxed ${
+                      <div className={`p-4 rounded-2xl shadow-sm border text-sm leading-relaxed ${
                         isUser 
                           ? 'bg-primary text-on-primary border-primary rounded-tr-none' 
                           : 'bg-primary/5 text-on-surface border-primary/15 rounded-tl-none'
@@ -1524,7 +1842,7 @@ To run compliance checks on these updated specifications, please click the **Val
                           initial={{ opacity: 0, scale: 0.95 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ delay: 0.1 }}
-                          className="w-full mt-3 bg-white border-2 border-primary/20 rounded-xl p-4.5 shadow-lg relative overflow-hidden"
+                          className="w-full mt-3 bg-white border-2 border-primary/20 rounded-2xl p-4.5 shadow-lg relative overflow-hidden"
                         >
                           {/* Aureate golden backdrop overlay */}
                           <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent pointer-events-none"></div>
@@ -1542,7 +1860,7 @@ To run compliance checks on these updated specifications, please click the **Val
 
                           <form onSubmit={handleSubmitClarifications} className="space-y-4 relative z-10">
                             {msg.auditResultSnapshot.clarification_questions.map((q, idx) => (
-                              <div key={idx} className="space-y-1.5 bg-black/5 p-3 rounded-lg border border-black/5">
+                              <div key={idx} className="space-y-1.5 bg-black/5 p-3 rounded-xl border border-black/5">
                                 <div className="flex items-center justify-between">
                                   <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-1.5 py-0.5 rounded">
                                     {q.checklist_category}
@@ -1560,14 +1878,14 @@ To run compliance checks on these updated specifications, please click the **Val
                                   value={clarificationAnswers[`q-${idx}`] || ""}
                                   onChange={(e) => handleUpdateAnswerValue(`q-${idx}`, e.target.value)}
                                   placeholder="e.g. 180 seconds cached via Redis key prefix 'idemp:...'"
-                                  className="w-full bg-white border border-outline rounded-md px-3 py-1.5 text-xs text-on-surface focus:ring-1 focus:ring-primary/40 focus:border-primary placeholder:text-on-surface-variant/40 outline-none"
+                                  className="w-full bg-white border border-outline rounded-lg px-3 py-1.5 text-xs text-on-surface focus:ring-1 focus:ring-primary/40 focus:border-primary placeholder:text-on-surface-variant/40 outline-none"
                                 />
                               </div>
                             ))}
 
                             <button
                               type="submit"
-                              className="w-full bg-primary hover:brightness-110 active:scale-[0.99] text-on-primary py-2 rounded-lg font-label-md text-xs hover:brightness-110 transition-all font-bold shadow-md shadow-primary/20 flex items-center justify-center gap-1.5"
+                              className="w-full bg-primary hover:brightness-110 active:scale-[0.99] text-on-primary py-2 rounded-xl font-label-md text-xs hover:brightness-110 transition-all font-bold shadow-md shadow-primary/20 flex items-center justify-center gap-1.5"
                             >
                               <CheckCircle2 className="w-4 h-4" />
                               <span>Submit Clarifications & Re-Audit</span>
@@ -1608,7 +1926,7 @@ To run compliance checks on these updated specifications, please click the **Val
               <button
                 onClick={handleValidateRequirements}
                 disabled={isLoading || isProcessing}
-                className="flex-1 px-3 py-2 rounded-lg border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                className="flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <CheckCircle2 className="w-3.5 h-3.5 text-primary" />
                 <span>Validate Requirements</span>
@@ -1616,7 +1934,7 @@ To run compliance checks on these updated specifications, please click the **Val
               <button
                 onClick={handleGeneratePRD}
                 disabled={isLoading || isProcessing}
-                className="flex-1 px-3 py-2 rounded-lg bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                className="flex-1 px-3 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <FileText className="w-3.5 h-3.5" />
                 <span>Generate PRD</span>
@@ -1624,7 +1942,13 @@ To run compliance checks on these updated specifications, please click the **Val
             </div>
 
             <div className="flex items-center gap-3 bg-black/5 rounded-full px-4 py-2.5 border border-outline focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/10 transition-all">
-              <span className="material-symbols-outlined text-on-surface-variant text-[20px] select-none">attach_file</span>
+              <button
+                type="button"
+                title="แนบไฟล์"
+                className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+              >
+                <Paperclip className="w-4.5 h-4.5" />
+              </button>
               <input
                 type="text"
                 value={rawInput}
@@ -1652,6 +1976,12 @@ To run compliance checks on these updated specifications, please click the **Val
             </div>
           </div>
         </section>
+
+        {/* RESIZABLE DIVIDER */}
+        <div
+          className={`resize-divider ${isDraggingSplit ? 'is-dragging' : ''}`}
+          onMouseDown={() => setIsDraggingSplit(true)}
+        />
 
         {/* RIGHT PANEL: 60% Width - Live Workspace Previews (Tabbed System) */}
         <section className="flex-1 flex flex-col bg-background relative overflow-hidden">
@@ -1699,7 +2029,7 @@ To run compliance checks on these updated specifications, please click the **Val
             <div className="flex items-center gap-2 no-print">
               <button 
                 onClick={handleDownloadDocx}
-                className="px-3 py-1.5 rounded-lg bg-white border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface transition-all flex items-center gap-1.5 cursor-pointer font-semibold shadow-sm"
+                className="px-3 py-1.5 rounded-xl bg-white border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface transition-all flex items-center gap-1.5 cursor-pointer font-semibold shadow-sm"
               >
                 <Download className="w-3.5 h-3.5 text-primary" />
                 <span>Export Word (DOCX)</span>
@@ -1707,7 +2037,7 @@ To run compliance checks on these updated specifications, please click the **Val
 
               <button 
                 onClick={handlePrintPDF}
-                className="px-3 py-1.5 rounded-lg bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary/15 animate-none"
+                className="px-3 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary/15 animate-none"
               >
                 <Printer className="w-3.5 h-3.5" />
                 <span>Export PDF</span>
@@ -1718,8 +2048,84 @@ To run compliance checks on these updated specifications, please click the **Val
           {/* RIGHT VIEW WINDOW */}
           <div id="printable-document" className="flex-1 overflow-y-auto p-8 md:p-12 custom-scrollbar">
             
+            {/* Confirmation Panel Area */}
+            {pendingActions.map(action => (
+                <ConfirmationPanel 
+                    key={action.id} 
+                    action={action} 
+                    onConfirm={() => {
+                        setPendingActions(prev => prev.filter(a => a.id !== action.id));
+                        if(projectId) loadProjectState(projectId);
+                    }}
+                    onCancel={() => {
+                        setPendingActions(prev => prev.filter(a => a.id !== action.id));
+                    }}
+                />
+            ))}
+
+            {/* Dedicated Clarification Section displayed ONLY when currentAgentNode === WAITING_CLARIFICATION */}
+            {currentAgentNode === "WAITING_CLARIFICATION" && auditResult.clarification_questions && auditResult.clarification_questions.some(q => !q.is_resolved) && (
+              <motion.div 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="max-w-4xl mx-auto mb-8 bg-white border-2 border-primary/30 rounded-3xl p-6 shadow-xl relative overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="flex items-center gap-3 mb-4 relative z-10">
+                  <div className="w-10 h-10 rounded-2xl bg-primary/10 flex items-center justify-center text-primary">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-heading font-bold text-base text-on-surface">
+                      Compliance Audit Clarification Required (Waiting Clarification)
+                    </h2>
+                    <p className="text-xs text-on-surface-variant">
+                      Please provide answers to the unresolved clarification questions below to clear the technical audit roadblock.
+                    </p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleSubmitClarifications} className="space-y-4 relative z-10">
+                  {auditResult.clarification_questions
+                    .map((q, idx) => ({ q, idx }))
+                    .filter(({ q }) => !q.is_resolved)
+                    .map(({ q, idx }) => (
+                      <div key={idx} className="bg-slate-50 border border-outline/60 p-4 rounded-2xl space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-2 py-0.5 rounded">
+                            {q.checklist_category}
+                          </span>
+                          <span className="text-[10px] font-mono text-on-surface-variant font-semibold">
+                            Target: {q.target_user_story_id || "General"}
+                          </span>
+                        </div>
+                        <p className="text-sm font-medium text-on-surface">
+                          {q.question_text}
+                        </p>
+                        <input
+                          type="text"
+                          required
+                          value={clarificationAnswers[`q-${idx}`] || ""}
+                          onChange={(e) => handleUpdateAnswerValue(`q-${idx}`, e.target.value)}
+                          placeholder="Enter your professional resolution or answer here..."
+                          className="w-full bg-white border border-outline rounded-xl px-3.5 py-2 text-xs text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
+                        />
+                      </div>
+                    ))}
+
+                  <button
+                    type="submit"
+                    className="w-full bg-primary hover:brightness-110 active:scale-[0.99] text-on-primary py-3 rounded-2xl font-label-md text-xs font-bold shadow-lg shadow-primary/20 flex items-center justify-center gap-2 cursor-pointer transition-all"
+                  >
+                    <CheckCircle2 className="w-4.5 h-4.5" />
+                    <span>Submit Answers & Re-Audit</span>
+                  </button>
+                </form>
+              </motion.div>
+            )}
+
             {/* Metadata card preview */}
-            <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-xl flex flex-wrap gap-4 items-center justify-between shadow-sm">
+            <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-2xl flex flex-wrap gap-4 items-center justify-between shadow-sm">
               <div className="flex items-center gap-3">
                 <span className="bg-primary/15 text-primary text-[10.5px] px-2.5 py-1 rounded border border-primary/25 font-bold uppercase tracking-wider font-mono">
                   {projectId}
@@ -1735,7 +2141,7 @@ To run compliance checks on these updated specifications, please click the **Val
                   State: {auditResult.is_valid ? (
                     <span className="text-emerald-600 font-bold">Passed Technical Audit</span>
                   ) : (
-                    <span className="text-amber-600 font-bold">Unresolved Queries Pending</span>
+                    <span className="text-orange-600 font-bold">Unresolved Queries Pending</span>
                   )}
                 </span>
               </div>
@@ -1747,7 +2153,7 @@ To run compliance checks on these updated specifications, please click the **Val
               {activeTab === 'prd' && (
                 <div className="space-y-8 animate-fadeIn">
                   {/* Styled markdown content rendering */}
-                  <article className="bg-white p-6 md:p-10 rounded-2xl border border-outline shadow-sm prose prose-neutral max-w-none">
+                  <article className="bg-white p-6 md:p-10 rounded-3xl border border-outline shadow-sm prose prose-neutral max-w-none">
                     
                     {/* Header decorative accent */}
                     <div className="h-1 w-24 bg-primary mb-6 rounded-full no-print"></div>
@@ -1770,8 +2176,8 @@ To run compliance checks on these updated specifications, please click the **Val
                               key={section.id} 
                               className={`relative group pt-8 first:pt-0 transition-all duration-200 ${
                                 isEditing 
-                                  ? 'bg-slate-50/50 p-6 rounded-xl border border-primary/20 shadow-sm' 
-                                  : 'border-transparent hover:bg-slate-50/20 px-2 rounded-xl'
+                                  ? 'bg-slate-50/50 p-6 rounded-2xl border border-primary/20 shadow-sm' 
+                                  : 'border-transparent hover:bg-slate-50/20 px-2 rounded-2xl'
                               }`}
                             >
                               {/* Header Area with Title & Edit button */}
@@ -1787,7 +2193,7 @@ To run compliance checks on these updated specifications, please click the **Val
                                       setEditingSectionId(section.id);
                                       setEditBuffer(safeContent);
                                     }}
-                                    className="opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold"
+                                    className="opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold"
                                   >
                                     <Pencil className="w-3.5 h-3.5 text-primary" />
                                     <span>Edit</span>
@@ -1810,7 +2216,7 @@ To run compliance checks on these updated specifications, please click the **Val
                                       e.target.style.height = 'auto';
                                       e.target.style.height = `${e.target.scrollHeight}px`;
                                     }}
-                                    className="w-full text-sm font-sans text-slate-800 bg-white border border-slate-200 rounded-xl p-4.5 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all resize-y custom-scrollbar shadow-inner min-h-[120px]"
+                                    className="w-full text-sm font-sans text-slate-800 bg-white border border-slate-200 rounded-2xl p-4.5 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all resize-y custom-scrollbar shadow-inner min-h-[120px]"
                                     placeholder="Enter section content in markdown..."
                                   />
                                   <div className="flex items-center justify-between pt-3 border-t border-slate-100 mt-2">
@@ -1823,13 +2229,13 @@ To run compliance checks on these updated specifications, please click the **Val
                                           setEditingSectionId(null);
                                           setEditBuffer("");
                                         }}
-                                        className="px-3.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-sm transition-all cursor-pointer"
+                                        className="px-3.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-sm transition-all cursor-pointer"
                                       >
                                         Cancel
                                       </button>
                                       <button
                                         onClick={() => handleSaveSection(section.id, editBuffer)}
-                                        className="px-4 py-1.5 rounded-lg bg-primary text-on-primary hover:brightness-110 text-xs font-semibold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+                                        className="px-4 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 text-xs font-semibold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
                                       >
                                         <Save className="w-3.5 h-3.5" />
                                         <span>Save Changes</span>
@@ -1856,7 +2262,7 @@ To run compliance checks on these updated specifications, please click the **Val
                 <div className="space-y-6 animate-fadeIn">
                   
                   {/* Visual SVG diagram view with interactive controls */}
-                  <div className="bg-white rounded-2xl border border-outline p-6 shadow-sm overflow-hidden relative">
+                  <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm overflow-hidden relative">
                     <div className="flex items-center justify-between mb-4 pb-3 border-b border-black/5">
                       <div className="flex items-center gap-2">
                         <Network className="text-primary w-5 h-5 animate-pulse" />
@@ -1865,7 +2271,7 @@ To run compliance checks on these updated specifications, please click the **Val
                           <p className="text-[11px] text-on-surface-variant font-mono">Rendering: sequenceDiagram • Real-time Active Flows</p>
                         </div>
                       </div>
-                      <div className="flex bg-black/5 rounded-lg p-1">
+                      <div className="flex bg-black/5 rounded-xl p-1">
                         <button 
                           onClick={() => setDiagramZoom(prev => Math.max(70, prev - 15))}
                           className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
@@ -1884,7 +2290,7 @@ To run compliance checks on these updated specifications, please click the **Val
 
                     {/* Interactive Animated SVG Stage representing the compiled Mermaid output */}
                     <div 
-                      className="w-full flex items-center justify-center p-6 bg-slate-950/95 rounded-xl overflow-x-auto transition-transform duration-300"
+                      className="w-full flex items-center justify-center p-6 bg-slate-950/95 rounded-2xl overflow-x-auto transition-transform duration-300"
                       style={{ transform: `scale(${diagramZoom / 100})`, transformOrigin: 'top center' }}
                     >
                       <svg className="w-full max-w-2xl text-white font-mono" viewBox="0 0 650 360" fill="none">
@@ -1901,8 +2307,8 @@ To run compliance checks on these updated specifications, please click the **Val
                           {/* Client Browser */}
                           <rect 
                             x="20" y="10" width="120" height="35" rx="5" 
-                            fill={hoverNode === "client" ? "#b45309" : "#1e293b"} 
-                            stroke="#b45309" strokeWidth="1.5"
+                            fill={hoverNode === "client" ? "#8a6a50" : "#1e293b"} 
+                            stroke="#8a6a50" strokeWidth="1.5"
                             className="cursor-pointer transition-colors"
                             onMouseEnter={() => setHoverNode("client")}
                             onMouseLeave={() => setHoverNode(null)}
@@ -1912,8 +2318,8 @@ To run compliance checks on these updated specifications, please click the **Val
                           {/* FastAPI Backend */}
                           <rect 
                             x="160" y="10" width="120" height="35" rx="5" 
-                            fill={hoverNode === "backend" ? "#b45309" : "#1e293b"} 
-                            stroke="#b45309" strokeWidth="1.5"
+                            fill={hoverNode === "backend" ? "#8a6a50" : "#1e293b"} 
+                            stroke="#8a6a50" strokeWidth="1.5"
                             className="cursor-pointer transition-colors"
                             onMouseEnter={() => setHoverNode("backend")}
                             onMouseLeave={() => setHoverNode(null)}
@@ -1923,8 +2329,8 @@ To run compliance checks on these updated specifications, please click the **Val
                           {/* National Switch */}
                           <rect 
                             x="320" y="10" width="120" height="35" rx="5" 
-                            fill={hoverNode === "switch" ? "#b45309" : "#1e293b"} 
-                            stroke="#b45309" strokeWidth="1.5"
+                            fill={hoverNode === "switch" ? "#8a6a50" : "#1e293b"} 
+                            stroke="#8a6a50" strokeWidth="1.5"
                             className="cursor-pointer transition-colors"
                             onMouseEnter={() => setHoverNode("switch")}
                             onMouseLeave={() => setHoverNode(null)}
@@ -1934,8 +2340,8 @@ To run compliance checks on these updated specifications, please click the **Val
                           {/* Supabase DB */}
                           <rect 
                             x="500" y="10" width="120" height="35" rx="5" 
-                            fill={hoverNode === "db" ? "#b45309" : "#1e293b"} 
-                            stroke="#b45309" strokeWidth="1.5"
+                            fill={hoverNode === "db" ? "#8a6a50" : "#1e293b"} 
+                            stroke="#8a6a50" strokeWidth="1.5"
                             className="cursor-pointer transition-colors"
                             onMouseEnter={() => setHoverNode("db")}
                             onMouseLeave={() => setHoverNode(null)}
@@ -1947,13 +2353,13 @@ To run compliance checks on these updated specifications, please click the **Val
                         {activePacketFlow && (
                           <g>
                             {/* Inbound POST */}
-                            <path d="M 80,90 L 220,90" stroke="#b45309" strokeWidth="2" strokeDasharray="6 4" markerEnd="url(#arrow)">
+                            <path d="M 80,90 L 220,90" stroke="#8a6a50" strokeWidth="2" strokeDasharray="6 4" markerEnd="url(#arrow)">
                               <animate attributeName="stroke-dashoffset" values="50;0" dur="2s" repeatCount="indefinite" />
                             </path>
                             <text x="150" y="82" fill="#f59e0b" fontSize="9" textAnchor="middle">1. POST /api/transaction</text>
 
                             {/* Verification call */}
-                            <path d="M 220,140 L 380,140" stroke="#b45309" strokeWidth="1.5" strokeDasharray="6 4" markerEnd="url(#arrow)">
+                            <path d="M 220,140 L 380,140" stroke="#8a6a50" strokeWidth="1.5" strokeDasharray="6 4" markerEnd="url(#arrow)">
                               <animate attributeName="stroke-dashoffset" values="50;0" dur="2s" repeatCount="indefinite" />
                             </path>
                             <text x="300" y="132" fill="#f59e0b" fontSize="9" textAnchor="middle">2. ISO 20022 message</text>
@@ -1981,13 +2387,13 @@ To run compliance checks on these updated specifications, please click the **Val
                         {/* Baseline anchors */}
                         <defs>
                           <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                            <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309" />
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a6a50" />
                           </marker>
                         </defs>
                       </svg>
                     </div>
 
-                    <div className="mt-4 p-4.5 bg-black/5 rounded-xl border border-black/5 space-y-2">
+                    <div className="mt-4 p-4.5 bg-black/5 rounded-2xl border border-black/5 space-y-2">
                       <div className="flex items-center gap-2 text-xs font-semibold text-on-surface">
                         <Info className="text-primary w-4 h-4 shrink-0" />
                         <span>Visual Diagram Node Explanations:</span>
@@ -1999,12 +2405,12 @@ To run compliance checks on these updated specifications, please click the **Val
                   </div>
 
                   {/* Raw Mermaid code collapse panel */}
-                  <div className="bg-white rounded-2xl border border-outline p-6 shadow-sm">
+                  <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm">
                     <div className="flex items-center gap-2 mb-3">
                       <FileCode className="text-primary w-4.5 h-4.5" />
                       <span className="font-bold text-sm text-on-surface">Raw Mermaid.js Source String</span>
                     </div>
-                    <pre className="p-4 bg-slate-900 text-slate-100 font-mono text-xs rounded-xl overflow-x-auto border border-slate-800">
+                    <pre className="p-4 bg-slate-900 text-slate-100 font-mono text-xs rounded-2xl overflow-x-auto border border-slate-800">
                       <code>{mermaidDiagram}</code>
                     </pre>
                   </div>
@@ -2017,7 +2423,7 @@ To run compliance checks on these updated specifications, please click the **Val
                 <div className="space-y-6 animate-fadeIn">
                   
                   {/* Timeline Selection Stage */}
-                  <div className="bg-white rounded-2xl border border-outline p-6 shadow-sm">
+                  <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm">
                     <h3 className="font-bold text-sm text-on-surface mb-6 flex items-center gap-2">
                       <GitCompare className="text-primary w-4.5 h-4.5" />
                       <span>Requirements Immutable Change Ledger</span>
@@ -2056,7 +2462,7 @@ To run compliance checks on these updated specifications, please click the **Val
                   </div>
 
                   {/* Differential Log Viewer Pane */}
-                  <div className="bg-white rounded-2xl border border-outline p-6 shadow-sm">
+                  <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm">
                     <div className="flex items-center justify-between mb-4 pb-3 border-b border-black/5">
                       <div className="flex items-center gap-2">
                         <GitCompare className="text-primary w-4.5 h-4.5" />
@@ -2071,7 +2477,7 @@ To run compliance checks on these updated specifications, please click the **Val
                     </div>
 
                     <div className="space-y-3">
-                      <div className="p-4 bg-slate-900 rounded-xl border border-slate-800 font-mono text-xs text-slate-100 leading-relaxed">
+                      <div className="p-4 bg-slate-900 rounded-2xl border border-slate-800 font-mono text-xs text-slate-100 leading-relaxed">
                         <div className="text-slate-500 mb-2">/* Differential modification summary */</div>
                         {selectedHistVersion === 1 ? (
                           <>
@@ -2081,7 +2487,7 @@ To run compliance checks on these updated specifications, please click the **Val
                           </>
                         ) : (
                           <>
-                            <div className="text-amber-400 font-semibold">- UPDATE requirements SET version = {selectedHistVersion - 1} WHERE id = '{projectId}';</div>
+                            <div className="text-orange-400 font-semibold">- UPDATE requirements SET version = {selectedHistVersion - 1} WHERE id = '{projectId}';</div>
                             <div className="text-emerald-400 font-semibold">+ UPDATE requirements SET version = {selectedHistVersion}, is_locked = TRUE WHERE id = '{projectId}';</div>
                             <div className="text-emerald-400 font-semibold">+ INSERT INTO audit_results (passed_checks) VALUES ('Idempotency', 'Retry Strategy');</div>
                             <div className="text-slate-400">  -- Requirements compliance validated. Compiled PRD Document finalized.</div>

@@ -1,5 +1,104 @@
 @import "tailwindcss";
 
+@theme {
+  /* Clean, glam brown — deep enough to stay readable as text/borders,
+     used for primary CTAs, active states, and key accents. Keep it rare: it should
+     read as "the one warm accent on the screen", not a wash. */
+  --color-brand: #8a6a50;
+  --color-brand-bright: #a9835f;
+
+  /* Deep navy replaces generic Tailwind blue for secondary info / selection states —
+     keeps the enterprise data-tool feel without competing with the brand accent. */
+  --color-navy-50: #eff3f8;
+  --color-navy-100: #dce5f0;
+  --color-navy-200: #b7cbe0;
+  --color-navy-300: #8fadc9;
+  --color-navy-400: #5d86ac;
+  --color-navy-500: #3c6690;
+  --color-navy-600: #29527a;
+  --color-navy-700: #1e3c5c;
+  --color-navy-800: #16293f;
+  --color-navy-900: #0f1d2c;
+
+  /* Semantic tokens referenced across Dashboard.tsx (bg-primary, text-on-surface, etc.) —
+     wired to the same brown-accent system so both files stay visually consistent. */
+  --color-primary: var(--color-brand);
+  --color-on-primary: #ffffff;
+  --color-surface: #ffffff;
+  --color-background: #faf8f4;
+  --color-on-surface: #171717;
+  --color-on-surface-variant: #8c8676;
+  --color-outline: #ece7dc;
+  --color-glass-bg: rgb(255 255 255 / 0.75);
+}
+
+/* Small type-scale + surface utilities referenced by Dashboard.tsx. */
+.font-label-md {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.font-body-sm {
+  font-size: 0.875rem;
+  line-height: 1.4rem;
+  font-weight: 400;
+}
+
+.glass-panel {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-outline) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--color-outline);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Soft resizable divider between the chat and PRD panels */
+.resize-divider {
+  width: 18px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 20;
+}
+.resize-divider::after {
+  content: "";
+  width: 5px;
+  height: 52px;
+  border-radius: 9999px;
+  background: var(--color-outline);
+  transition: background 0.15s ease, height 0.15s ease;
+}
+.resize-divider:hover::after,
+.resize-divider.is-dragging::after {
+  background: var(--color-brand);
+  height: 68px;
+}
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 @media print {
   /* Hide all interactive and layout items that are not part of the printed content */
   header,

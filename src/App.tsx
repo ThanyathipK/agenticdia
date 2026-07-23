@@ -379,14 +379,14 @@ export default function App() {
             initial={{ opacity: 0, y: -50 }}
             animate={{ opacity: 1, y: 16 }}
             exit={{ opacity: 0, y: -50 }}
-            className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 flex items-center gap-3 px-5 py-3 rounded-lg shadow-xl border bg-slate-900 border-slate-700 text-white max-w-md"
+            className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 flex items-center gap-3 px-5 py-3 rounded-xl shadow-xl border bg-slate-900 border-slate-700 text-white max-w-md"
           >
             {toastType === 'success' ? (
               <div className="w-5 h-5 bg-emerald-500 rounded-full flex items-center justify-center text-slate-900">
                 <Check className="w-3.5 h-3.5 stroke-[3]" />
               </div>
             ) : (
-              <div className="w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center text-slate-900">
+              <div className="w-5 h-5 bg-navy-500 rounded-full flex items-center justify-center text-slate-900">
                 <AlertCircle className="w-3.5 h-3.5 stroke-[3]" />
               </div>
             )}
@@ -399,14 +399,14 @@ export default function App() {
       <header className="h-16 w-full shrink-0 flex items-center justify-between px-6 bg-white border-b border-black/5 z-50">
         {/* Left: Branding & Project Title */}
         <div className="flex items-center gap-4 min-w-[280px]">
-          <span className="material-symbols-outlined text-[#b45309] text-2xl font-bold">Agentic-AI</span>
+          <span className="material-symbols-outlined text-brand text-2xl font-bold">Agentic-AI</span>
           <div className="flex items-center cursor-pointer group">
             <h1 className="font-bold text-slate-900 text-sm">For PRD</h1>
           </div>
         </div>
         
         {/* Right actions: User Avatar */}
-        <div className="w-8 h-8 rounded-full overflow-hidden cursor-pointer border border-[#b45309]/30">
+        <div className="w-8 h-8 rounded-full overflow-hidden cursor-pointer border border-brand/30">
             <img className="w-full h-full object-cover" referrerPolicy="no-referrer" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBDlAC0DOS6EdgtoiiblRYSq4kovm0aGBgk0J0--3PR3DjY3GRR1MSXxugEHy6Z8hnEcHWXmlcYG_KCT2Tzf3RSjEJ_sS6mj0h8OhQRZXWOaNxhjNMAvrg3TB9jZP5Xf2rG1f_yqj9jQelGFRgrZyqoQuf34EIYP3Vkbvpkm0oruz-4pWwgPSZc9V3DcXA-qq_ufzqZc5GCob0H1QKqJcC7AAnES2wcw3fJ6hiY1iVgYEUWrmCkJbVe"/>
         </div>
       </header>
@@ -422,8 +422,8 @@ export default function App() {
             ========================================== */}
             <aside id="sidebar-panel" className="w-72 bg-slate-900 flex flex-col border-r border-slate-800 shrink-0">
           <div className="p-5 border-b border-slate-800">
-            <div className="flex items-center gap-2 text-blue-400 font-bold text-lg">
-              <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-blue-900/30">
+            <div className="flex items-center gap-2 text-navy-400 font-bold text-lg">
+              <div className="w-9 h-9 bg-navy-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-navy-900/30">
                 <Database className="w-5 h-5" />
               </div>
               <div className="flex flex-col">
@@ -442,9 +442,9 @@ export default function App() {
                 <li>
                   <button 
                     onClick={() => setActiveTab('explorer')}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm transition-all ${
                       activeTab === 'explorer' 
-                        ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20' 
+                        ? 'bg-navy-600 text-white font-medium shadow-md shadow-navy-900/20' 
                         : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60'
                     }`}
                   >
@@ -458,9 +458,9 @@ export default function App() {
                 <li>
                   <button 
                     onClick={() => setActiveTab('ddl')}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm transition-all ${
                       activeTab === 'ddl' 
-                        ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20' 
+                        ? 'bg-navy-600 text-white font-medium shadow-md shadow-navy-900/20' 
                         : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60'
                     }`}
                   >
@@ -474,9 +474,9 @@ export default function App() {
                 <li>
                   <button 
                     onClick={() => setActiveTab('ledger')}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm transition-all ${
                       activeTab === 'ledger' 
-                        ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20' 
+                        ? 'bg-navy-600 text-white font-medium shadow-md shadow-navy-900/20' 
                         : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60'
                     }`}
                   >
@@ -484,15 +484,15 @@ export default function App() {
                       <GitCommit className="w-4 h-4" />
                       <span>Immutable Snapshot Ledger</span>
                     </div>
-                    <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.5 rounded font-mono">{versions.length}</span>
+                    <span className="text-[10px] bg-navy-500/10 text-navy-400 border border-navy-500/20 px-1.5 py-0.5 rounded font-mono">{versions.length}</span>
                   </button>
                 </li>
                 <li>
                   <button 
                     onClick={() => setActiveTab('checklist')}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm transition-all ${
                       activeTab === 'checklist' 
-                        ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20' 
+                        ? 'bg-navy-600 text-white font-medium shadow-md shadow-navy-900/20' 
                         : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60'
                     }`}
                   >
@@ -501,7 +501,7 @@ export default function App() {
                       <span>Audit Integrity & Compliance</span>
                     </div>
                     {activeUnresolvedQuestionsCount > 0 ? (
-                      <span className="text-[10px] bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded font-bold animate-pulse">{activeUnresolvedQuestionsCount} PND</span>
+                      <span className="text-[10px] bg-orange-500 text-slate-950 px-1.5 py-0.5 rounded font-bold animate-pulse">{activeUnresolvedQuestionsCount} PND</span>
                     ) : (
                       <span className="text-[10px] bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-bold">PASS</span>
                     )}
@@ -523,7 +523,7 @@ export default function App() {
                       }}
                       className={`w-full flex items-center justify-between px-3 py-1.5 rounded transition-all ${
                         selectedTableName === t.name && activeTab === 'explorer'
-                          ? 'bg-slate-800 text-blue-400 font-semibold'
+                          ? 'bg-slate-800 text-navy-400 font-semibold'
                           : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/30'
                       }`}
                     >
@@ -532,7 +532,7 @@ export default function App() {
                         <span className="font-mono">{t.name}</span>
                       </div>
                       {t.name === 'version_history' && (
-                        <span className="text-[9px] bg-blue-500/20 text-blue-300 font-mono px-1 py-0.1 rounded border border-blue-500/20">JSONB</span>
+                        <span className="text-[9px] bg-navy-500/20 text-navy-300 font-mono px-1 py-0.1 rounded border border-navy-500/20">JSONB</span>
                       )}
                     </button>
                   </li>
@@ -541,7 +541,7 @@ export default function App() {
             </div>
 
             {/* Quick Metrics */}
-            <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800 space-y-3">
+            <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800 space-y-3">
               <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Audit Security Level</div>
               <div className="space-y-1">
                 <div className="flex justify-between text-xs text-slate-300">
@@ -565,7 +565,7 @@ export default function App() {
 
           <div className="p-4 border-t border-slate-800 bg-slate-950 text-xs">
             <div className="flex items-center gap-3">
-              <div className={`w-2.5 h-2.5 rounded-full ${activeUnresolvedQuestionsCount === 0 ? 'bg-emerald-500' : 'bg-amber-400'} animate-pulse`}></div>
+              <div className={`w-2.5 h-2.5 rounded-full ${activeUnresolvedQuestionsCount === 0 ? 'bg-emerald-500' : 'bg-orange-400'} animate-pulse`}></div>
               <div className="flex flex-col">
                 <span className="text-slate-300 font-medium">Database Cloud Ready</span>
                 <span className="text-[10px] text-slate-500">Fast connection tunnel active</span>
@@ -584,7 +584,7 @@ export default function App() {
             <div className="flex flex-col">
               <div className="flex items-center gap-2">
                 <h1 className="text-base font-bold text-slate-900 tracking-tight">Enterprise Core Banking</h1>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 bg-blue-50 text-blue-700 font-bold border border-blue-200 rounded">v1.2.0-STABLE</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 bg-navy-50 text-navy-700 font-bold border border-navy-200 rounded">v1.2.0-STABLE</span>
               </div>
               <p className="text-xs text-slate-500">Requirements Engineering, Postgres Schema DDL & Snapshot Ledger</p>
             </div>
@@ -592,7 +592,7 @@ export default function App() {
             <div className="flex items-center gap-3">
               <button 
                 onClick={copySqlToClipboard}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 active:bg-slate-100 transition-all cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 active:bg-slate-100 transition-all cursor-pointer shadow-sm"
               >
                 {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedSql ? "Copied" : "Copy DDL Code"}</span>
@@ -603,10 +603,10 @@ export default function App() {
                   setIsSchemaLocked(!isSchemaLocked);
                   showToast(isSchemaLocked ? "Schema unlocked. Sandbox mutations allowed." : "Schema safely locked. Snapshot immutability enforced.", "info");
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all border shadow-sm ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl transition-all border shadow-sm ${
                   isSchemaLocked 
                     ? 'bg-emerald-50/50 text-emerald-700 border-emerald-300 hover:bg-emerald-100/50'
-                    : 'bg-amber-50/50 text-amber-700 border-amber-300 hover:bg-amber-100/50'
+                    : 'bg-orange-50/50 text-orange-700 border-orange-300 hover:bg-orange-100/50'
                 }`}
               >
                 {isSchemaLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
@@ -617,7 +617,7 @@ export default function App() {
                 onClick={() => {
                   showToast("Initializing schema check... all constraints resolved in 0.2ms. Supabase sync OK.", "success");
                 }}
-                className="flex items-center gap-1.5 px-4.5 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 shadow-md shadow-blue-500/20 active:translate-y-0.5 transition-all"
+                className="flex items-center gap-1.5 px-4.5 py-1.5 text-xs font-semibold text-white bg-navy-600 rounded-xl hover:bg-navy-700 shadow-md shadow-navy-500/20 active:translate-y-0.5 transition-all"
               >
                 <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
                 <span>Verify Live Schema</span>
@@ -635,10 +635,10 @@ export default function App() {
                   TAB: POSTGRESQL DDL (init.sql)
               ========================================== */}
               {activeTab === 'ddl' && (
-                <div className="flex-1 flex flex-col bg-slate-950 rounded-xl shadow-lg overflow-hidden border border-slate-800">
+                <div className="flex-1 flex flex-col bg-slate-950 rounded-2xl shadow-lg overflow-hidden border border-slate-800">
                   <div className="bg-slate-900 px-5 py-3 border-b border-slate-800 flex justify-between items-center shrink-0">
                     <div className="flex items-center gap-3">
-                      <span className="flex w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+                      <span className="flex w-2.5 h-2.5 rounded-full bg-navy-500"></span>
                       <span className="text-xs font-mono font-bold text-slate-200">init.sql - Postgres DDL</span>
                     </div>
                     <div className="flex items-center gap-3">
@@ -649,7 +649,7 @@ export default function App() {
                           placeholder="Search lines or constraints..."
                           value={sqlSearch}
                           onChange={(e) => setSqlSearch(e.target.value)}
-                          className="pl-8 pr-3 py-1 bg-slate-950 border border-slate-800 rounded text-xs text-slate-300 font-mono focus:outline-none focus:border-blue-500 w-52 transition-all"
+                          className="pl-8 pr-3 py-1 bg-slate-950 border border-slate-800 rounded text-xs text-slate-300 font-mono focus:outline-none focus:border-navy-500 w-52 transition-all"
                         />
                       </div>
                       <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/50 border border-emerald-900 px-2 py-0.5 rounded uppercase">221 Lines</span>
@@ -667,7 +667,7 @@ export default function App() {
                           <div 
                             key={i} 
                             className={`py-0.5 px-2 rounded -mx-2 flex ${
-                              highlighted ? 'bg-amber-500/20 text-white font-bold border-l-2 border-amber-500' : 'hover:bg-slate-900/30'
+                              highlighted ? 'bg-orange-500/20 text-white font-bold border-l-2 border-orange-500' : 'hover:bg-slate-900/30'
                             }`}
                           >
                             <span className="text-slate-600 select-none w-8 shrink-0 text-right pr-3 font-mono text-[10px]">{i + 1}</span>
@@ -681,7 +681,7 @@ export default function App() {
                     <span>Target: Supabase PostgreSQL (uuid-ossp enabled)</span>
                     <button 
                       onClick={copySqlToClipboard}
-                      className="text-blue-400 hover:text-blue-300 flex items-center gap-1 font-semibold"
+                      className="text-navy-400 hover:text-navy-300 flex items-center gap-1 font-semibold"
                     >
                       <Copy className="w-3.5 h-3.5" />
                       <span>Copy Full DDL Script</span>
@@ -697,11 +697,11 @@ export default function App() {
                 <div className="flex flex-col gap-6">
                   
                   {/* Table metadata card */}
-                  <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                     <div className="flex justify-between items-start gap-4">
                       <div>
                         <div className="flex items-center gap-2.5">
-                          <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center font-mono font-bold text-sm">
+                          <div className="w-8 h-8 rounded-xl bg-navy-100 text-navy-600 flex items-center justify-center font-mono font-bold text-sm">
                             T
                           </div>
                           <h2 className="text-lg font-bold text-slate-900 font-mono">
@@ -713,12 +713,12 @@ export default function App() {
                         </p>
                       </div>
 
-                      <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl max-w-sm shrink-0">
+                      <div className="bg-navy-50 border border-navy-100 p-4 rounded-2xl max-w-sm shrink-0">
                         <div className="flex gap-2 items-start">
-                          <Activity className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" />
+                          <Activity className="w-4 h-4 text-navy-600 mt-0.5 shrink-0" />
                           <div>
-                            <h4 className="text-[11px] font-bold text-blue-900 uppercase tracking-wider">Banking Compliance Purpose</h4>
-                            <p className="text-xs text-blue-700 mt-1 leading-relaxed">
+                            <h4 className="text-[11px] font-bold text-navy-900 uppercase tracking-wider">Banking Compliance Purpose</h4>
+                            <p className="text-xs text-navy-700 mt-1 leading-relaxed">
                               {activeTableSchema.bankingContext}
                             </p>
                           </div>
@@ -729,7 +729,7 @@ export default function App() {
                     {/* Table properties list */}
                     <div className="mt-6 border-t border-slate-100 pt-5">
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                        <div className="p-3 bg-slate-50 rounded-lg">
+                        <div className="p-3 bg-slate-50 rounded-xl">
                           <span className="text-slate-400 block font-semibold mb-1">Index Setup</span>
                           <div className="font-mono text-[11px] space-y-1">
                             {activeTableSchema.indexes.map((idx, i) => (
@@ -743,12 +743,12 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="p-3 bg-slate-50 rounded-lg col-span-2">
+                        <div className="p-3 bg-slate-50 rounded-xl col-span-2">
                           <span className="text-slate-400 block font-semibold mb-1">Relational Constraints (Foreign Keys)</span>
                           <div className="space-y-1">
                             {activeTableSchema.relations.map((rel, i) => (
                               <div key={i} className="flex items-center gap-2 font-mono text-[11px] text-slate-700 bg-white px-2 py-0.5 border border-slate-200 rounded">
-                                <span className="font-bold text-blue-600">{rel.fromColumn}</span>
+                                <span className="font-bold text-navy-600">{rel.fromColumn}</span>
                                 <span>&rarr;</span>
                                 <span className="font-bold text-slate-900">{rel.toTable}({rel.toColumn})</span>
                                 <span className="ml-auto text-[10px] bg-red-50 text-red-700 px-1.5 py-0.2 rounded border border-red-100 font-bold uppercase">
@@ -766,7 +766,7 @@ export default function App() {
                   </div>
 
                   {/* Datagrid Section */}
-                  <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm flex flex-col">
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm flex flex-col">
                     <div className="bg-slate-50 border-b border-slate-200 px-6 py-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                       <div>
                         <h3 className="text-sm font-bold text-slate-900">Live Simulated Ingress Records</h3>
@@ -781,7 +781,7 @@ export default function App() {
                             placeholder="Filter grid data..."
                             value={gridSearch}
                             onChange={(e) => setGridSearch(e.target.value)}
-                            className="pl-9 pr-3 py-1.5 w-full sm:w-48 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none focus:border-blue-600 transition-colors"
+                            className="pl-9 pr-3 py-1.5 w-full sm:w-48 bg-white border border-slate-300 rounded-xl text-xs focus:outline-none focus:border-navy-600 transition-colors"
                           />
                         </div>
                         <span className="text-xs font-mono text-slate-500 bg-slate-200 px-2 py-1 rounded font-bold shrink-0">
@@ -818,7 +818,7 @@ export default function App() {
                           ) : (
                             filteredGridData.map((row: any, rIdx) => (
                               <tr key={row.id || rIdx} className="hover:bg-slate-50/50 transition-colors">
-                                <td className="p-3.5 pl-6 font-mono text-blue-600 select-all max-w-[120px] truncate" title={row.id}>
+                                <td className="p-3.5 pl-6 font-mono text-navy-600 select-all max-w-[120px] truncate" title={row.id}>
                                   {row.id}
                                 </td>
                                 {activeTableSchema.columns.filter(c => c.name !== 'id').map(col => {
@@ -856,7 +856,7 @@ export default function App() {
                                       onClick={() => toggleEpicLock(row.id)}
                                       className={`px-2 py-1 rounded text-[10px] font-bold ${
                                         row.is_locked 
-                                          ? 'bg-amber-100 text-amber-800 hover:bg-amber-200' 
+                                          ? 'bg-orange-100 text-orange-800 hover:bg-orange-200' 
                                           : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                                       } transition-colors`}
                                     >
@@ -873,9 +873,9 @@ export default function App() {
                   </div>
 
                   {/* Interactive Insertion Simulator */}
-                  <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                     <div className="flex items-center gap-2 mb-4">
-                      <Plus className="w-4 h-4 text-blue-600" />
+                      <Plus className="w-4 h-4 text-navy-600" />
                       <h3 className="text-sm font-bold text-slate-900">
                         Interactive SQL Data Ingress Simulator
                       </h3>
@@ -885,8 +885,8 @@ export default function App() {
                     </p>
 
                     {isSchemaLocked && (
-                      <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl flex items-start gap-3 mb-6">
-                        <AlertCircle className="w-4.5 h-4.5 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl flex items-start gap-3 mb-6">
+                        <AlertCircle className="w-4.5 h-4.5 text-orange-600 shrink-0 mt-0.5" />
                         <div>
                           <p className="text-xs font-semibold text-slate-800">Schema Ingress Protected</p>
                           <p className="text-[11px] text-slate-500 mt-0.5">
@@ -910,7 +910,7 @@ export default function App() {
                                 value={userForm.email} 
                                 onChange={e => setUserForm({ ...userForm, email: e.target.value })}
                                 placeholder="e.g. some.user@krungsri.com"
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               />
                             </div>
                             <div>
@@ -921,7 +921,7 @@ export default function App() {
                                 value={userForm.fullName} 
                                 onChange={e => setUserForm({ ...userForm, fullName: e.target.value })}
                                 placeholder="e.g. Kittipong Wang"
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               />
                             </div>
                             <div>
@@ -929,7 +929,7 @@ export default function App() {
                               <select 
                                 value={userForm.role}
                                 onChange={e => setUserForm({ ...userForm, role: e.target.value })}
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               >
                                 <option value="Product Owner">Product Owner</option>
                                 <option value="Business Analyst">Business Analyst</option>
@@ -951,7 +951,7 @@ export default function App() {
                                 value={projectForm.name} 
                                 onChange={e => setProjectForm({ ...projectForm, name: e.target.value })}
                                 placeholder="e.g. Nimble Core Mobile API"
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               />
                             </div>
                             <div>
@@ -959,7 +959,7 @@ export default function App() {
                               <select 
                                 value={projectForm.userId}
                                 onChange={e => setProjectForm({ ...projectForm, userId: e.target.value })}
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               >
                                 {users.map(u => (
                                   <option key={u.id} value={u.id}>{u.full_name} ({u.role})</option>
@@ -972,7 +972,7 @@ export default function App() {
                                 value={projectForm.description} 
                                 onChange={e => setProjectForm({ ...projectForm, description: e.target.value })}
                                 placeholder="Provide enterprise banking scope definitions..."
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600 h-16"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600 h-16"
                               />
                             </div>
                           </div>
@@ -989,7 +989,7 @@ export default function App() {
                                 value={reqForm.epicName} 
                                 onChange={e => setReqForm({ ...reqForm, epicName: e.target.value })}
                                 placeholder="e.g. Biometric Face Matcher API"
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               />
                             </div>
                             <div>
@@ -997,7 +997,7 @@ export default function App() {
                               <select 
                                 value={reqForm.projectId}
                                 onChange={e => setReqForm({ ...reqForm, projectId: e.target.value })}
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                               >
                                 {projects.map(p => (
                                   <option key={p.id} value={p.id}>{p.name}</option>
@@ -1016,7 +1016,7 @@ export default function App() {
                                 <select 
                                   value={storyForm.requirementId}
                                   onChange={e => setStoryForm({ ...storyForm, requirementId: e.target.value })}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                  className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                                 >
                                   {requirements.map(r => (
                                     <option key={r.id} value={r.id}>{r.epic_name}</option>
@@ -1031,7 +1031,7 @@ export default function App() {
                                   value={storyForm.ticketCode} 
                                   onChange={e => setStoryForm({ ...storyForm, ticketCode: e.target.value })}
                                   placeholder="e.g. US-PAY-004"
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                  className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                                 />
                               </div>
                               <div>
@@ -1042,7 +1042,7 @@ export default function App() {
                                   value={storyForm.storyTitle} 
                                   onChange={e => setStoryForm({ ...storyForm, storyTitle: e.target.value })}
                                   placeholder="e.g. Biometric Fallback Authentication"
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                                  className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                                 />
                               </div>
                             </div>
@@ -1055,7 +1055,7 @@ export default function App() {
                                   value={storyForm.asA} 
                                   onChange={e => setStoryForm({ ...storyForm, asA: e.target.value })}
                                   placeholder="e.g. Retail bank client with locked credentials"
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600 h-16"
+                                  className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600 h-16"
                                 />
                               </div>
                               <div>
@@ -1065,7 +1065,7 @@ export default function App() {
                                   value={storyForm.iWantTo} 
                                   onChange={e => setStoryForm({ ...storyForm, iWantTo: e.target.value })}
                                   placeholder="e.g. authenticate utilizing my verified device's secure enclave biometric keys"
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600 h-16"
+                                  className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600 h-16"
                                 />
                               </div>
                               <div>
@@ -1075,12 +1075,12 @@ export default function App() {
                                   value={storyForm.soThat} 
                                   onChange={e => setStoryForm({ ...storyForm, soThat: e.target.value })}
                                   placeholder="e.g. I can perform transaction limits overrides without needing phone-support calls."
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600 h-16"
+                                  className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600 h-16"
                                 />
                               </div>
                             </div>
 
-                            <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                            <div className="bg-navy-50/50 p-4 rounded-2xl border border-navy-100">
                               <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
                                 Optional: Append Acceptance Criteria block (Automated transactional insertion)
                               </label>
@@ -1088,7 +1088,7 @@ export default function App() {
                                 value={storyForm.criteriaText} 
                                 onChange={e => setStoryForm({ ...storyForm, criteriaText: e.target.value })}
                                 placeholder="GIVEN the customer faces credential failure&#10;WHEN they select face verification&#10;THEN the mobile client queries secure local hardware match..."
-                                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600 h-20 font-mono"
+                                className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600 h-20 font-mono"
                               />
                             </div>
                           </div>
@@ -1100,7 +1100,7 @@ export default function App() {
                           selectedTableName === 'clarification_questions' || 
                           selectedTableName === 'prd_documents' || 
                           selectedTableName === 'version_history') && (
-                          <div className="bg-slate-50 text-slate-600 p-4 rounded-lg text-xs italic">
+                          <div className="bg-slate-50 text-slate-600 p-4 rounded-xl text-xs italic">
                             Mutations on <strong>{selectedTableName}</strong> are automatically triggered by regulatory checking routines, system audits, or snapshot creation to maintain professional state-machine integrity. Use the corresponding dedicated widgets for these tables!
                           </div>
                         )}
@@ -1113,7 +1113,7 @@ export default function App() {
                             selectedTableName === 'version_history') && (
                             <button
                               type="submit"
-                              className="px-4.5 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow"
+                              className="px-4.5 py-2 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-colors text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow"
                             >
                               <Plus className="w-4 h-4" />
                               <span>Execute Simulated SQL Insert</span>
@@ -1134,7 +1134,7 @@ export default function App() {
               {activeTab === 'ledger' && (
                 <div className="space-y-6">
                   
-                  <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                     <h3 className="text-sm font-bold text-slate-900 mb-2">Immutable JSONB State Snapshot Capture</h3>
                     <p className="text-xs text-slate-500 mb-6">
                       Agile requirements are prone to scope-creep and audit failures. In accordance with compliance models, the system forces a deep snapshot export on each approved iteration.
@@ -1147,7 +1147,7 @@ export default function App() {
                           <select 
                             value={snapshotForm.requirementId}
                             onChange={e => setSnapshotForm({ ...snapshotForm, requirementId: e.target.value })}
-                            className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                            className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                           >
                             {requirements.map(r => (
                               <option key={r.id} value={r.id}>{r.epic_name} (v{r.current_version})</option>
@@ -1159,7 +1159,7 @@ export default function App() {
                           <select 
                             value={snapshotForm.authorId}
                             onChange={e => setSnapshotForm({ ...snapshotForm, authorId: e.target.value })}
-                            className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs focus:outline-none focus:border-blue-600"
+                            className="w-full bg-white border border-slate-300 rounded-xl p-2 text-xs focus:outline-none focus:border-navy-600"
                           >
                             {users.map(u => (
                               <option key={u.id} value={u.id}>{u.full_name} ({u.role})</option>
@@ -1170,7 +1170,7 @@ export default function App() {
                           <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Capture Action</label>
                           <button
                             type="submit"
-                            className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow shadow-blue-500/20"
+                            className="w-full py-2 bg-navy-600 hover:bg-navy-700 text-white font-semibold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow shadow-navy-500/20"
                           >
                             <GitCommit className="w-4 h-4" />
                             <span>Capture State Snapshot</span>
@@ -1186,24 +1186,24 @@ export default function App() {
                           value={snapshotForm.changeDescription}
                           onChange={e => setSnapshotForm({ ...snapshotForm, changeDescription: e.target.value })}
                           placeholder="e.g., Aligned criteria with national clearing thresholds and added fallback loops."
-                          className="w-full bg-white border border-slate-300 rounded-lg p-2.5 text-xs focus:outline-none focus:border-blue-600"
+                          className="w-full bg-white border border-slate-300 rounded-xl p-2.5 text-xs focus:outline-none focus:border-navy-600"
                         />
                       </div>
                     </form>
                   </div>
 
                   {/* Historical logs render */}
-                  <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                     <h3 className="text-sm font-bold text-slate-900 mb-4">Immutable Ledger History (version_history table)</h3>
                     
                     <div className="space-y-4">
                       {versions.map((ver, idx) => {
                         const snap = JSON.parse(ver.state_snapshot);
                         return (
-                          <div key={ver.id} className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                          <div key={ver.id} className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
                             <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center text-xs">
                               <div className="flex items-center gap-2">
-                                <span className="font-mono bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-bold uppercase">
+                                <span className="font-mono bg-navy-50 text-navy-700 border border-navy-200 px-2 py-0.5 rounded font-bold uppercase">
                                   VERSION {ver.version_number}.0
                                 </span>
                                 <span className="text-slate-400 font-mono">|</span>
@@ -1232,8 +1232,8 @@ export default function App() {
                                 </div>
                               </div>
 
-                              <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-800 font-mono text-[10px] text-slate-300">
-                                <span className="text-[9px] text-blue-400 font-bold uppercase block mb-1">Postgres JSONB State</span>
+                              <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 font-mono text-[10px] text-slate-300">
+                                <span className="text-[9px] text-navy-400 font-bold uppercase block mb-1">Postgres JSONB State</span>
                                 <pre className="max-h-24 overflow-y-auto overflow-x-hidden whitespace-pre-wrap leading-tight text-slate-400">
                                   {JSON.stringify(snap, null, 2)}
                                 </pre>
@@ -1256,7 +1256,7 @@ export default function App() {
                   
                   {/* Compliance overview blocks */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                       <div className="flex items-center gap-3 mb-3">
                         <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center">
                           <ShieldCheck className="w-5 h-5" />
@@ -1292,9 +1292,9 @@ export default function App() {
                       </ul>
                     </div>
 
-                    <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                       <div className="flex items-center gap-3 mb-3">
-                        <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center">
+                        <div className="w-10 h-10 rounded-full bg-navy-100 text-navy-600 flex items-center justify-center">
                           <Activity className="w-5 h-5" />
                         </div>
                         <div>
@@ -1330,10 +1330,10 @@ export default function App() {
                   </div>
 
                   {/* Stakeholder Clarification Questions (interactive resolver) */}
-                  <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-2">
-                        <HelpCircle className="w-4.5 h-4.5 text-blue-600" />
+                        <HelpCircle className="w-4.5 h-4.5 text-navy-600" />
                         <h3 className="text-sm font-bold text-slate-900">Stakeholder Clarification & Compliance Dialogues</h3>
                       </div>
                       <span className="text-xs bg-slate-100 px-2 py-0.5 rounded font-mono font-bold text-slate-600">
@@ -1346,15 +1346,15 @@ export default function App() {
 
                     <div className="space-y-4">
                       {questions.map((q) => (
-                        <div key={q.id} className={`p-4 rounded-xl border transition-all ${
+                        <div key={q.id} className={`p-4 rounded-2xl border transition-all ${
                           q.is_resolved 
                             ? 'bg-slate-50/50 border-slate-200' 
-                            : 'bg-amber-50/30 border-amber-200'
+                            : 'bg-orange-50/30 border-orange-200'
                         }`}>
                           <div className="flex justify-between items-start gap-4">
                             <div className="space-y-1">
                               <div className="flex items-center gap-2">
-                                <span className={`w-2 h-2 rounded-full ${q.is_resolved ? 'bg-slate-400' : 'bg-amber-500 animate-pulse'}`}></span>
+                                <span className={`w-2 h-2 rounded-full ${q.is_resolved ? 'bg-slate-400' : 'bg-orange-500 animate-pulse'}`}></span>
                                 <span className="text-[10px] font-mono text-slate-400 font-bold uppercase">{q.checklist_category}</span>
                                 <span className="text-slate-300">|</span>
                                 <span className="text-[10px] font-mono text-slate-500">Story Target: {q.target_user_story_id ? 'US-PAY-002' : 'General'}</span>
@@ -1367,7 +1367,7 @@ export default function App() {
                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 uppercase tracking-wider ${
                               q.is_resolved 
                                 ? 'bg-slate-200 text-slate-600' 
-                                : 'bg-amber-100 text-amber-800'
+                                : 'bg-orange-100 text-orange-800'
                             }`}>
                               {q.is_resolved ? 'Resolved' : 'Pending Action'}
                             </span>
@@ -1375,7 +1375,7 @@ export default function App() {
 
                           <div className="mt-3.5 border-t border-slate-100 pt-3 text-xs">
                             {q.is_resolved ? (
-                              <div className="bg-white p-3 rounded-lg border border-slate-200 text-slate-700">
+                              <div className="bg-white p-3 rounded-xl border border-slate-200 text-slate-700">
                                 <span className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Official Resolution Response</span>
                                 {q.user_answer}
                               </div>
@@ -1389,11 +1389,11 @@ export default function App() {
                                       value={answerInput}
                                       onChange={e => setAnswerInput(e.target.value)}
                                       placeholder="Type official compliance solution..."
-                                      className="flex-1 bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-blue-600"
+                                      className="flex-1 bg-white border border-slate-300 rounded-xl px-3 py-1.5 text-xs focus:outline-none focus:border-navy-600"
                                     />
                                     <button 
                                       type="submit"
-                                      className="px-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer text-xs"
+                                      className="px-3.5 bg-navy-600 hover:bg-navy-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer text-xs"
                                     >
                                       <Send className="w-3.5 h-3.5" />
                                       <span>Resolve</span>
@@ -1405,7 +1405,7 @@ export default function App() {
                                       setResolvingQuestionId(q.id);
                                       setAnswerInput('');
                                     }}
-                                    className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg transition-colors text-[11px] cursor-pointer"
+                                    className="px-3 py-1 bg-orange-500 hover:bg-orange-600 text-slate-950 font-bold rounded-xl transition-colors text-[11px] cursor-pointer"
                                   >
                                     Answer and Lock Compliance
                                   </button>
@@ -1427,7 +1427,7 @@ export default function App() {
             <div className="w-80 shrink-0 flex flex-col gap-6">
               
               {/* Card 1: Static DDL Validation Highlights */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100">
                   <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Audit Checklist</h3>
                   <span className="text-[10px] bg-slate-100 text-slate-600 font-bold px-1.5 py-0.5 rounded font-mono">DATA</span>
@@ -1477,12 +1477,12 @@ export default function App() {
               </div>
 
               {/* Card 2: Micro Version History Snapshot ledger */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex-1 flex flex-col min-h-0">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex-1 flex flex-col min-h-0">
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100 shrink-0">
                   <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Version Ledger</h3>
                   <button 
                     onClick={() => setActiveTab('ledger')}
-                    className="text-[10px] font-bold text-blue-600 uppercase hover:underline"
+                    className="text-[10px] font-bold text-navy-600 uppercase hover:underline"
                   >
                     View All
                   </button>
@@ -1490,9 +1490,9 @@ export default function App() {
 
                 <div className="space-y-3.5 overflow-y-auto flex-1 pr-1 scrollbar-thin">
                   {versions.slice(0, 3).map((v, i) => (
-                    <div key={v.id} className={`p-3 rounded-lg border text-xs ${i === 0 ? 'bg-slate-50/70 border-slate-100' : 'bg-white border-slate-100'}`}>
+                    <div key={v.id} className={`p-3 rounded-xl border text-xs ${i === 0 ? 'bg-slate-50/70 border-slate-100' : 'bg-white border-slate-100'}`}>
                       <div className="flex justify-between items-center mb-1">
-                        <span className="text-[10px] font-mono text-blue-600 font-bold uppercase">
+                        <span className="text-[10px] font-mono text-navy-600 font-bold uppercase">
                           Version {v.version_number}.0
                         </span>
                         <span className="text-[10px] text-slate-400">
@@ -1516,7 +1516,7 @@ export default function App() {
                       setActiveTab('ledger');
                       showToast("Navigate to Snapshot Ledger Workspace.", "info");
                     }}
-                    className="text-[10px] font-bold text-blue-600 uppercase tracking-tight hover:underline flex items-center justify-center gap-1 w-full"
+                    className="text-[10px] font-bold text-navy-600 uppercase tracking-tight hover:underline flex items-center justify-center gap-1 w-full"
                   >
                     <span>View Immutable Snapshots</span>
                     <ChevronRight className="w-3.5 h-3.5" />
@@ -1535,13 +1535,13 @@ export default function App() {
               {activeUnresolvedQuestionsCount === 0 ? (
                 <span className="font-bold px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded">VALIDATED</span>
               ) : (
-                <span className="font-bold px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded animate-pulse">ACTION REQUIRED</span>
+                <span className="font-bold px-1.5 py-0.5 bg-orange-100 text-orange-800 rounded animate-pulse">ACTION REQUIRED</span>
               )}
             </div>
             
             <div className="ml-auto flex items-center gap-6">
               <div className="text-slate-500 font-bold">
-                Schema Lock: <span className={isSchemaLocked ? "text-emerald-600" : "text-amber-500"}>{isSchemaLocked ? "ON" : "OFF"}</span>
+                Schema Lock: <span className={isSchemaLocked ? "text-emerald-600" : "text-orange-500"}>{isSchemaLocked ? "ON" : "OFF"}</span>
               </div>
             </div>
           </footer>
