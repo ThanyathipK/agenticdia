@@ -55,22 +55,45 @@ export const TABLES: TableSchema[] = [
     ]
   },
   {
-    name: 'requirements',
-    description: 'Groups user stories under parent epic structures with version locking.',
-    bankingContext: 'Serves as the high-level compliance checkpoint (Epics) that can be locked/unlocked to freeze active requirements during formal internal audits.',
+    name: 'epics',
+    description: 'High-level business capabilities or features that group related requirements.',
+    bankingContext: 'Serves as the primary compliance checkpoint for banking features. Can be locked/unlocked to freeze active requirements during formal internal audits.',
     columns: [
-      { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Epic unique key.' },
+      { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Epic unique identifier.' },
       { name: 'project_id', type: 'UUID', constraints: 'NOT NULL REFERENCES projects(id)', description: 'Parent banking project association.' },
-      { name: 'epic_name', type: 'VARCHAR(255)', constraints: 'NOT NULL', description: 'Feature scope name (e.g., Double-entry Ledger Ledger Sync).' },
-      { name: 'total_user_stories', type: 'INT', constraints: 'NOT NULL', defaultValue: '0', description: 'Counter metric for agile scope monitoring.' },
-      { name: 'current_version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Auto-incrementing requirement iteration number.' },
+      { name: 'epic_name', type: 'VARCHAR(255)', constraints: 'NOT NULL', description: 'Feature scope name (e.g., Multi-factor Transaction Authorization).' },
+      { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Auto-incrementing epic iteration number.' },
       { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, modifications are blocked.' },
       { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date epic created.' },
-      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date epic was last edited or locked.' }
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date epic was last edited or locked.' },
+      { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, archived, deprecated.' }
     ],
-    indexes: ['idx_requirements_project_id (project_id)', 'idx_requirements_is_locked (is_locked)'],
+    indexes: ['idx_epics_project_id (project_id)', 'idx_epics_is_locked (is_locked)'],
     relations: [
       { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' }
+    ]
+  },
+  {
+    name: 'requirements',
+    description: 'Detailed functional and non-functional requirements derived from epics.',
+    bankingContext: 'Granular compliance units that map to specific regulatory needs. Each requirement is versioned and traceable to an epic for audit purposes.',
+    columns: [
+      { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Requirement unique identifier.' },
+      { name: 'project_id', type: 'UUID', constraints: 'NOT NULL REFERENCES projects(id)', description: 'Parent banking project association.' },
+      { name: 'epic_id', type: 'UUID', constraints: 'NULL REFERENCES epics(id)', description: 'Parent epic reference for hierarchical organization.' },
+      { name: 'requirement_code', type: 'VARCHAR(50)', constraints: 'NOT NULL', description: 'Unique requirement identifier (e.g., REQ-001).' },
+      { name: 'title', type: 'VARCHAR(255)', constraints: 'NOT NULL', description: 'Short descriptive title of the requirement.' },
+      { name: 'description', type: 'TEXT', constraints: 'NULL', description: 'Detailed functional or non-functional specification.' },
+      { name: 'priority', type: 'VARCHAR(50)', constraints: 'NULL', description: 'Business priority: High, Medium, Low, Critical.' },
+      { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, deprecated, superseded.' },
+      { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Current version number for change tracking.' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date requirement was created.' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date requirement was last modified.' }
+    ],
+    indexes: ['idx_requirements_project_id (project_id)', 'idx_requirements_epic_id (epic_id)'],
+    relations: [
+      { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' },
+      { fromColumn: 'epic_id', toTable: 'epics', toColumn: 'id', onDelete: 'CASCADE' }
     ]
   },
   {
@@ -79,16 +102,23 @@ export const TABLES: TableSchema[] = [
     bankingContext: 'Detailed banking business rules written as "As a / I want to / So that" templates, validating user actions against core security models.',
     columns: [
       { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Unique story key.' },
-      { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Epic parent block identifier.' },
-      { name: 'ticket_code', type: 'VARCHAR(50)', constraints: 'NOT NULL UNIQUE', description: 'Banking ticketing mapping (e.g. US-001, LN-402).' },
+      { name: 'project_id', type: 'UUID', constraints: 'NULL REFERENCES projects(id)', description: 'Project association for multi-tenant filtering.' },
+      { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Parent requirement identifier.' },
+      { name: 'ticket_code', type: 'VARCHAR(50)', constraints: 'NOT NULL', description: 'Banking ticketing mapping (e.g. US-001, LN-402).' },
       { name: 'story_title', type: 'VARCHAR(255)', constraints: 'NOT NULL', description: 'Name of user task.' },
       { name: 'as_a', type: 'TEXT', constraints: 'NOT NULL', description: 'Role actor (e.g., Risk Officer, Retail Customer).' },
       { name: 'i_want_to', type: 'TEXT', constraints: 'NOT NULL', description: 'The banking action requested.' },
       { name: 'so_that', type: 'TEXT', constraints: 'NOT NULL', description: 'The compliant banking goal/outcome achieved.' },
-      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Creation date.' }
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Creation date.' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Last modification timestamp.' },
+      { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, archived, deprecated.' },
+      { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Current version for change tracking.' },
+      { name: 'last_modified_by', type: 'VARCHAR(100)', constraints: 'NOT NULL', defaultValue: 'automated_agent', description: 'Entity that last modified this record.' },
+      { name: 'change_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'created', description: 'Type of last change: created, updated, deleted.' }
     ],
-    indexes: ['idx_user_stories_requirement_id (requirement_id)'],
+    indexes: ['idx_user_stories_requirement_id (requirement_id)', 'idx_user_stories_project_id (project_id)'],
     relations: [
+      { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' },
       { fromColumn: 'requirement_id', toTable: 'requirements', toColumn: 'id', onDelete: 'CASCADE' }
     ]
   },
@@ -101,7 +131,11 @@ export const TABLES: TableSchema[] = [
       { name: 'user_story_id', type: 'UUID', constraints: 'NOT NULL REFERENCES user_stories(id)', description: 'Mapped user story.' },
       { name: 'criteria_text', type: 'TEXT', constraints: 'NOT NULL', description: 'Given-When-Then criteria block.' },
       { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Creation timestamp.' },
-      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Updated timestamp.' }
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Last modification timestamp.' },
+      { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, archived, deprecated.' },
+      { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Current version for change tracking.' },
+      { name: 'last_modified_by', type: 'VARCHAR(100)', constraints: 'NOT NULL', defaultValue: 'automated_agent', description: 'Entity that last modified this record.' },
+      { name: 'change_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'created', description: 'Type of last change: created, updated, deleted.' }
     ],
     indexes: ['idx_acceptance_criteria_user_story_id (user_story_id)'],
     relations: [
@@ -114,12 +148,13 @@ export const TABLES: TableSchema[] = [
     bankingContext: 'Automated/manual verification ledger marking passed rules, failed checks, and identifying issues requiring resolution prior to production release.',
     columns: [
       { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Audit report ID.' },
-      { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Audited epic reference.' },
-      { name: 'version_reviewed', type: 'INT', constraints: 'NOT NULL', description: 'The Epic version snapshot index analyzed.' },
+      { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Audited requirement reference.' },
+      { name: 'version_reviewed', type: 'INT', constraints: 'NOT NULL', description: 'The requirement version snapshot index analyzed.' },
       { name: 'is_valid', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Whether the requirement matches all regulations.' },
       { name: 'passed_checks', type: 'JSONB', constraints: 'NOT NULL', defaultValue: "\'[]\'::jsonb", description: 'Array of validated compliance checks.' },
       { name: 'failed_checks', type: 'JSONB', constraints: 'NOT NULL', defaultValue: "\'[]\'::jsonb", description: 'Array of failed compliance parameters.' },
-      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Time audit was compiled.' }
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Time audit was compiled.' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Time audit was last modified.' }
     ],
     indexes: ['idx_audit_results_requirement_id (requirement_id)', 'idx_audit_results_is_valid (is_valid)'],
     relations: [
@@ -138,7 +173,8 @@ export const TABLES: TableSchema[] = [
       { name: 'question_text', type: 'TEXT', constraints: 'NOT NULL', description: 'System or expert drafted compliance query.' },
       { name: 'user_answer', type: 'TEXT', constraints: 'NULL', description: 'Official stakeholder resolution reply.' },
       { name: 'is_resolved', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Lock resolver status.' },
-      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date logged.' }
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date logged.' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date last modified.' }
     ],
     indexes: [
       'idx_clarification_questions_audit_result_id (audit_result_id)',
@@ -161,7 +197,8 @@ export const TABLES: TableSchema[] = [
       { name: 'version', type: 'INT', constraints: 'NOT NULL', description: 'Target build index.' },
       { name: 'markdown_content', type: 'TEXT', constraints: 'NOT NULL', description: 'Compiled functional specifications in markdown.' },
       { name: 'mermaid_graph', type: 'TEXT', constraints: 'NULL', description: 'Live architecture diagram schema.' },
-      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Export generation date.' }
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Export generation date.' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Last modification timestamp.' }
     ],
     indexes: ['idx_prd_documents_project_id (project_id)'],
     relations: [
@@ -171,16 +208,17 @@ export const TABLES: TableSchema[] = [
   {
     name: 'version_history',
     description: 'Audit-trail ledger containing historical state snapshots of requirements.',
-    bankingContext: 'Core integrity component: immutable ledger capturing complete state snapshots (JSONB) of requirements + acceptance criteria on changes. Essential for compliance audits.',
+    bankingContext: 'Core integrity component: immutable ledger capturing complete state snapshots (JSONB) of requirements on changes. Essential for compliance audits.',
     columns: [
       { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Ledger record ID.' },
       { name: 'project_id', type: 'UUID', constraints: 'NOT NULL REFERENCES projects(id)', description: 'Related banking project.' },
-      { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Related epic baseline.' },
+      { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Related requirement baseline.' },
       { name: 'version_number', type: 'INT', constraints: 'NOT NULL', description: 'Captured version number.' },
       { name: 'changed_by_user_id', type: 'UUID', constraints: 'NOT NULL REFERENCES users(id)', description: 'Corporate stakeholder author.' },
       { name: 'change_description', type: 'TEXT', constraints: 'NOT NULL', description: 'Reason for requirement iteration.' },
-      { name: 'state_snapshot', type: 'JSONB', constraints: 'NOT NULL', description: 'Full recursive state snapshot of user stories & acceptance criteria.' },
-      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date ledger transaction was posted.' }
+      { name: 'state_snapshot', type: 'JSONB', constraints: 'NOT NULL', description: 'Full recursive state snapshot of requirements.' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date ledger transaction was posted.' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Last modification timestamp.' }
     ],
     indexes: [
       'idx_version_history_project_id (project_id)',
@@ -212,24 +250,42 @@ export interface ProjectRow {
   created_at: string;
 }
 
-export interface RequirementRow {
+export interface EpicRow {
   id: string;
   project_id: string;
   epic_name: string;
-  total_user_stories: number;
-  current_version: number;
+  version: number;
   is_locked: boolean;
+  status: string;
+  created_at: string;
+}
+
+export interface RequirementRow {
+  id: string;
+  project_id: string;
+  epic_id: string | null;
+  requirement_code: string;
+  title: string;
+  description: string;
+  priority: string | null;
+  status: string;
+  version: number;
   created_at: string;
 }
 
 export interface UserStoryRow {
   id: string;
+  project_id: string | null;
   requirement_id: string;
   ticket_code: string;
   story_title: string;
   as_a: string;
   i_want_to: string;
   so_that: string;
+  status: string;
+  version: number;
+  last_modified_by: string;
+  change_type: string;
   created_at: string;
 }
 
@@ -237,6 +293,10 @@ export interface AcceptanceCriterionRow {
   id: string;
   user_story_id: string;
   criteria_text: string;
+  status: string;
+  version: number;
+  last_modified_by: string;
+  change_type: string;
   created_at: string;
 }
 
@@ -306,23 +366,50 @@ export const INITIAL_PROJECTS: ProjectRow[] = [
   }
 ];
 
-export const INITIAL_REQUIREMENTS: RequirementRow[] = [
+export const INITIAL_EPICS: EpicRow[] = [
   {
-    id: 'r1111111-3333-4444-9999-aaaaaaaaaaaa',
+    id: 'e1111111-3333-4444-9999-aaaaaaaaaaaa',
     project_id: 'p1111111-1111-4444-8888-999999999999',
     epic_name: 'Multi-factor Transaction Authorization',
-    total_user_stories: 3,
-    current_version: 2,
+    version: 2,
     is_locked: false,
+    status: 'active',
     created_at: '2026-07-09T10:30:00Z'
   },
   {
-    id: 'r2222222-3333-4444-9999-aaaaaaaaaaaa',
+    id: 'e2222222-3333-4444-9999-aaaaaaaaaaaa',
     project_id: 'p2222222-2222-4444-8888-999999999999',
     epic_name: 'ISO-20022 Message Validation Engine',
-    total_user_stories: 2,
-    current_version: 1,
+    version: 1,
     is_locked: true,
+    status: 'active',
+    created_at: '2026-07-09T12:00:00Z'
+  }
+];
+
+export const INITIAL_REQUIREMENTS: RequirementRow[] = [
+  {
+    id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    epic_id: 'e1111111-3333-4444-9999-aaaaaaaaaaaa',
+    requirement_code: 'REQ-PAY-001',
+    title: 'Multi-factor Transaction Authorization',
+    description: 'All high-value transactions must validate users via OTP or biometric authentication before execution.',
+    priority: 'Critical',
+    status: 'active',
+    version: 2,
+    created_at: '2026-07-09T10:30:00Z'
+  },
+  {
+    id: 'r2222222-3333-4444-9999-bbbbbbbbbbbb',
+    project_id: 'p2222222-2222-4444-8888-999999999999',
+    epic_id: 'e2222222-3333-4444-9999-aaaaaaaaaaaa',
+    requirement_code: 'REQ-LED-001',
+    title: 'ISO-20022 Message Validation Engine',
+    description: 'Validate all inbound inter-bank messages against the pain.001.001.08 XML Schema Definition.',
+    priority: 'High',
+    status: 'active',
+    version: 1,
     created_at: '2026-07-09T12:00:00Z'
   }
 ];
@@ -330,32 +417,47 @@ export const INITIAL_REQUIREMENTS: RequirementRow[] = [
 export const INITIAL_USER_STORIES: UserStoryRow[] = [
   {
     id: 'us111111-4444-4444-9999-bbbbbbbbbbbb',
-    requirement_id: 'r1111111-3333-4444-9999-aaaaaaaaaaaa',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    requirement_id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
     ticket_code: 'US-PAY-001',
     story_title: 'Secure OTP Validation',
     as_a: 'Retail Banking Customer initiating a fund transfer over 100,000 THB',
     i_want_to: 'be prompted to verify my transaction with an OTP code generated by my registered Authenticator app',
     so_that: 'the system verifies my active presence and protects my account balance from unauthorized access.',
+    status: 'active',
+    version: 1,
+    last_modified_by: 'automated_agent',
+    change_type: 'created',
     created_at: '2026-07-09T10:45:00Z'
   },
   {
     id: 'us222222-4444-4444-9999-bbbbbbbbbbbb',
-    requirement_id: 'r1111111-3333-4444-9999-aaaaaaaaaaaa',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    requirement_id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
     ticket_code: 'US-PAY-002',
     story_title: 'MFA Grace Periods & Caching',
     as_a: 'Corporate Accountant performing batch transfers within a single browser session',
     i_want_to: 'exempt transfers from re-triggering MFA within a 5-minute validated grace period',
     so_that: 'batch execution performance and administrative ergonomics are optimized without exposing the channel to session hijacking.',
+    status: 'active',
+    version: 1,
+    last_modified_by: 'automated_agent',
+    change_type: 'created',
     created_at: '2026-07-09T11:00:00Z'
   },
   {
     id: 'us333333-4444-4444-9999-bbbbbbbbbbbb',
-    requirement_id: 'r2222222-3333-4444-9999-aaaaaaaaaaaa',
+    project_id: 'p2222222-2222-4444-8888-999999999999',
+    requirement_id: 'r2222222-3333-4444-9999-bbbbbbbbbbbb',
     ticket_code: 'US-LED-001',
     story_title: 'ISO XML Schema Validation',
     as_a: 'Core Clearing Service handling inter-bank messages',
     i_want_to: 'strictly validate all inbound payloads against the pain.001.001.08 XML Schema Definition',
     so_that: 'malformed bank messages are rejected immediately before reaching core ledger queues.',
+    status: 'active',
+    version: 1,
+    last_modified_by: 'automated_agent',
+    change_type: 'created',
     created_at: '2026-07-09T12:15:00Z'
   }
 ];
@@ -365,18 +467,30 @@ export const INITIAL_ACCEPTANCE_CRITERIA: AcceptanceCriterionRow[] = [
     id: 'ac111111-5555-4444-9999-cccccccccccc',
     user_story_id: 'us111111-4444-4444-9999-bbbbbbbbbbbb',
     criteria_text: 'GIVEN the customer balance is valid and the transfer amount exceeds 100,000 THB\nWHEN they click "Confirm Transfer"\nTHEN the system suspends transaction execution and dispatches an authenticating challenge modal.',
+    status: 'active',
+    version: 1,
+    last_modified_by: 'automated_agent',
+    change_type: 'created',
     created_at: '2026-07-09T10:50:00Z'
   },
   {
     id: 'ac222222-5555-4444-9999-cccccccccccc',
     user_story_id: 'us111111-4444-4444-9999-bbbbbbbbbbbb',
     criteria_text: 'GIVEN the authenticator challenge screen is visible\nWHEN the customer inputs a valid 6-digit dynamic token within 180 seconds\nTHEN the transaction is authorized, submitted to clearance queues, and an audit trail user reference logged.',
+    status: 'active',
+    version: 1,
+    last_modified_by: 'automated_agent',
+    change_type: 'created',
     created_at: '2026-07-09T10:52:00Z'
   },
   {
     id: 'ac333333-5555-4444-9999-cccccccccccc',
     user_story_id: 'us333333-4444-4444-9999-bbbbbbbbbbbb',
     criteria_text: 'GIVEN an incoming inter-bank transfer request\nWHEN the payload lacks the <GrpHdr> or <PmtInf> tag\nTHEN the clearing service raises a rejection code "ERR_ISO_SCHEMA_INTEGRITY" and halts internal queue processing.',
+    status: 'active',
+    version: 1,
+    last_modified_by: 'automated_agent',
+    change_type: 'created',
     created_at: '2026-07-09T12:20:00Z'
   }
 ];
@@ -384,7 +498,7 @@ export const INITIAL_ACCEPTANCE_CRITERIA: AcceptanceCriterionRow[] = [
 export const INITIAL_AUDIT_RESULTS: AuditResultRow[] = [
   {
     id: 'ar111111-6666-4444-9999-dddddddddddd',
-    requirement_id: 'r1111111-3333-4444-9999-aaaaaaaaaaaa',
+    requirement_id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
     version_reviewed: 1,
     is_valid: false,
     passed_checks: JSON.stringify([
@@ -399,7 +513,7 @@ export const INITIAL_AUDIT_RESULTS: AuditResultRow[] = [
   },
   {
     id: 'ar222222-6666-4444-9999-dddddddddddd',
-    requirement_id: 'r2222222-3333-4444-9999-aaaaaaaaaaaa',
+    requirement_id: 'r2222222-3333-4444-9999-bbbbbbbbbbbb',
     version_reviewed: 1,
     is_valid: true,
     passed_checks: JSON.stringify([
@@ -450,7 +564,7 @@ export const INITIAL_VERSION_HISTORY: VersionHistoryRow[] = [
   {
     id: 'vh111111-9999-4444-9999-000000000000',
     project_id: 'p1111111-1111-4444-8888-999999999999',
-    requirement_id: 'r1111111-3333-4444-9999-aaaaaaaaaaaa',
+    requirement_id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
     version_number: 1,
     changed_by_user_id: 'u1111111-2222-3333-4444-555555555555',
     change_description: 'Initial draft for Multi-factor Transaction Authorization.',
@@ -467,7 +581,7 @@ export const INITIAL_VERSION_HISTORY: VersionHistoryRow[] = [
   {
     id: 'vh222222-9999-4444-9999-000000000000',
     project_id: 'p1111111-1111-4444-8888-999999999999',
-    requirement_id: 'r1111111-3333-4444-9999-aaaaaaaaaaaa',
+    requirement_id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
     version_number: 2,
     changed_by_user_id: 'u2222222-2222-3333-4444-555555555555',
     change_description: 'Added grace period story for batch transfers and fixed checklist queries.',

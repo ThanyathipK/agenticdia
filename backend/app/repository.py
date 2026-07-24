@@ -69,7 +69,7 @@ class ProjectRepository:
         )
         session.add(req_state)
         
-        await session.commit()
+        await session.flush()
         await session.refresh(project)
         return {"id": str(project.id), "name": project.name}
 
@@ -1377,16 +1377,13 @@ class RequirementStateRepository:
     """
     
     @staticmethod
-    async def get_by_project_id(project_id: str, session: Optional[AsyncSession] = None) -> Optional[Dict[str, Any]]:
+    async def get_by_project_id(project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
         """
         Loads the latest RequirementState from Supabase for a given project_id.
+        Requires an active session to maintain transactional consistency.
         """
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
-        if session is None:
-            async with AsyncSessionLocal() as session:
-                return await RequirementStateRepository._get_by_project_id_impl(pid, session)
-        else:
-            return await RequirementStateRepository._get_by_project_id_impl(pid, session)
+        return await RequirementStateRepository._get_by_project_id_impl(pid, session)
 
     @staticmethod
     async def _get_by_project_id_impl(project_id: uuid.UUID, session: AsyncSession) -> Optional[Dict[str, Any]]:
@@ -1400,46 +1397,74 @@ class RequirementStateRepository:
         active_epic = await EpicRepository.get_active_by_project(str(project_id), session)
         epic_name = active_epic["epic_name"] if active_epic else ""
 
-        # Load from all other tables
+        # Load ALL active requirements for this project (multi-requirement support)
         stmt_req = select(RequirementModel).where(
             RequirementModel.project_id == project_id,
             func.lower(RequirementModel.status) == "active"
-        ).order_by(RequirementModel.version.desc())
+        ).order_by(RequirementModel.created_at.asc())
         res_req = await session.execute(stmt_req)
-        req = res_req.scalars().first()
+        reqs = res_req.scalars().all()
         
         version_num = model.version_number
-        req_id = None
-        if req:
+        
+        # Build the requirements list with their user stories
+        all_user_stories = []
+        all_acceptance_criteria = []
+        requirements_list = []
+        
+        for req in reqs:
             req_id = req.id
-            version_num = req.version
             if not epic_name and req.epic_id:
                 stmt_epic = select(EpicModel).where(EpicModel.id == req.epic_id)
                 res_epic = await session.execute(stmt_epic)
                 epic = res_epic.scalar_one_or_none()
                 if epic:
                     epic_name = epic.epic_name
+            
+            # Load user stories for this specific requirement
+            stories = await UserStoryRepository.get_by_project(str(project_id), session, requirement_id=req_id)
+            ac_list = await AcceptanceCriteriaRepository.get_by_project(str(project_id), session, requirement_id=req_id)
+            
+            active_stories = [s for s in stories if s.get("status", "active") == "active"]
+            active_ac_list = [ac for ac in ac_list if ac.get("status", "active") == "active"]
+            
+            flat_ac = [ac["criteria_text"] for ac in active_ac_list]
+            
+            # Map acceptance criteria to stories
+            for story in active_stories:
+                story_ac = [ac["criteria_text"] for ac in active_ac_list if ac["ticket_code"] == story["ticket_code"]]
+                story["acceptance_criteria"] = story_ac
+            
+            # Build requirement entry
+            req_entry = {
+                "requirement_code": req.requirement_code,
+                "title": req.title,
+                "description": req.description or "",
+                "user_stories": active_stories
+            }
+            requirements_list.append(req_entry)
+            all_user_stories.extend(active_stories)
+            all_acceptance_criteria.extend(flat_ac)
 
         # Fallback if no epic found in epics table but present in model.requirements
-        if not epic_name and model.requirements and isinstance(model.requirements, dict):
-            epic_name = model.requirements.get("epic_name", "")
+        if not epic_name and model.requirements:
+            if isinstance(model.requirements, dict):
+                epic_name = model.requirements.get("epic_name", "")
+            elif isinstance(model.requirements, list) and len(model.requirements) > 0:
+                epic_name = model.requirements[0].get("epic_name", "")
             if epic_name:
                 saved_epic = await EpicRepository.save_or_update_epic(str(project_id), epic_name, session, version=version_num)
                 epic_name = saved_epic["epic_name"]
+        
+        if not requirements_list:
+            # Fallback: use the old flat model.user_stories if no requirements found
+            all_user_stories = model.user_stories or []
+            all_acceptance_criteria = model.acceptance_criteria or []
+            if model.requirements and isinstance(model.requirements, dict) and "epic_name" in model.requirements:
+                epic_name = model.requirements["epic_name"]
 
-        stories = await UserStoryRepository.get_by_project(str(project_id), session, requirement_id=req_id)
-        ac_list = await AcceptanceCriteriaRepository.get_by_project(str(project_id), session, requirement_id=req_id)
-        cqs = await ClarificationQuestionRepository.get_by_project(str(project_id), session, requirement_id=req_id)
+        cqs = await ClarificationQuestionRepository.get_by_project(str(project_id), session)
         prds = await PRDDocumentRepository.get_by_project(str(project_id), session, version=version_num)
-        
-        # Map acceptance criteria to stories and to the flat list
-        active_stories = [s for s in stories if s.get("status", "active") == "active"]
-        active_ac_list = [ac for ac in ac_list if ac.get("status", "active") == "active"]
-        
-        flat_ac = [ac["criteria_text"] for ac in active_ac_list]
-        for story in active_stories:
-            story_ac = [ac["criteria_text"] for ac in active_ac_list if ac["ticket_code"] == story["ticket_code"]]
-            story["acceptance_criteria"] = story_ac
 
         generated_prd = ""
         generated_diagrams = ""
@@ -1450,41 +1475,44 @@ class RequirementStateRepository:
         return {
             "project_id": str(model.project_id),
             "project_name": model.project_name,
-            "requirements": {"epic_name": epic_name} if epic_name else model.requirements,
+            "requirements": requirements_list if requirements_list else [],
             "business_goals": model.business_goals,
             "actors": model.actors,
-            "user_stories": active_stories if active_stories else model.user_stories,
-            "acceptance_criteria": flat_ac if flat_ac else model.acceptance_criteria,
-            "clarification_questions": cqs if cqs else model.clarification_questions,
+            "user_stories": all_user_stories if all_user_stories else [],
+            "acceptance_criteria": all_acceptance_criteria if all_acceptance_criteria else [],
+            "clarification_questions": cqs if cqs else [],
             "validation_status": model.validation_status,
-            "generated_prd": generated_prd if generated_prd else model.generated_prd,
-            "generated_diagrams": generated_diagrams if generated_diagrams else model.generated_diagrams,
+            "generated_prd": generated_prd if generated_prd else "",
+            "generated_diagrams": generated_diagrams if generated_diagrams else "",
             "current_workflow_state": model.current_workflow_state,
             "version_number": version_num,
             "updated_at": model.__dict__.get("updated_at").isoformat() if model.__dict__.get("updated_at") else None
         }
 
     @staticmethod
-    async def save_or_update(project_id: str, updates: Dict[str, Any], session: Optional[AsyncSession] = None) -> Dict[str, Any]:
+    async def save_or_update(project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         """
         Saves or partially updates the RequirementState for a given project_id.
         Does not overwrite unchanged fields. Uses partial updates whenever possible.
+        Requires an active session to maintain transactional consistency.
         """
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
-        if session is None:
-            async with AsyncSessionLocal() as session:
-                res = await RequirementStateRepository._save_or_update_impl(pid, updates, session)
-                await session.commit()
-                return res
-        else:
-            res = await RequirementStateRepository._save_or_update_impl(pid, updates, session)
-            return res
+        res = await RequirementStateRepository._save_or_update_impl(pid, updates, session)
+        return res
 
     @staticmethod
     async def _save_or_update_impl(project_id: uuid.UUID, updates: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         stmt = select(RequirementStateModel).where(RequirementStateModel.project_id == project_id)
         result = await session.execute(stmt)
         model = result.scalar_one_or_none()
+        
+        # Initialize fallback variables
+        original_requirements = {}
+        original_user_stories = []
+        original_acceptance_criteria = []
+        original_clarification_questions = []
+        original_generated_prd = ""
+        original_generated_diagrams = ""
         
         if not model:
             model = RequirementStateModel(
@@ -1505,6 +1533,14 @@ class RequirementStateRepository:
             session.add(model)
             await session.flush()
         else:
+            # Preserve original values for fallback
+            original_requirements = model.requirements or {}
+            original_user_stories = model.user_stories or []
+            original_acceptance_criteria = model.acceptance_criteria or []
+            original_clarification_questions = model.clarification_questions or []
+            original_generated_prd = model.generated_prd or ""
+            original_generated_diagrams = model.generated_diagrams or ""
+            
             if "project_name" in updates and updates["project_name"] is not None:
                 model.project_name = updates["project_name"]
             if "validation_status" in updates and updates["validation_status"] is not None:
@@ -1518,85 +1554,171 @@ class RequirementStateRepository:
             if "actors" in updates and updates["actors"] is not None:
                 model.actors = updates["actors"]
                 
-            # Do not duplicate generated artifacts in the JSON blob columns of RequirementStateModel
-            model.requirements = {}
-            model.user_stories = []
-            model.acceptance_criteria = []
-            model.clarification_questions = []
-            model.generated_prd = ""
-            model.generated_diagrams = ""
+            # Only clear JSON blob fields that are being re-derived from relation tables.
+            # This avoids wasteful clearing and prevents data loss if re-derivation fails mid-way.
+            if "requirements" in updates and updates["requirements"] is not None:
+                model.requirements = {}
+            if "user_stories" in updates and updates["user_stories"] is not None:
+                model.user_stories = []
+            if "acceptance_criteria" in updates and updates["acceptance_criteria"] is not None:
+                model.acceptance_criteria = []
+            if "clarification_questions" in updates and updates["clarification_questions"] is not None:
+                model.clarification_questions = []
+            if "generated_prd" in updates and updates["generated_prd"] is not None:
+                model.generated_prd = ""
+            if "generated_diagrams" in updates and updates["generated_diagrams"] is not None:
+                model.generated_diagrams = ""
         
         version_num = model.version_number
+
+        # ===============================================
+        # MULTI-REQUIREMENT SAVE LOGIC
+        # Parse updates.requirements or updates.user_stories to handle multiple requirements
+        # ===============================================
         
-        # 1. Resolve or Create Epic & RequirementModel
-        epic_name_val = None
+        # Extract the list of requirements to persist
+        req_items = []
         if "requirements" in updates and updates["requirements"] is not None:
             reqs_data = updates["requirements"]
-            if isinstance(reqs_data, dict) and reqs_data.get("epic_name"):
-                epic_name_val = reqs_data.get("epic_name")
+            if isinstance(reqs_data, list):
+                # New multi-requirement format: [{"requirement_code": "REQ-001", "title": "...", "user_stories": [...]}, ...]
+                req_items = reqs_data
+            elif isinstance(reqs_data, dict):
+                # Legacy flat format: {"epic_name": "...", "user_stories": [...]}
+                # Convert to single requirement
+                legacy_epic = reqs_data.get("epic_name", "")
+                legacy_stories = reqs_data.get("user_stories", []) if "user_stories" in reqs_data else updates.get("user_stories", [])
+                req_items = [{
+                    "requirement_code": "REQ-001",
+                    "title": legacy_epic or updates.get("project_name", "Default Requirement"),
+                    "description": "",
+                    "user_stories": legacy_stories if isinstance(legacy_stories, list) else []
+                }]
+        elif "user_stories" in updates and updates["user_stories"] is not None:
+            # Legacy flat user_stories fallback
+            req_items = [{
+                "requirement_code": "REQ-001",
+                "title": "Structured Requirements",
+                "description": "",
+                "user_stories": updates["user_stories"] if isinstance(updates["user_stories"], list) else []
+            }]
+
+        if not req_items:
+            req_items = [{
+                "requirement_code": "REQ-001",
+                "title": "Default Requirement",
+                "description": "",
+                "user_stories": []
+            }]
+
+        # Determine epic name from first requirement or updates
+        epic_name_val = ""
+        if "requirements" in updates and isinstance(updates["requirements"], dict):
+            epic_name_val = updates["requirements"].get("epic_name", "")
+        if not epic_name_val and req_items:
+            epic_name_val = req_items[0].get("title", "")
+        if not epic_name_val:
+            epic_name_val = updates.get("project_name", "Default Epic")
 
         # Save or update active Epic in epics table
         if epic_name_val:
             epic_rec = await EpicRepository.save_or_update_epic(str(project_id), epic_name_val, session, version=version_num)
         else:
             active_epic = await EpicRepository.get_active_by_project(str(project_id), session)
-            if active_epic:
-                epic_rec = active_epic
-            else:
-                epic_rec = await EpicRepository.save_or_update_epic(str(project_id), "Untitled Epic", session, version=version_num)
+            epic_rec = active_epic or await EpicRepository.save_or_update_epic(str(project_id), "Untitled Epic", session, version=version_num)
 
         epic_id_uuid = uuid.UUID(epic_rec["id"])
-
-        # Check if there is an existing requirement for this project and version
-        stmt_exist = select(RequirementModel).where(
-            RequirementModel.project_id == project_id,
-            RequirementModel.version == version_num
-        )
-        res_exist = await session.execute(stmt_exist)
-        existing_req = res_exist.scalars().first()
-        if existing_req:
-            existing_req.epic_id = epic_id_uuid
-            existing_req.title = epic_rec["epic_name"]
-            await session.flush()
-            created_req_id = existing_req.id
-        else:
-            new_req = RequirementModel(
-                project_id=project_id,
-                epic_id=epic_id_uuid,
-                requirement_code="REQ-001",
-                title=epic_rec["epic_name"],
-                version=version_num,
-                status="active"
-            )
-            session.add(new_req)
-            await session.flush()
-            created_req_id = new_req.id
         
-        # 2. Propagation for User Stories and Acceptance Criteria
-        if "user_stories" in updates and updates["user_stories"] is not None:
-            # Load all existing stories for this requirement (including archived ones)
+        # Load ALL existing active requirements for this project (by requirement_code map)
+        stmt_all_reqs = select(RequirementModel).where(
+            RequirementModel.project_id == project_id,
+            func.lower(RequirementModel.status) == "active"
+        )
+        res_all_reqs = await session.execute(stmt_all_reqs)
+        all_db_reqs = res_all_reqs.scalars().all()
+        
+        db_reqs_by_code = {}
+        db_reqs_by_id = {}
+        for r in all_db_reqs:
+            if r.requirement_code:
+                db_reqs_by_code[r.requirement_code] = r
+            db_reqs_by_id[str(r.id)] = r
+        
+        # Also load archived requirements (we might need to reactivate)
+        stmt_archived_reqs = select(RequirementModel).where(
+            RequirementModel.project_id == project_id,
+            func.lower(RequirementModel.status) == "archived"
+        )
+        res_archived_reqs = await session.execute(stmt_archived_reqs)
+        for r in res_archived_reqs.scalars().all():
+            if r.requirement_code and r.requirement_code not in db_reqs_by_code:
+                db_reqs_by_code[r.requirement_code] = r
+
+        # Track which requirement IDs are touched to archive others
+        touched_req_ids = set()
+        
+        for req_item in req_items:
+            req_code = req_item.get("requirement_code", "REQ-000")
+            req_title = req_item.get("title", "Untitled Requirement")
+            req_desc = req_item.get("description", "")
+            stories = req_item.get("user_stories", [])
+            
+            # Find or create the RequirementModel for this requirement_code
+            db_req = db_reqs_by_code.get(req_code)
+            if db_req:
+                # Update existing requirement
+                if db_req.status != "active":
+                    db_req.status = "active"
+                db_req.title = req_title
+                db_req.description = req_desc
+                db_req.epic_id = epic_id_uuid
+                db_req.version = version_num
+                await session.flush()
+                created_req_id = db_req.id
+            else:
+                # Create new requirement
+                new_req = RequirementModel(
+                    project_id=project_id,
+                    epic_id=epic_id_uuid,
+                    requirement_code=req_code,
+                    title=req_title,
+                    description=req_desc,
+                    version=version_num,
+                    status="active"
+                )
+                session.add(new_req)
+                await session.flush()
+                created_req_id = new_req.id
+
+            touched_req_ids.add(str(created_req_id))
+
+            # ---- Process User Stories for this requirement ----
+            if not stories:
+                continue
+
+            # Load all existing stories for this specific requirement
             stmt_stories = select(UserStoryModel).where(UserStoryModel.requirement_id == created_req_id)
             res_stories = await session.execute(stmt_stories)
             db_stories = res_stories.scalars().all()
-            
+
             stories_by_id = {s.id: s for s in db_stories}
             stories_by_code = {s.ticket_code: s for s in db_stories if s.ticket_code}
             stories_by_title = {s.story_title: s for s in db_stories if s.story_title}
-            
+
             touched_story_ids = []
             semantic_recs = updates.get("semantic_recommendations") or []
-            
-            for story in updates["user_stories"]:
+
+            for story in stories:
                 ticket_code = story.get("ticket_code")
                 story_title = story.get("story_title", "Untitled Story")
-                
+
                 # Check match
                 db_story = None
                 if ticket_code and ticket_code != "US-000":
                     db_story = stories_by_code.get(ticket_code)
                 if not db_story:
                     db_story = stories_by_title.get(story_title)
-                    
+
                 rec_action = None
                 if semantic_recs:
                     matched_rec = next((r for r in semantic_recs if r.get("target_requirement_id") == ticket_code), None)
@@ -1604,21 +1726,19 @@ class RequirementStateRepository:
                         matched_rec = next((r for r in semantic_recs if r.get("target_requirement_id") == db_story.ticket_code), None)
                     if matched_rec:
                         rec_action = matched_rec.get("recommended_action")
-                    
+
                 if db_story:
-                    # Match found! Compare fields to determine change_type
                     title_changed = db_story.story_title != story_title
                     as_a_changed = db_story.as_a != story.get("as_a", "")
                     i_want_to_changed = db_story.i_want_to != story.get("i_want_to", "")
                     so_that_changed = db_story.so_that != story.get("so_that", "")
                     was_archived = db_story.status != "active"
-                    
+
                     if rec_action == "UPDATE":
                         story_modified = True
                     elif rec_action == "NO_CHANGE":
                         story_modified = False
                     elif rec_action == "ARCHIVE":
-                        # Explicit archive path
                         db_story.status = "archived"
                         db_story.change_type = "archived"
                         db_story.version = db_story.version + 1
@@ -1628,7 +1748,7 @@ class RequirementStateRepository:
                         continue
                     else:
                         story_modified = title_changed or as_a_changed or i_want_to_changed or so_that_changed
-                    
+
                     if story_modified or was_archived:
                         db_story.story_title = story_title
                         db_story.as_a = story.get("as_a", "")
@@ -1640,16 +1760,14 @@ class RequirementStateRepository:
                     else:
                         db_story.change_type = "unchanged"
                         db_story.status = "active"
-                        
+
                     db_story.last_modified_by = "automated_agent"
                     db_story.project_id = project_id
                     await session.flush()
                 else:
-                    # Create new story
-                    # If ticket_code is missing, US-000, or already taken by another active/archived story, generate unique code
                     if not ticket_code or ticket_code == "US-000" or ticket_code in stories_by_code:
                         ticket_code = await UserStoryRepository.generate_unique_ticket_code(project_id, session)
-                        
+
                     db_story = UserStoryModel(
                         project_id=project_id,
                         requirement_id=created_req_id,
@@ -1665,19 +1783,18 @@ class RequirementStateRepository:
                     )
                     session.add(db_story)
                     await session.flush()
-                    
+
                 touched_story_ids.append(db_story.id)
-                
-                # Now sync acceptance criteria for this story
+
+                # Sync acceptance criteria for this story
                 stmt_ac = select(AcceptanceCriteriaModel).where(AcceptanceCriteriaModel.user_story_id == db_story.id)
                 res_ac = await session.execute(stmt_ac)
                 db_ac_list = res_ac.scalars().all()
-                
+
                 incoming_ac_texts = story.get("acceptance_criteria", [])
                 matched_db_ac = set()
                 matched_incoming_indices = set()
-                
-                # Pass 1: exact match on active criteria
+
                 for i, text_val in enumerate(incoming_ac_texts):
                     for db_ac in db_ac_list:
                         if db_ac.id not in matched_db_ac and db_ac.status == "active" and db_ac.criteria_text == text_val:
@@ -1685,8 +1802,7 @@ class RequirementStateRepository:
                             matched_db_ac.add(db_ac.id)
                             matched_incoming_indices.add(i)
                             break
-                            
-                # Pass 2: exact match on archived criteria (reactivate)
+
                 for i, text_val in enumerate(incoming_ac_texts):
                     if i in matched_incoming_indices:
                         continue
@@ -1698,11 +1814,10 @@ class RequirementStateRepository:
                             matched_db_ac.add(db_ac.id)
                             matched_incoming_indices.add(i)
                             break
-                            
-                # Align unmatched
+
                 unmatched_active_db_ac = [ac for ac in db_ac_list if ac.id not in matched_db_ac and ac.status == "active"]
                 unmatched_incoming_indices_list = [i for i in range(len(incoming_ac_texts)) if i not in matched_incoming_indices]
-                
+
                 for idx, i in enumerate(unmatched_incoming_indices_list):
                     text_val = incoming_ac_texts[i]
                     if idx < len(unmatched_active_db_ac):
@@ -1723,24 +1838,22 @@ class RequirementStateRepository:
                             change_type="created"
                         )
                         session.add(new_ac)
-                        
-                # Archive any remaining active criteria
+
                 for db_ac in db_ac_list:
                     if db_ac.id not in matched_db_ac and db_ac.status == "active":
                         db_ac.status = "archived"
                         db_ac.change_type = "archived"
                         db_ac.version = db_ac.version + 1
-                        
+
                 await session.flush()
-                
-            # Soft delete (archive) any user stories for this requirement that are not in the current payload
+
+            # Archive any user stories in this requirement that are NOT in the current payload
             for s_id, s_model in stories_by_id.items():
                 if s_id not in touched_story_ids and s_model.status == "active":
                     s_model.status = "archived"
                     s_model.change_type = "archived"
                     s_model.version = s_model.version + 1
-                    
-                    # Also archive all of its active criteria
+
                     stmt_story_ac = select(AcceptanceCriteriaModel).where(
                         AcceptanceCriteriaModel.user_story_id == s_id,
                         AcceptanceCriteriaModel.status == "active"
@@ -1751,18 +1864,39 @@ class RequirementStateRepository:
                         db_ac.status = "archived"
                         db_ac.change_type = "archived"
                         db_ac.version = db_ac.version + 1
-            
+
             await session.flush()
 
-        # 3. Propagation for Clarification Questions
+        # Archive any active requirements NOT in the incoming payload (requirement removal)
+        for r_code, r_model in db_reqs_by_code.items():
+            r_id_str = str(r_model.id)
+            if r_id_str not in touched_req_ids and r_model.status == "active":
+                r_model.status = "archived"
+                # Also archive all its user stories
+                stmt_orphan_stories = select(UserStoryModel).where(UserStoryModel.requirement_id == r_model.id)
+                res_orphan_stories = await session.execute(stmt_orphan_stories)
+                for orphan_story in res_orphan_stories.scalars().all():
+                    if orphan_story.status == "active":
+                        orphan_story.status = "archived"
+                        orphan_story.change_type = "archived"
+                        orphan_story.version = orphan_story.version + 1
+                await session.flush()
+
+        # 3. Propagation for Clarification Questions (associate with first active requirement)
+        first_active_req_id = None
+        for r_id_str in touched_req_ids:
+            first_active_req_id = uuid.UUID(r_id_str)
+            break
+        
         if "clarification_questions" in updates and updates["clarification_questions"] is not None:
-            stmt_ar_ids = select(AuditResultModel.id).where(AuditResultModel.requirement_id == created_req_id)
-            res_ar_ids = await session.execute(stmt_ar_ids)
-            ar_ids = res_ar_ids.scalars().all()
-            if ar_ids:
-                stmt_del_cq = delete(ClarificationQuestionModel).where(ClarificationQuestionModel.audit_result_id.in_(ar_ids))
-                await session.execute(stmt_del_cq)
-            
+            if first_active_req_id:
+                stmt_ar_ids = select(AuditResultModel.id).where(AuditResultModel.requirement_id == first_active_req_id)
+                res_ar_ids = await session.execute(stmt_ar_ids)
+                ar_ids = res_ar_ids.scalars().all()
+                if ar_ids:
+                    stmt_del_cq = delete(ClarificationQuestionModel).where(ClarificationQuestionModel.audit_result_id.in_(ar_ids))
+                    await session.execute(stmt_del_cq)
+
             for cq in updates["clarification_questions"]:
                 await ClarificationQuestionRepository.create(str(project_id), {
                     "checklist_category": cq.get("checklist_category", "General"),
@@ -1770,7 +1904,7 @@ class RequirementStateRepository:
                     "question_text": cq.get("question_text", ""),
                     "user_answer": cq.get("user_answer"),
                     "is_resolved": cq.get("is_resolved", False)
-                }, session, requirement_id=created_req_id)
+                }, session, requirement_id=first_active_req_id)
 
         # 4. Propagation for PRD & Diagrams
         if ("generated_prd" in updates and updates["generated_prd"] is not None) or ("generated_diagrams" in updates and updates["generated_diagrams"] is not None):
@@ -1792,19 +1926,19 @@ class RequirementStateRepository:
                 }, session)
 
         # 5. Propagation for Audit Results
-        if "validation_status" in updates and updates["validation_status"] is not None:
+        if "validation_status" in updates and updates["validation_status"] is not None and first_active_req_id:
             passed = updates.get("passed_checks", [])
             failed = updates.get("failed_checks", [])
             is_valid = updates["validation_status"] == "valid"
             
-            ar_list = await AuditResultRepository.get_by_project(str(project_id), session, requirement_id=created_req_id)
+            ar_list = await AuditResultRepository.get_by_project(str(project_id), session, requirement_id=first_active_req_id)
             if not ar_list:
                 await AuditResultRepository.create(str(project_id), {
                     "is_valid": is_valid,
                     "audit_version_reviewed": version_num,
                     "passed_checks": passed,
                     "failed_checks": failed
-                }, session, requirement_id=created_req_id)
+                }, session, requirement_id=first_active_req_id)
             else:
                 await AuditResultRepository.update(ar_list[0]["id"], str(project_id), {
                     "is_valid": is_valid,
@@ -1839,7 +1973,6 @@ class ConversationMessageRepository:
             )
             s.add(msg_obj)
             await s.flush()
-            await s.commit()
             return {
                 "id": str(msg_obj.id),
                 "project_id": str(msg_obj.project_id),
@@ -1850,9 +1983,16 @@ class ConversationMessageRepository:
             }
 
         if session:
+            # Session is managed by the caller (e.g. get_db dependency) - just flush
             return await _save(session)
         async with AsyncSessionLocal() as db_session:
-            return await _save(db_session)
+            try:
+                result = await _save(db_session)
+                await db_session.commit()
+                return result
+            except Exception:
+                await db_session.rollback()
+                raise
 
     @staticmethod
     async def get_conversation_history(project_id: str, session: Optional[AsyncSession] = None) -> List[Dict[str, Any]]:

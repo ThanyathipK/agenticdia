@@ -88,25 +88,33 @@ llm = ChatOpenAI(
     api_key="lm-studio",
     model="qwen-3.5-9b",
     temperature=0.0,
-    max_tokens=800,  # Optimized for structured output
+    max_tokens=3000,  # Optimized for structured output
     model_kwargs={"seed": 42}
 )
 
 # Json Output Parser for strict structured JSON outputs
 parser = JsonOutputParser()
 
-async def get_or_init_requirement_state(project_id: str, current_version: int = 1) -> RequirementState:
+async def get_or_init_requirement_state(project_id: str, session: Optional[AsyncSession] = None, current_version: int = 1) -> RequirementState:
     """
     Retrieves or initializes the centralized RequirementState object from Supabase.
     """
     logger.info(f"[DB LOG] [AGENTS] Loading project state for {project_id}...")
-    db_state = await RequirementStateRepository.get_by_project_id(project_id)
+    
+    # Use provided session or create a new one as fallback
+    if session is None:
+        from app.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            db_state = await RequirementStateRepository.get_by_project_id(project_id, session)
+    else:
+        db_state = await RequirementStateRepository.get_by_project_id(project_id, session)
+    
     logger.info(f"[DB LOG] [AGENTS] Loading project state for {project_id} complete. Found: {db_state is not None}")
     if not db_state:
         db_state = {
             "project_id": project_id,
             "project_name": "PromptPay Settlement Engine",
-            "requirements": {},
+            "requirements": [],
             "business_goals": [],
             "actors": [],
             "user_stories": [],
@@ -368,7 +376,10 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     logger.info(f"[WORKFLOW ROUTER] Classification: {router_result}")
 
     project_id = state.get("project_id", "PROJ-UNKNOWN")
-    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+    
+    # Use session from state if available, otherwise let function create one
+    db_session = state.get("db_session")
+    req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
 
     if workflow_type == "CHAT":
         logger.info("[WORKFLOW ROUTER] Handling as CHAT. Generating conversational response.")
@@ -392,7 +403,8 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
 
     elif workflow_type == "QUESTION":
         logger.info("[WORKFLOW ROUTER] Handling as QUESTION. Answering direct question.")
-        existing_epic = req_state.get("requirements", {}).get("epic_name", "")
+        requirements = req_state.get("requirements", [])
+        existing_epic = requirements[0].get("title", "") if requirements else ""
         stories = req_state.get("user_stories", [])
         stories_summary = "\n".join([f"- {s.get('ticket_code', 'US')}: {s.get('story_title', '')}" for s in stories[:10]])
 
@@ -448,15 +460,18 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
 
     raw_input = state.get("raw_input", "")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
-    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+    
+    # Use session from state if available, otherwise let function create one
+    db_session = state.get("db_session")
+    req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     existing_stories = req_state.get("user_stories", [])
 
     detected_intent = state.get("detected_intent")
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_stories)
-        detected_intent = intent_res.get("intent", "UPDATE")
+        detected_intent = intent_res.get("intent", "NEW_REQUIREMENT")
     elif not detected_intent:
-        detected_intent = "NO_CHANGE"
+        detected_intent = "GENERAL_CHAT"
 
     match_result = await match_requirement(raw_input, detected_intent, existing_stories)
     matcher_status = str(match_result.get("status", "MATCHED")).upper()
@@ -517,14 +532,24 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     logger.info("Executing gatherer_node to structure requirements.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
     raw_input = state.get("raw_input", "")
-    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+    
+    # Use session from state if available, otherwise let function create one
+    db_session = state.get("db_session")
+    req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     
     # Store existing user stories before processing passed_structured or raw_input
     existing_user_stories = list(req_state.get("user_stories", []))
 
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
-        req_state["requirements"] = {"epic_name": passed_structured.get("epic_name", "")}
+        req_state["requirements"] = [
+            {
+                "requirement_code": "REQ-001",
+                "title": passed_structured.get("epic_name", ""),
+                "description": "",
+                "user_stories": passed_structured.get("user_stories", [])
+            }
+        ]
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
 
     result = None
@@ -539,11 +564,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     intent_reason = ""
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_user_stories)
-        detected_intent = intent_res.get("intent", "UPDATE")
+        detected_intent = intent_res.get("intent", "UPDATE_REQUIREMENT")
         intent_confidence = float(intent_res.get("confidence", 1.0))
         intent_reason = intent_res.get("reason", "")
     elif not detected_intent:
-        detected_intent = "NO_CHANGE"
+        detected_intent = "GENERAL_CHAT"
 
     logger.info(f"Gatherer received raw_input: '{raw_input[:100]}' with detected_intent: {detected_intent}, confidence: {intent_confidence}")
 
@@ -603,7 +628,8 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             }
 
         # Format current stories context
-        existing_epic = req_state.get("requirements", {}).get("epic_name", "")
+        requirements = req_state.get("requirements", [])
+        existing_epic = requirements[0].get("title", "") if requirements else ""
         context_lines = []
         if existing_epic:
             context_lines.append(f"CURRENT ACTIVE EPIC: {existing_epic}\n(Note: DO NOT change this Epic Name unless the user explicitly requests to change or rename the epic)\n")
@@ -702,7 +728,8 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         )
 
     # Modify only its own fields in RequirementState
-    existing_epic_name = req_state.get("requirements", {}).get("epic_name", "")
+    requirements = req_state.get("requirements", [])
+    existing_epic_name = requirements[0].get("title", "") if requirements else ""
     llm_epic_name = result.get("epic_name", "")
     
     raw_input_lower = raw_input.lower() if raw_input else ""
@@ -714,27 +741,97 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     else:
         epic_name = llm_epic_name or existing_epic_name or "Structured Requirements Draft"
 
-    requirements = {"epic_name": epic_name}
-    newly_generated_stories = result.get("user_stories", [])
+    # ===============================================
+    # Handle multi-requirement output from LLM
+    # The LLM now returns: {"epic_name": "...", "version": N, "requirements": [...]}
+    # ===============================================
+    llm_requirements = result.get("requirements", [])
     
-    # Synchronize user stories: merge newly generated user stories with existing user stories
-    merged_stories = merge_user_stories(
-        existing_stories=existing_user_stories,
-        new_incoming_stories=newly_generated_stories,
-        semantic_recs=semantic_recs
-    )
-    
-    active_stories = [s for s in merged_stories if s.get("status", "active") == "active"]
-    ac_list = []
-    for story in active_stories:
-        ac_list.extend(story.get("acceptance_criteria", []))
+    if llm_requirements and isinstance(llm_requirements, list):
+        # New format: multiple requirements with their user stories
+        # Build merged stories per requirement, then flatten for backward compat
+        req_items_output = []
+        all_merged_stories = []
+        all_active_stories = []
+        all_ac = []
+        
+        for req_item in llm_requirements:
+            req_code = req_item.get("requirement_code", "REQ-000")
+            req_title = req_item.get("title", "Untitled Requirement")
+            req_desc = req_item.get("description", "")
+            newly_generated_stories = req_item.get("user_stories", [])
+            
+            # Merge stories for this requirement
+            merged_stories = merge_user_stories(
+                existing_stories=existing_user_stories,
+                new_incoming_stories=newly_generated_stories,
+                semantic_recs=semantic_recs
+            )
+            
+            active_stories = [s for s in merged_stories if s.get("status", "active") == "active"]
+            
+            req_items_output.append({
+                "requirement_code": req_code,
+                "title": req_title,
+                "description": req_desc,
+                "user_stories": active_stories
+            })
+            
+            all_merged_stories.extend(merged_stories)
+            all_active_stories.extend(active_stories)
+            for story in active_stories:
+                all_ac.extend(story.get("acceptance_criteria", []))
+        
+        # Also include any existing stories that were NOT matched by any requirement
+        # by checking the merge result - stories from existing requirements not in LLM output
+        existing_codes_in_output = set()
+        for req_item in llm_requirements:
+            for us in req_item.get("user_stories", []):
+                tc = us.get("ticket_code", "")
+                if tc:
+                    existing_codes_in_output.add(tc)
+        
+        for ex_story in existing_user_stories:
+            tc = ex_story.get("ticket_code", "")
+            if tc and tc not in existing_codes_in_output and ex_story.get("status", "active") == "active":
+                # This existing story was not mentioned in LLM output - keep it unchanged
+                # Find which requirement it belongs to by looking at existing req_state
+                pass  # handled by merge_user_stories
+        
+        # Set the requirements list into req_state
+        req_state["requirements"] = req_items_output
+        req_state["user_stories"] = all_active_stories
+        req_state["all_merged_stories"] = all_merged_stories
+        req_state["acceptance_criteria"] = all_ac
+        
+    else:
+        # Legacy fallback: flat user_stories in result
+        newly_generated_stories = result.get("user_stories", [])
+        
+        merged_stories = merge_user_stories(
+            existing_stories=existing_user_stories,
+            new_incoming_stories=newly_generated_stories,
+            semantic_recs=semantic_recs
+        )
+        
+        active_stories = [s for s in merged_stories if s.get("status", "active") == "active"]
+        ac_list = []
+        for story in active_stories:
+            ac_list.extend(story.get("acceptance_criteria", []))
+        
+        # Wrap into a single default requirement
+        req_state["requirements"] = [{
+            "requirement_code": "REQ-001",
+            "title": epic_name or "Structured Requirements",
+            "description": "",
+            "user_stories": active_stories
+        }]
+        req_state["user_stories"] = active_stories
+        req_state["all_merged_stories"] = merged_stories
+        req_state["acceptance_criteria"] = ac_list
+
     version_number = result.get("version", req_state["version_number"])
     
-    # Perform merge in memory
-    req_state["requirements"] = requirements
-    req_state["user_stories"] = active_stories
-    req_state["all_merged_stories"] = merged_stories
-    req_state["acceptance_criteria"] = ac_list
     req_state["version_number"] = version_number
     req_state["current_workflow_state"] = "gatherer_node"
     req_state["semantic_recommendations"] = semantic_recs
@@ -751,7 +848,8 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     structured_out = {
         "epic_name": epic_name,
         "version": version_number,
-        "user_stories": active_stories
+        "user_stories": req_state.get("user_stories", []),
+        "requirements": req_state.get("requirements", [])
     }
     
     return {
@@ -769,11 +867,21 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     """
     logger.info("Executing auditor_node to audit compliance.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
-    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+    
+    # Use session from state if available, otherwise let function create one
+    db_session = state.get("db_session")
+    req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
-        req_state["requirements"] = {"epic_name": passed_structured.get("epic_name", "")}
+        req_state["requirements"] = [
+            {
+                "requirement_code": "REQ-001",
+                "title": passed_structured.get("epic_name", ""),
+                "description": "",
+                "user_stories": passed_structured.get("user_stories", [])
+            }
+        ]
         req_state["user_stories"] = passed_structured.get("user_stories", [])
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
         all_ac = []
@@ -811,8 +919,10 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         }
 
     # Only send newly created or updated user stories for LLM evaluation
+    requirements = req_state.get("requirements", [])
+    epic_name = requirements[0].get("title", "") if requirements else ""
     structured_reqs_for_prompt = {
-        "epic_name": req_state["requirements"].get("epic_name", ""),
+        "epic_name": epic_name,
         "version": req_state["version_number"],
         "user_stories": to_audit_stories
     }
@@ -905,11 +1015,21 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     """
     logger.info("Executing architect_node to compile PRD specifications.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
-    req_state = await get_or_init_requirement_state(project_id, state.get("current_version", 1))
+    
+    # Use session from state if available, otherwise let function create one
+    db_session = state.get("db_session")
+    req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
-        req_state["requirements"] = {"epic_name": passed_structured.get("epic_name", "")}
+        req_state["requirements"] = [
+            {
+                "requirement_code": "REQ-001",
+                "title": passed_structured.get("epic_name", ""),
+                "description": "",
+                "user_stories": passed_structured.get("user_stories", [])
+            }
+        ]
         req_state["user_stories"] = passed_structured.get("user_stories", [])
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
         all_ac = []
@@ -937,8 +1057,10 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             "mermaid_diagram": existing_diagrams
         }
         
+    requirements = req_state.get("requirements", [])
+    epic_name = requirements[0].get("title", "") if requirements else ""
     structured_reqs_for_prompt = {
-        "epic_name": req_state["requirements"].get("epic_name", ""),
+        "epic_name": epic_name,
         "version": req_state["version_number"],
         "user_stories": req_state["user_stories"]
     }

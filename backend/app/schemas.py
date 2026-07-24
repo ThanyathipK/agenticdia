@@ -70,10 +70,16 @@ class UserStoryModel(BaseModel):
     so_that: str = Field(..., description="The business benefit or outcome")
     acceptance_criteria: List[str] = Field(..., description="Behavioral validation checklist (e.g. Given/When/Then)")
 
+class RequirementItem(BaseModel):
+    requirement_code: str = Field(..., description="Unique requirement code (e.g. REQ-001)")
+    title: str = Field(..., description="Short descriptive title of the requirement")
+    description: Optional[str] = Field(default="", description="Detailed description or goal of this requirement")
+    user_stories: List[UserStoryModel] = Field(..., description="Granular product backlog items under this requirement")
+
 class GatheredRequirements(BaseModel):
     epic_name: str = Field(..., description="Unified theme of all extracted stories")
     version: int = Field(default=1, description="Incremental version counter")
-    user_stories: List[UserStoryModel] = Field(..., description="Granular product backlog items")
+    requirements: List[RequirementItem] = Field(..., description="Multiple requirements with their user stories")
 
 
 # ==========================================
@@ -81,10 +87,16 @@ class GatheredRequirements(BaseModel):
 # ==========================================
 
 class RequirementIntentDetectionResult(BaseModel):
-    intent: str = Field(..., description="Detected user intent: NEW, UPDATE, DELETE, CLARIFY, or NO_CHANGE.")
+    intent: str = Field(..., description="Detected user intent: GENERAL_CHAT, CLARIFICATION, NEW_REQUIREMENT, UPDATE_REQUIREMENT, or DELETE_REQUIREMENT.")
     confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
     reason: str = Field(default="", description="Detailed reasoning explaining the intent classification.")
     reasoning: Optional[str] = Field(default="", description="Brief reasoning explaining the intent classification.")
+
+
+class GeneralChatResponse(BaseModel):
+    """Schema for general chat response that does NOT modify any project artifacts."""
+    message: str = Field(..., description="Natural language conversational response from the LLM.")
+    intent: str = Field(default="GENERAL_CHAT", description="Always GENERAL_CHAT for this response type.")
 
 
 # ==========================================

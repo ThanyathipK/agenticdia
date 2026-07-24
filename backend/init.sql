@@ -104,15 +104,23 @@ CREATE TRIGGER handle_updated_at_requirements
 -- Captures Agile user stories formatted according to banking compliance requirements.
 CREATE TABLE user_stories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
     requirement_id UUID NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
-    ticket_code VARCHAR(50) NOT NULL UNIQUE, -- e.g., 'US-001', 'LN-402'
+    ticket_code VARCHAR(50) NOT NULL, -- e.g., 'US-001', 'LN-402'
     story_title VARCHAR(255) NOT NULL,
     as_a TEXT NOT NULL,
     i_want_to TEXT NOT NULL,
     so_that TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    version INTEGER NOT NULL DEFAULT 1,
+    last_modified_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
+    change_type VARCHAR(50) NOT NULL DEFAULT 'created',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Composite unique constraint for project-level ticket_code uniqueness
+ALTER TABLE user_stories ADD CONSTRAINT uq_user_stories_project_id_ticket_code UNIQUE (project_id, ticket_code);
 
 CREATE TRIGGER handle_updated_at_user_stories
     BEFORE UPDATE ON user_stories
@@ -127,6 +135,10 @@ CREATE TABLE acceptance_criteria (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_story_id UUID NOT NULL REFERENCES user_stories(id) ON DELETE CASCADE,
     criteria_text TEXT NOT NULL, -- Standardised Given-When-Then criteria block
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    version INTEGER NOT NULL DEFAULT 1,
+    last_modified_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
+    change_type VARCHAR(50) NOT NULL DEFAULT 'created',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -143,7 +155,7 @@ CREATE TRIGGER handle_updated_at_acceptance_criteria
 CREATE TABLE audit_results (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     requirement_id UUID NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
-    version_reviewed INT NOT NULL,
+    audit_version_reviewed INT NOT NULL,
     is_valid BOOLEAN NOT NULL DEFAULT FALSE,
     passed_checks JSONB NOT NULL DEFAULT '[]'::jsonb, -- Structured passed rule details
     failed_checks JSONB NOT NULL DEFAULT '[]'::jsonb, -- Structured failed rule details
@@ -185,8 +197,8 @@ CREATE TABLE prd_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     version INT NOT NULL,
-    markdown_content TEXT NOT NULL,
-    mermaid_graph TEXT, -- System architecture flowcharts or state diagrams
+    prd_markdown TEXT NOT NULL,
+    mermaid_diagram TEXT, -- System architecture flowcharts or state diagrams
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -480,13 +480,40 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
     import uuid
     project_data = payload.dict()
     project_data["id"] = str(uuid.uuid4())
-    # Temporary: user_id is optional until auth is implemented
-    project_data["user_id"] = None
+    # Use system user UUID as default until proper auth is implemented
+    project_data["user_id"] = "00000000-0000-0000-0000-000000000000"
     return await ProjectRepository.create_project(project_data, db)
+
+@app.put("/api/projects/{project_id}", status_code=status.HTTP_200_OK)
+async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    """Update an existing project (rename)."""
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    
+    updates = payload.dict()
+    updated = await ProjectRepository.update(project_id, updates, db)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return updated
+
+@app.delete("/api/projects/{project_id}", status_code=status.HTTP_200_OK)
+async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
+    """Delete an existing project."""
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    
+    deleted = await ProjectRepository.delete(project_id, db)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"status": "deleted", "project_id": project_id}
 
 
 @app.get("/api/project/{project_id}", status_code=status.HTTP_200_OK)
-async def get_project_requirement_state(project_id: str):
+async def get_project_requirement_state(project_id: str, session: AsyncSession = Depends(get_db)):
     """
     Retrieves the centralized RequirementState for a project from Supabase.
     If it doesn't exist, returns default initialized values.
@@ -497,13 +524,20 @@ async def get_project_requirement_state(project_id: str):
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
     logger.info(f"[DB LOG] Loading RequirementState for project {project_id}")
-    state = await RequirementStateRepository.get_by_project_id(project_id)
+    state = await RequirementStateRepository.get_by_project_id(project_id, session)
     logger.info(f"[DB LOG] Loading RequirementState for project {project_id} complete. Found: {state is not None}")
     if not state:
         state = {
             "project_id": project_id,
             "project_name": "PromptPay Settlement Engine",
-            "requirements": {"epic_name": "PromptPay Real-Time Merchant Settlement Engine"},
+            "requirements": [
+                {
+                    "requirement_code": "REQ-001",
+                    "title": "PromptPay Real-Time Merchant Settlement Engine",
+                    "description": "Main epic for PromptPay settlement",
+                    "user_stories": []
+                }
+            ],
             "business_goals": [],
             "actors": [],
             "user_stories": [
@@ -533,7 +567,7 @@ async def get_project_requirement_state(project_id: str):
         }
         # Save default to database
         logger.info(f"[DB LOG] Saving default state for project {project_id}...")
-        state = await RequirementStateRepository.save_or_update(project_id, state)
+        state = await RequirementStateRepository.save_or_update(project_id, state, session)
         logger.info(f"[DB LOG] Saving default state for project {project_id} complete.")
 
     conv_history = await ConversationMessageRepository.get_conversation_history(project_id)
@@ -553,7 +587,7 @@ async def get_project_conversations(project_id: str):
 
 
 @app.put("/api/project/{project_id}", status_code=status.HTTP_200_OK)
-async def update_project_requirement_state(project_id: str, updates: Dict[str, Any]):
+async def update_project_requirement_state(project_id: str, updates: Dict[str, Any], session: AsyncSession = Depends(get_db)):
     """
     Directly updates the centralized RequirementState for a project in the database.
     Useful for saving manual PRD edits and synchronizing sections.
@@ -564,12 +598,12 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
     logger.info(f"[DB LOG] Updating RequirementState directly for project {project_id}")
-    state = await RequirementStateRepository.save_or_update(project_id, updates)
+    state = await RequirementStateRepository.save_or_update(project_id, updates, session)
     return state
 
 
 @app.post("/api/clarification/submit", status_code=status.HTTP_200_OK)
-async def post_clarification_submit(payload: Dict[str, Any]):
+async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSession = Depends(get_db)):
     """
     Submits answers to clarification questions, runs Auditor compliance check,
     and updates workflow state.
@@ -577,7 +611,7 @@ async def post_clarification_submit(payload: Dict[str, Any]):
     project_id = payload.get("project_id")
     answers = payload.get("answers", {})
     
-    req_state = await RequirementStateRepository.get_by_project_id(project_id)
+    req_state = await RequirementStateRepository.get_by_project_id(project_id, session)
     if not req_state:
         raise HTTPException(status_code=404, detail="Project not found")
         
@@ -595,20 +629,29 @@ async def post_clarification_submit(payload: Dict[str, Any]):
     req_state["validation_status"] = "valid" if is_valid else "invalid"
     req_state["current_workflow_state"] = "REVIEWING" if is_valid else "WAITING_CLARIFICATION"
     
-    saved_state = await RequirementStateRepository.save_or_update(project_id, req_state)
+    saved_state = await RequirementStateRepository.save_or_update(project_id, req_state, session)
     return saved_state
 
 
 @app.post("/api/process-requirements", status_code=status.HTTP_200_OK)
-async def post_process_requirements(request: ProcessRequirementsRequest):
+async def post_process_requirements(request: ProcessRequirementsRequest, session: AsyncSession = Depends(get_db)):
     """
     Asynchronously invokes the LangGraph multi-agent workflow (prd_workflow)
     to process raw requirements, audit compliance, or build PRD & architectural diagrams.
     Loads and updates the shared RequirementState from Supabase (as single source of truth).
+    
+    Pipeline:
+    1. Persist every user message before intent detection
+    2. Detect intent (GENERAL_CHAT, CLARIFICATION, NEW_REQUIREMENT, UPDATE_REQUIREMENT, DELETE_REQUIREMENT)
+    3. If GENERAL_CHAT: generate response with project context, persist, return (no LangGraph)
+    4. Otherwise: proceed to LangGraph workflow
+    5. Persist every assistant response
     """
     logger.info(f"Triggering on-demand {request.target_agent} agent for project {request.project_id}")
     
-    # Save every incoming user message before any intent detection or agent routing
+    # ==========================================
+    # STEP 1: Persist every user message before any intent detection or agent routing
+    # ==========================================
     if request.project_id and request.raw_input and request.raw_input.strip():
         await ConversationMessageRepository.save_message(
             project_id=str(request.project_id),
@@ -616,11 +659,83 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
             message=request.raw_input.strip()
         )
 
+    # ==========================================
+    # STEP 2: Intent Detection (before LangGraph)
+    # ==========================================
+    from app.semantic_service import detect_requirement_intent, generate_general_chat_response
+    
     # Load the centralized RequirementState from Supabase (single source of truth)
     logger.info(f"[DB LOG] Loading RequirementState for processing project {request.project_id}")
-    req_state = await RequirementStateRepository.get_by_project_id(request.project_id)
+    req_state = await RequirementStateRepository.get_by_project_id(request.project_id, session)
     logger.info(f"[DB LOG] Loading RequirementState for processing project {request.project_id} complete. Found: {req_state is not None}")
     
+    # Detect intent on the raw input
+    detected_intent_result = await detect_requirement_intent(
+        request.raw_input or "",
+        req_state.get("user_stories", []) if req_state else []
+    )
+    detected_intent = detected_intent_result.get("intent", "GENERAL_CHAT")
+    logger.info(f"[INTENT DETECTION] Detected intent: {detected_intent} (confidence: {detected_intent_result.get('confidence', 0.0)})")
+    
+    # ==========================================
+    # STEP 3: GENERAL_CHAT handling (bypass LangGraph entirely)
+    # ==========================================
+    # Only treat as GENERAL_CHAT if no explicit target_agent is specified.
+    # If user explicitly clicks "Generate PRD" or "Validate Requirements",
+    # honor the target_agent and proceed to LangGraph workflow.
+    explicit_agent_request = request.target_agent in ["architect", "auditor"]
+    if detected_intent == "GENERAL_CHAT" and not explicit_agent_request:
+        logger.info("[GENERAL_CHAT] Handling as general chat. Generating conversational response with project context.")
+
+        # Load conversation history for context
+        conv_history = []
+        if request.project_id:
+            conv_history = await ConversationMessageRepository.get_conversation_history(request.project_id)
+
+        # Generate response with full project context
+        response_text = await generate_general_chat_response(
+            raw_input=request.raw_input or "",
+            project_context=req_state or {},
+            conversation_history=conv_history
+        )
+
+        # Persist assistant response
+        if request.project_id and response_text:
+            await ConversationMessageRepository.save_message(
+                project_id=str(request.project_id),
+                role="assistant",
+                message=response_text
+            )
+
+        # Return response (no project artifacts modified)
+        return {
+            "status": "general_chat",
+            "detected_intent": "GENERAL_CHAT",
+            "message": response_text,
+            "structured_requirements": {
+                "epic_name": (
+                    req_state.get("requirements", [])[0].get("title", "")
+                    if req_state and req_state.get("requirements")
+                    else ""
+                ),
+                "version": req_state.get("version_number", 1) if req_state else 1,
+                "user_stories": req_state.get("user_stories", []) if req_state else []
+            } if req_state else {},
+            "audit_result": {
+                "is_valid": req_state.get("validation_status") == "valid" if req_state else False,
+                "audit_version_reviewed": req_state.get("version_number", 1) if req_state else 1,
+                "clarification_questions": req_state.get("clarification_questions", []) if req_state else [],
+                "passed_checks": [],
+                "failed_checks": []
+            },
+            "prd_markdown": req_state.get("generated_prd", "") if req_state else "",
+            "mermaid_diagram": req_state.get("generated_diagrams", "") if req_state else "",
+            "workflow_routing": {"workflow": "CHAT", "confidence": 1.0, "reason": "Routed as GENERAL_CHAT via intent detection."}
+        }
+    
+    # ==========================================
+    # STEP 4: Non-GENERAL_CHAT — proceed to LangGraph workflow
+    # ==========================================
     current_state = req_state.get("current_workflow_state", "IDLE") if req_state else "IDLE"
     logger.info(f"[WORKFLOW STATE MACHINE] Current workflow state: {current_state}")
 
@@ -661,7 +776,14 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
         req_state = {
             "project_id": request.project_id,
             "project_name": "PromptPay Settlement Engine",
-            "requirements": {"epic_name": reqs.get("epic_name", "")} if reqs else {},
+            "requirements": [
+                {
+                    "requirement_code": "REQ-001",
+                    "title": reqs.get("epic_name", ""),
+                    "description": "",
+                    "user_stories": reqs.get("user_stories", [])
+                }
+            ] if reqs else [],
             "business_goals": [],
             "actors": [],
             "user_stories": reqs.get("user_stories", []),
@@ -683,7 +805,20 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
             for us in reqs.get("user_stories", []):
                 all_ac.extend(us.get("acceptance_criteria", []))
             
-            req_state["requirements"] = {"epic_name": reqs.get("epic_name", "")}
+            reqs_list = reqs.get("requirements", [])
+            if isinstance(reqs_list, list) and reqs_list:
+                # Use the requirements list from frontend
+                req_state["requirements"] = reqs_list
+            else:
+                # Convert legacy epic_name to requirement format
+                req_state["requirements"] = [
+                    {
+                        "requirement_code": "REQ-001",
+                        "title": reqs.get("epic_name", ""),
+                        "description": "",
+                        "user_stories": reqs.get("user_stories", [])
+                    }
+                ]
             req_state["user_stories"] = reqs.get("user_stories", [])
             req_state["acceptance_criteria"] = all_ac
             if "version" in reqs:
@@ -694,7 +829,11 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
         "project_id": request.project_id,
         "raw_input": request.raw_input or "",
         "structured_requirements": {
-            "epic_name": req_state.get("requirements", {}).get("epic_name", ""),
+            "epic_name": (
+                req_state.get("requirements", [])[0].get("title", "")
+                if req_state and req_state.get("requirements")
+                else ""
+            ),
             "version": req_state.get("version_number", 1),
             "user_stories": req_state.get("user_stories", [])
         },
@@ -704,7 +843,9 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
         "current_version": req_state.get("version_number", 1),
         "version_history_summaries": request.version_history_summaries if request.version_history_summaries is not None else "No previous history.",
         "target_agent": request.target_agent or "gatherer",
-        "requirement_state": req_state
+        "requirement_state": req_state,
+        "detected_intent": detected_intent,
+        "db_session": session  # Pass the active session to workflow nodes
     }
     
     try:
@@ -728,22 +869,52 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
 
         # Persist complete merged changes to database
         logger.info(f"[DB LOG] Persisting completed merged state and workflow state '{req_state.get('current_workflow_state')}' for project {request.project_id}...")
-        persisted_state = await RequirementStateRepository.save_or_update(request.project_id, req_state)
+        persisted_state = await RequirementStateRepository.save_or_update(request.project_id, req_state, session)
         if persisted_state:
             req_state = persisted_state
         else:
             logger.info(f"[WORKFLOW ROUTER] Bypassing DB persist for workflow type '{wf_type}'.")
+        
+        # ==========================================
+        # STEP 5: Persist assistant response for non-GENERAL_CHAT intents
+        # ==========================================
+        agent_message = final_state.get("agent_message", "")
+        if request.project_id and agent_message:
+            await ConversationMessageRepository.save_message(
+                project_id=str(request.project_id),
+                role="assistant",
+                message=agent_message
+            )
         
         # Determine status dynamically based on centralized validation status
         is_valid = req_state.get("validation_status") == "valid"
         status_str = "completed" if is_valid else "audit_pending"
         
         # Format structures back to preserve frontend compatibility
-        structured_out = {
-            "epic_name": req_state.get("requirements", {}).get("epic_name", ""),
-            "version": req_state.get("version_number", 1),
-            "user_stories": req_state.get("user_stories", [])
-        }
+        reqs_data = req_state.get("requirements", [])
+        if isinstance(reqs_data, list):
+            # Multi-requirement format
+            epic_name = reqs_data[0].get("title", "") if reqs_data else ""
+            structured_out = {
+                "epic_name": epic_name,
+                "version": req_state.get("version_number", 1),
+                "user_stories": req_state.get("user_stories", []),
+                "requirements": reqs_data
+            }
+        elif isinstance(reqs_data, dict):
+            # Legacy dict format
+            structured_out = {
+                "epic_name": reqs_data.get("epic_name", ""),
+                "version": req_state.get("version_number", 1),
+                "user_stories": req_state.get("user_stories", [])
+            }
+        else:
+            # Fallback for None or unexpected types
+            structured_out = {
+                "epic_name": "",
+                "version": req_state.get("version_number", 1),
+                "user_stories": req_state.get("user_stories", [])
+            }
         
         # Ensure audit result fields are cleanly populated
         audit_out = {
@@ -757,12 +928,12 @@ async def post_process_requirements(request: ProcessRequirementsRequest):
         return {
             "status": status_str,
             "workflow_routing": workflow_routing,
-            "detected_intent": final_state.get("detected_intent") or req_state.get("detected_intent", "UPDATE"),
+            "detected_intent": final_state.get("detected_intent") or req_state.get("detected_intent", detected_intent),
             "structured_requirements": structured_out,
             "audit_result": audit_out,
             "prd_markdown": req_state.get("generated_prd", ""),
             "mermaid_diagram": req_state.get("generated_diagrams", ""),
-            "message": final_state.get("agent_message", "")
+            "message": agent_message
         }
     except Exception as e:
         logger.error(f"Multi-agent workflow execution failed for project {request.project_id}: {str(e)}")
@@ -800,8 +971,8 @@ async def post_intent_detector(payload: IntentDetectorRequest, db: AsyncSession 
     current_stories = []
     if payload.project_id:
         try:
-            req_state = await RequirementRepository.get_or_init_state(db, payload.project_id, 1)
-            current_stories = req_state.get("user_stories", [])
+            req_state = await RequirementStateRepository.get_by_project_id(payload.project_id, db)
+            current_stories = req_state.get("user_stories", []) if req_state else []
         except Exception:
             pass
             
@@ -826,8 +997,8 @@ async def post_requirement_matcher(payload: RequirementMatcherRequest, db: Async
     current_stories = []
     if payload.project_id:
         try:
-            req_state = await RequirementRepository.get_or_init_state(db, payload.project_id, 1)
-            current_stories = req_state.get("user_stories", [])
+            req_state = await RequirementStateRepository.get_by_project_id(payload.project_id, db)
+            current_stories = req_state.get("user_stories", []) if req_state else []
         except Exception:
             pass
             
