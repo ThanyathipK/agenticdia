@@ -26,6 +26,10 @@ class Settings(BaseSettings):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        # Add SSL mode for Supabase cloud connections
+        if "supabase.com" in url and "ssl=" not in url:
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}ssl=require"
         return url
 
     # Local LLM / LM Studio Orchestration Settings

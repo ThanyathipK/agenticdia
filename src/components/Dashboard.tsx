@@ -1145,14 +1145,17 @@ This document specifies the functional, non-functional, and technical requiremen
       timestamp: timestampStr
     }]);
 
-    // Set Loading State
+    // Set Loading State - show neutral loading indicator until intent is determined
     setIsLoading(true);
     setIsProcessing(true);
-    setSyncStatus("Gathering specifications...");
-    setCurrentAgentNode("gatherer_node");
+    setSyncStatus("Detecting intent...");
+    setCurrentAgentNode(null);
 
     try {
       // Make a POST request using axios to /api/process-requirements
+      // The backend handles intent detection internally and routes accordingly:
+      //   - GENERAL_CHAT: returns conversational response directly (no agent workflow)
+      //   - REQUIREMENT_REQUEST: proceeds to Gatherer workflow
       const response = await axios.post("/api/process-requirements", {
         project_id: projectId,
         raw_input: inputMsg,
@@ -1163,36 +1166,63 @@ This document specifies the functional, non-functional, and technical requiremen
       });
 
       const data = response.data;
+      const detectedIntent = data.detected_intent || "GENERAL_CHAT";
 
-      // Successfully got results from backend
-      const receivedReqs = data.structured_requirements || {};
+      if (detectedIntent === "GENERAL_CHAT") {
+        // ==========================================
+        // GENERAL_CHAT: Display conversational response immediately
+        // Do NOT modify requirements, user stories, version history, or any project artifacts
+        // ==========================================
+        setSyncStatus("Synced with Supabase Cloud");
+        setCurrentAgentNode(null);
 
-      // Update states
-      if (receivedReqs.epic_name) {
-        setStructuredRequirements(receivedReqs);
-        
-        // Advance version count dynamically when structured requirements are updated
-        const nextVer = currentVersion + 1;
-        setCurrentVersion(nextVer);
+        const chatResponse = data.message || "I understood your message. How can I help you further?";
 
-        // Update version history ledger
-        const newHist: VersionHistory = {
-          version: nextVer,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-          author: "Thanyathip (Product Owner)",
-          description: inputMsg.substring(0, 70) + (inputMsg.length > 70 ? "..." : ""),
-          requirementsSnapshot: receivedReqs
-        };
-        setVersionHistory(prev => [newHist, ...prev]);
-        setSyncStatus(`State updated to Version ${nextVer}.0`);
+        setMessages(prev => [...prev, {
+          id: `general-chat-${Date.now()}`,
+          role: 'assistant',
+          content: chatResponse,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }]);
+
+      } else {
+        // ==========================================
+        // REQUIREMENT_REQUEST: Process as a requirement update
+        // Update structured requirements, version history, etc.
+        // ==========================================
+        setSyncStatus("Gathering specifications...");
+        setCurrentAgentNode("gatherer_node");
+
+        // Successfully got results from backend
+        const receivedReqs = data.structured_requirements || {};
+
+        // Update states
+        if (receivedReqs.epic_name) {
+          setStructuredRequirements(receivedReqs);
+          
+          // Advance version count dynamically when structured requirements are updated
+          const nextVer = currentVersion + 1;
+          setCurrentVersion(nextVer);
+
+          // Update version history ledger
+          const newHist: VersionHistory = {
+            version: nextVer,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+            author: "Thanyathip (Product Owner)",
+            description: inputMsg.substring(0, 70) + (inputMsg.length > 70 ? "..." : ""),
+            requirementsSnapshot: receivedReqs
+          };
+          setVersionHistory(prev => [newHist, ...prev]);
+          setSyncStatus(`State updated to Version ${nextVer}.0`);
+        }
+
+        setMessages(prev => [...prev, {
+          id: `gatherer-passed-${Date.now()}`,
+          role: 'assistant',
+          content: `📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }]);
       }
-
-      setMessages(prev => [...prev, {
-        id: `gatherer-passed-${Date.now()}`,
-        role: 'assistant',
-        content: `📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      }]);
 
     } catch (err: any) {
       console.warn("Backend workflow fallback triggered:", err.message || err);

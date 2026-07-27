@@ -87,7 +87,7 @@ class GatheredRequirements(BaseModel):
 # ==========================================
 
 class RequirementIntentDetectionResult(BaseModel):
-    intent: str = Field(..., description="Detected user intent: GENERAL_CHAT, CLARIFICATION, NEW_REQUIREMENT, UPDATE_REQUIREMENT, or DELETE_REQUIREMENT.")
+    intent: str = Field(..., description="Detected user intent: GENERAL_CHAT or REQUIREMENT_REQUEST.")
     confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
     reason: str = Field(default="", description="Detailed reasoning explaining the intent classification.")
     reasoning: Optional[str] = Field(default="", description="Brief reasoning explaining the intent classification.")

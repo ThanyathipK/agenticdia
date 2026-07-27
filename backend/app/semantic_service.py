@@ -122,9 +122,9 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
     """
     Uses LLM for semantic intent classification on user message.
     Returns a dict with: intent, confidence, reason.
-    Supports intents: GENERAL_CHAT, CLARIFICATION, NEW_REQUIREMENT, UPDATE_REQUIREMENT, DELETE_REQUIREMENT.
+    Supports intents: GENERAL_CHAT, REQUIREMENT_REQUEST.
     """
-    VALID_INTENTS = ["GENERAL_CHAT", "CLARIFICATION", "NEW_REQUIREMENT", "UPDATE_REQUIREMENT", "DELETE_REQUIREMENT"]
+    VALID_INTENTS = ["GENERAL_CHAT", "REQUIREMENT_REQUEST"]
     
     if not raw_input or not str(raw_input).strip():
         return {
@@ -232,29 +232,17 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
             "confidence": 0.90,
             "reason": "The user is asking a question or seeking an explanation."
         }
-    elif any(kw in lower_inp for kw in ["add ", "create ", "new ", "implement "]):
+    elif any(kw in lower_inp for kw in ["add ", "create ", "new ", "implement ", "remove ", "delete ", "cancel ", "drop ", "no longer need", "update ", "change ", "modify ", "adjust "]):
         return {
-            "intent": "NEW_REQUIREMENT",
+            "intent": "REQUIREMENT_REQUEST",
             "confidence": 0.85,
-            "reason": "The user wants to add a new feature or requirement."
-        }
-    elif any(kw in lower_inp for kw in ["remove ", "delete ", "cancel ", "drop ", "no longer need"]):
-        return {
-            "intent": "DELETE_REQUIREMENT",
-            "confidence": 0.85,
-            "reason": "The user wants to remove or delete a requirement."
-        }
-    elif any(kw in lower_inp for kw in ["update ", "change ", "modify ", "adjust "]):
-        return {
-            "intent": "UPDATE_REQUIREMENT",
-            "confidence": 0.85,
-            "reason": "The user wants to modify an existing requirement."
+            "reason": "The user is requesting a change to project requirements (add/remove/update)."
         }
     else:
         return {
             "intent": "GENERAL_CHAT",
             "confidence": 0.80,
-            "reason": f"Fallback due to parsing failure: {str(e2)}"
+            "reason": "Fallback: could not determine intent from input."
         }
 
 
@@ -449,12 +437,11 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
     except Exception as e2:
         logger.error(f"Requirement matcher parsing failed completely: {str(e2)}")
 
-    is_new = detected_intent in ["NEW_REQUIREMENT", "GENERAL_CHAT"]
     return {
         "matched_requirement_id": None,
         "confidence": 0.80,
-        "reason": f"Fallback due to parsing failure: {str(e2)}",
-        "action": "NEW_REQUIREMENT" if is_new else detected_intent,
+        "reason": f"Fallback due to parsing failure",
+        "action": "NEW",
         "status": "MATCHED",
         "candidates": None
     }

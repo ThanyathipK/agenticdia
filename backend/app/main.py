@@ -642,9 +642,9 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
     
     Pipeline:
     1. Persist every user message before intent detection
-    2. Detect intent (GENERAL_CHAT, CLARIFICATION, NEW_REQUIREMENT, UPDATE_REQUIREMENT, DELETE_REQUIREMENT)
+    2. Detect intent (GENERAL_CHAT, REQUIREMENT_REQUEST)
     3. If GENERAL_CHAT: generate response with project context, persist, return (no LangGraph)
-    4. Otherwise: proceed to LangGraph workflow
+    4. If REQUIREMENT_REQUEST: proceed to LangGraph workflow
     5. Persist every assistant response
     """
     logger.info(f"Triggering on-demand {request.target_agent} agent for project {request.project_id}")
@@ -680,32 +680,41 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
     # ==========================================
     # STEP 3: GENERAL_CHAT handling (bypass LangGraph entirely)
     # ==========================================
-    # Only treat as GENERAL_CHAT if no explicit target_agent is specified.
-    # If user explicitly clicks "Generate PRD" or "Validate Requirements",
-    # honor the target_agent and proceed to LangGraph workflow.
-    explicit_agent_request = request.target_agent in ["architect", "auditor"]
-    if detected_intent == "GENERAL_CHAT" and not explicit_agent_request:
+    # If the intent is GENERAL_CHAT (greeting, question, explanation request, concept query),
+    # generate an LLM response directly without entering any agent workflow.
+    # REQUIREMENT_REQUEST intents fall through to the LangGraph workflow below.
+    if detected_intent == "GENERAL_CHAT":
         logger.info("[GENERAL_CHAT] Handling as general chat. Generating conversational response with project context.")
 
-        # Load conversation history for context
+        # Load conversation history for context (with error handling for DB failures)
         conv_history = []
         if request.project_id:
-            conv_history = await ConversationMessageRepository.get_conversation_history(request.project_id)
+            try:
+                conv_history = await ConversationMessageRepository.get_conversation_history(request.project_id)
+            except Exception as db_err:
+                logger.warning(f"[GENERAL_CHAT] Failed to load conversation history from DB: {str(db_err)}. Proceeding without history.")
 
         # Generate response with full project context
-        response_text = await generate_general_chat_response(
-            raw_input=request.raw_input or "",
-            project_context=req_state or {},
-            conversation_history=conv_history
-        )
-
-        # Persist assistant response
-        if request.project_id and response_text:
-            await ConversationMessageRepository.save_message(
-                project_id=str(request.project_id),
-                role="assistant",
-                message=response_text
+        try:
+            response_text = await generate_general_chat_response(
+                raw_input=request.raw_input or "",
+                project_context=req_state or {},
+                conversation_history=conv_history
             )
+        except Exception as llm_err:
+            logger.error(f"[GENERAL_CHAT] Failed to generate LLM response: {str(llm_err)}")
+            response_text = "I understand your question, but I'm currently experiencing some technical difficulties. Please try again in a moment."
+
+        # Persist assistant response (with error handling for DB failures)
+        if request.project_id and response_text:
+            try:
+                await ConversationMessageRepository.save_message(
+                    project_id=str(request.project_id),
+                    role="assistant",
+                    message=response_text
+                )
+            except Exception as db_err:
+                logger.warning(f"[GENERAL_CHAT] Failed to save assistant response to DB: {str(db_err)}. Response generated but not persisted.")
 
         # Return response (no project artifacts modified)
         return {
@@ -963,7 +972,7 @@ class IntentDetectorRequest(BaseModel):
 @app.post("/api/intent-detector", status_code=status.HTTP_200_OK)
 async def post_intent_detector(payload: IntentDetectorRequest, db: AsyncSession = Depends(get_db)):
     """
-    Direct endpoint for testing and executing Requirement Intent Detection (NEW, UPDATE, DELETE, CLARIFY, NO_CHANGE).
+    Direct endpoint for testing and executing Requirement Intent Detection (GENERAL_CHAT, REQUIREMENT_REQUEST).
     """
     from app.semantic_service import detect_requirement_intent
     from app.repository import RequirementRepository
