@@ -861,20 +861,7 @@ This document specifies the functional, non-functional, and technical requiremen
     setMermaidDiagram("");
     setCurrentVersion(1);
     setCurrentAgentNode(null);
-    setMessages([
-      {
-        id: "init-1",
-        role: "system",
-        content: "Krungsri Nimble Requirements Engine Initialized. Multi-Agent workflow is ready to ingest raw Product Owner specifications.",
-        timestamp: "10:24 AM"
-      },
-      {
-        id: "init-2",
-        role: "assistant",
-        content: "Hello! I am your Senior Business Analyst AI Agent. Please provide your raw, conversational, or messy requirement text for the PromptPay integration or core banking upgrade, and I will extract it, run a full compliance audit, and design a pristine PRD for you.",
-        timestamp: "10:24 AM"
-      }
-    ]);
+    setMessages([]);
     setVersionHistory([]);
     setSyncStatus("Switched project. Loading...");
     setPendingActions([]);
@@ -889,41 +876,36 @@ This document specifies the functional, non-functional, and technical requiremen
       const response = await axios.get(`/api/project/${projId}`);
       const data = response.data;
       if (data) {
-        if (data.requirements && data.user_stories) {
-          setStructuredRequirements({
-            epic_name: data.requirements.epic_name || "Structured Requirements Draft",
-            version: data.version_number || 1,
-            user_stories: data.user_stories || []
-          });
-        }
+        // Always load from Supabase — no frontend cache fallback.
+        setStructuredRequirements({
+          epic_name: data.requirements?.epic_name || "Structured Requirements Draft",
+          version: data.version_number || 1,
+          user_stories: data.user_stories || []
+        });
         
         setCurrentVersion(data.version_number || 1);
         
-        if (data.validation_status) {
-          setAuditResult({
-            is_valid: data.validation_status === "valid",
-            audit_version_reviewed: data.version_number || 1,
-            clarification_questions: data.clarification_questions || [],
-            passed_checks: data.validation_status === "valid" ? ["Financial Regulatory Compliance", "Security & Data Masking"] : [],
-            failed_checks: data.validation_status === "invalid" ? ["Idempotency & De-duplication", "Network Timeouts & Retry Strategies"] : []
-          });
-        }
+        setAuditResult({
+          is_valid: data.validation_status === "valid",
+          audit_version_reviewed: data.version_number || 1,
+          clarification_questions: data.clarification_questions || [],
+          passed_checks: data.validation_status === "valid" ? ["Financial Regulatory Compliance", "Security & Data Masking"] : [],
+          failed_checks: data.validation_status === "invalid" ? ["Idempotency & De-duplication", "Network Timeouts & Retry Strategies"] : []
+        });
         
-        if (data.generated_prd) {
-          setPrdMarkdown(getSafeSectionContent(data.generated_prd));
-        }
+        setPrdMarkdown(getSafeSectionContent(data.generated_prd || ""));
+        setMermaidDiagram(data.generated_diagrams || "");
+        setCurrentAgentNode(data.current_workflow_state || null);
+        setActiveTab('prd');
         
-        if (data.generated_diagrams) {
-          setMermaidDiagram(data.generated_diagrams);
-        }
-        
-        if (data.current_workflow_state) {
-          setCurrentAgentNode(data.current_workflow_state);
-        }
-
+        // ==========================================================
+        // Load conversation history — always from Supabase, in chronological order
+        // ==========================================================
+        const loadedMessages: ChatMessage[] = [];
         if (data.conversation_history && Array.isArray(data.conversation_history) && data.conversation_history.length > 0) {
-          const loadedMessages: ChatMessage[] = data.conversation_history.map((m: any, idx: number) => {
-            const dateObj = m.timestamp ? new Date(m.timestamp) : null;
+          for (let idx = 0; idx < data.conversation_history.length; idx++) {
+            const m = data.conversation_history[idx];
+            const dateObj = m.created_at ? new Date(m.created_at) : null;
             const timeStr = dateObj && !isNaN(dateObj.getTime())
               ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
               : m.timestamp || "10:24 AM";
@@ -931,10 +913,10 @@ This document specifies the functional, non-functional, and technical requiremen
             const isAuditor = m.role === 'auditor';
             const isPending = isAuditor && data.validation_status === 'invalid';
 
-            return {
+            loadedMessages.push({
               id: m.id || `hist-${idx}`,
               role: m.role || 'assistant',
-              content: m.message || m.content || "",
+              content: m.content || m.message || "",
               timestamp: timeStr,
               isPendingClarifications: isPending,
               auditResultSnapshot: isAuditor ? {
@@ -944,10 +926,11 @@ This document specifies the functional, non-functional, and technical requiremen
                 passed_checks: data.validation_status === 'valid' ? ["Financial Regulatory Compliance", "Security & Data Masking"] : [],
                 failed_checks: data.validation_status === 'invalid' ? ["Idempotency & De-duplication", "Network Timeouts & Retry Strategies"] : []
               } : undefined
-            };
-          });
-          setMessages(loadedMessages);
+            });
+          }
         }
+        // Conversation order must be chronological — DB query already orders by created_at ASC.
+        setMessages(loadedMessages);
         
         setSyncStatus("Synced with Supabase Cloud");
       }
@@ -962,12 +945,6 @@ This document specifies the functional, non-functional, and technical requiremen
       setIsLoading(false);
     }
   };
-
-  useEffect(() => {
-    if (projectId) {
-      loadProjectState(projectId);
-    }
-  }, [projectId]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });

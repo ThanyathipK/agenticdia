@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.database import get_db, engine
 from app.models import Base
-from app.repository import RequirementStateRepository, ProjectRepository, ConversationMessageRepository, PendingActionRepository
+from app.repository import RequirementStateRepository, ProjectRepository, ConversationMessageRepository, PendingActionRepository, PRDVersionRepository
 from app.schemas import (
     ProjectCreate, 
     UserAnswerSubmit, 
@@ -159,6 +159,63 @@ async def backfill_requirements(engine) -> None:
             logger.error(f"Migration step failed: backfill statement for table {tbl}. Statement: {stmt}\nError: {str(e)}")
             logger.error(traceback.format_exc())
 
+async def migrate_conversation_messages(engine) -> None:
+    """
+    Migration step: Adds new columns to conversation_messages table if it exists
+    with the old schema. Drops and recreates the table if the schema is incompatible.
+    """
+    logger.info("Running migration step: migrate_conversation_messages.")
+    columns_to_add = [
+        ("conversation_messages", "conversation_id", "VARCHAR(36)"),
+        ("conversation_messages", "workflow_state", "VARCHAR(50) DEFAULT ''"),
+        ("conversation_messages", "intent", "VARCHAR(50) DEFAULT ''"),
+    ]
+    
+    for tbl, col, col_type in columns_to_add:
+        try:
+            async with engine.begin() as conn:
+                def check_needs_col(sync_conn):
+                    from sqlalchemy import inspect
+                    inspector = inspect(sync_conn)
+                    if tbl not in inspector.get_table_names():
+                        return False
+                    columns = [c["name"] for c in inspector.get_columns(tbl)]
+                    return col not in columns
+                
+                needs_col = await conn.run_sync(check_needs_col)
+                if needs_col:
+                    if conn.dialect.name == "sqlite":
+                        # SQLite has limited ALTER TABLE support
+                        # For SQLite, we need to handle this differently
+                        statement = f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type};"
+                    else:
+                        statement = f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col} {col_type};"
+                    
+                    await conn.execute(text(statement))
+                    logger.info(f"Successfully added column {col} to table {tbl}.")
+                else:
+                    logger.info(f"Column {col} on table {tbl} already exists or table does not exist. Skipping.")
+        except Exception as e:
+            logger.error(f"Failed to add column {col} to table {tbl}: {str(e)}")
+            logger.error(traceback.format_exc())
+    
+    # Also handle the old 'timestamp' column removal - SQLite doesn't support DROP COLUMN
+    # so we just leave it; the model no longer references it
+    try:
+        async with engine.begin() as conn:
+            def check_old_timestamp(sync_conn):
+                from sqlalchemy import inspect
+                inspector = inspect(sync_conn)
+                if "conversation_messages" not in inspector.get_table_names():
+                    return False
+                columns = [c["name"] for c in inspector.get_columns("conversation_messages")]
+                return "timestamp" in columns
+            has_old_timestamp = await conn.run_sync(check_old_timestamp)
+            if has_old_timestamp:
+                logger.info("Old 'timestamp' column exists in conversation_messages. It will be ignored by the new model.")
+    except Exception as e:
+        logger.error(f"Failed to check old timestamp column: {str(e)}")
+
 async def backfill_project_ids(engine) -> None:
     logger.info("Running migration step: backfill_project_ids.")
     statement = """
@@ -240,6 +297,10 @@ async def startup_event():
         await backfill_requirements(engine)
         await backfill_project_ids(engine)
         
+        # Run conversation_messages migration BEFORE create_all
+        # so it can add columns to an existing old-schema table first
+        await migrate_conversation_messages(engine)
+        # Then create_all will create any missing tables (including new conversation_messages)
         await create_all_schemas(engine)
         await seed_default_user()
         
@@ -392,7 +453,9 @@ async def post_chat_query(request: ChatSessionRequest):
             await ConversationMessageRepository.save_message(
                 project_id=str(request.project_id),
                 role=msg.role,
-                message=msg.content
+                message=msg.content,
+                workflow_state="chat",
+                intent="GENERAL_CHAT"
             )
 
     logger.info("Initiating conversational analyst run.")
@@ -403,7 +466,9 @@ async def post_chat_query(request: ChatSessionRequest):
         await ConversationMessageRepository.save_message(
             project_id=str(request.project_id),
             role="assistant",
-            message=reply_text
+            message=reply_text,
+            workflow_state="chat",
+            intent="GENERAL_CHAT"
         )
 
     return {"message": reply_text}
@@ -656,7 +721,9 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
         await ConversationMessageRepository.save_message(
             project_id=str(request.project_id),
             role="user",
-            message=request.raw_input.strip()
+            message=request.raw_input.strip(),
+            workflow_state=request.target_agent or "gatherer",
+            intent="PENDING_DETECTION"
         )
 
     # ==========================================
@@ -711,7 +778,9 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
                 await ConversationMessageRepository.save_message(
                     project_id=str(request.project_id),
                     role="assistant",
-                    message=response_text
+                    message=response_text,
+                    workflow_state="general_chat",
+                    intent="GENERAL_CHAT"
                 )
             except Exception as db_err:
                 logger.warning(f"[GENERAL_CHAT] Failed to save assistant response to DB: {str(db_err)}. Response generated but not persisted.")
@@ -892,7 +961,9 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
             await ConversationMessageRepository.save_message(
                 project_id=str(request.project_id),
                 role="assistant",
-                message=agent_message
+                message=agent_message,
+                workflow_state=req_state.get("current_workflow_state", request.target_agent or "gatherer"),
+                intent=detected_intent
             )
         
         # Determine status dynamically based on centralized validation status
@@ -1019,6 +1090,57 @@ async def post_requirement_matcher(payload: RequirementMatcherRequest, db: Async
     result = await match_requirement(payload.message, intent, current_stories)
     return result
 
+
+
+# ==========================================
+# PRD VERSION HISTORY API
+# ==========================================
+
+@app.get("/api/project/{project_id}/prd-versions", status_code=status.HTTP_200_OK)
+async def get_prd_versions(project_id: str, session: AsyncSession = Depends(get_db)):
+    """
+    Retrieves all PRD versions for a project.
+    Returns an ordered list of immutable PRD version records.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    versions = await PRDVersionRepository.get_by_project(project_id, session)
+    return versions
+
+
+@app.get("/api/project/{project_id}/prd-versions/latest", status_code=status.HTTP_200_OK)
+async def get_latest_prd_version(project_id: str, session: AsyncSession = Depends(get_db)):
+    """
+    Retrieves the latest PRD version for a project.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    version = await PRDVersionRepository.get_latest(project_id, session)
+    if not version:
+        raise HTTPException(status_code=404, detail="No PRD versions found for this project")
+    return version
+
+
+@app.get("/api/project/{project_id}/prd-versions/{version_number}", status_code=status.HTTP_200_OK)
+async def get_prd_version_by_number(project_id: str, version_number: int, session: AsyncSession = Depends(get_db)):
+    """
+    Retrieves a specific PRD version by version number.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    version = await PRDVersionRepository.get_by_version_number(project_id, version_number, session)
+    if not version:
+        raise HTTPException(status_code=404, detail=f"PRD version {version_number} not found for this project")
+    return version
 
 
 if __name__ == "__main__":

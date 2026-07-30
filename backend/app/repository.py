@@ -17,6 +17,7 @@ from app.models import (
     ClarificationQuestionModel,
     AuditResultModel,
     PRDDocumentModel,
+    PRDVersionModel,
     VersionHistoryModel,
     ConversationMessageModel,
     PendingActionModel
@@ -1255,6 +1256,102 @@ class PRDDocumentRepository:
             return True
         return False
 
+class PRDVersionRepository:
+    """
+    Dedicated immutable PRD version repository.
+    Each PRD generation creates a new version record.
+    Never overwrites previous versions.
+    Does NOT store version history inside requirement_states.
+    """
+    @staticmethod
+    async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        
+        # Determine the next version number for this project
+        stmt = select(func.max(PRDVersionModel.version_number)).where(PRDVersionModel.project_id == pid)
+        result = await session.execute(stmt)
+        max_version = result.scalar() or 0
+        next_version = max_version + 1
+        
+        version = PRDVersionModel(
+            project_id=pid,
+            version_number=next_version,
+            generated_prd=data.get("generated_prd", ""),
+            generated_diagram=data.get("generated_diagram", ""),
+            generated_by=data.get("generated_by", "automated_agent")
+        )
+        session.add(version)
+        await session.flush()
+        await session.refresh(version)
+        return {
+            "version_id": str(version.id),
+            "project_id": str(version.project_id),
+            "version_number": version.version_number,
+            "generated_prd": version.generated_prd,
+            "generated_diagram": version.generated_diagram,
+            "generated_by": version.generated_by,
+            "created_at": version.created_at.isoformat() if version.created_at else ""
+        }
+
+    @staticmethod
+    async def get_by_project(project_id: str, session: AsyncSession) -> List[Dict[str, Any]]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(PRDVersionModel).where(PRDVersionModel.project_id == pid).order_by(PRDVersionModel.version_number.desc())
+        result = await session.execute(stmt)
+        records = result.scalars().all()
+        return [
+            {
+                "version_id": str(v.id),
+                "project_id": str(v.project_id),
+                "version_number": v.version_number,
+                "generated_prd": v.generated_prd,
+                "generated_diagram": v.generated_diagram,
+                "generated_by": v.generated_by,
+                "created_at": v.created_at.isoformat() if v.created_at else ""
+            }
+            for v in records
+        ]
+
+    @staticmethod
+    async def get_by_version_number(project_id: str, version_number: int, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(PRDVersionModel).where(
+            PRDVersionModel.project_id == pid,
+            PRDVersionModel.version_number == version_number
+        )
+        result = await session.execute(stmt)
+        v = result.scalar_one_or_none()
+        if v:
+            return {
+                "version_id": str(v.id),
+                "project_id": str(v.project_id),
+                "version_number": v.version_number,
+                "generated_prd": v.generated_prd,
+                "generated_diagram": v.generated_diagram,
+                "generated_by": v.generated_by,
+                "created_at": v.created_at.isoformat() if v.created_at else ""
+            }
+        return None
+
+    @staticmethod
+    async def get_latest(project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(PRDVersionModel).where(PRDVersionModel.project_id == pid).order_by(PRDVersionModel.version_number.desc()).limit(1)
+        result = await session.execute(stmt)
+        v = result.scalar_one_or_none()
+        if v:
+            return {
+                "version_id": str(v.id),
+                "project_id": str(v.project_id),
+                "version_number": v.version_number,
+                "generated_prd": v.generated_prd,
+                "generated_diagram": v.generated_diagram,
+                "generated_by": v.generated_by,
+                "created_at": v.created_at.isoformat() if v.created_at else ""
+            }
+        return None
+
+
 class VersionHistoryRepository:
     """
     Handles Version History snapshot tracking of the project.
@@ -1955,31 +2052,47 @@ class RequirementStateRepository:
 
 class ConversationMessageRepository:
     """
-    Handles conversation message persistence in Supabase.
+    Handles conversation message persistence in a dedicated table.
+    Independent from requirement_states storage.
     """
     @staticmethod
-    async def save_message(project_id: str, role: str, message: str, session: Optional[AsyncSession] = None) -> Dict[str, Any]:
+    async def save_message(
+        project_id: str,
+        role: str,
+        message: str,
+        session: Optional[AsyncSession] = None,
+        conversation_id: Optional[str] = None,
+        workflow_state: Optional[str] = None,
+        intent: Optional[str] = None
+    ) -> Dict[str, Any]:
         if not message or not message.strip():
             return {}
             
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        conv_id = uuid.UUID(conversation_id) if conversation_id else uuid.uuid4()
         
         async def _save(s: AsyncSession):
             msg_obj = ConversationMessageModel(
                 id=uuid.uuid4(),
+                conversation_id=conv_id,
                 project_id=pid,
                 role=role,
-                message=message
+                message=message,
+                workflow_state=workflow_state or "",
+                intent=intent or ""
             )
             s.add(msg_obj)
             await s.flush()
             return {
                 "id": str(msg_obj.id),
+                "conversation_id": str(msg_obj.conversation_id),
                 "project_id": str(msg_obj.project_id),
                 "role": msg_obj.role,
                 "message": msg_obj.message,
                 "content": msg_obj.message,
-                "timestamp": msg_obj.timestamp.isoformat() if msg_obj.timestamp else ""
+                "workflow_state": msg_obj.workflow_state,
+                "intent": msg_obj.intent,
+                "created_at": msg_obj.created_at.isoformat() if msg_obj.created_at else ""
             }
 
         if session:
@@ -1999,17 +2112,20 @@ class ConversationMessageRepository:
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
         
         async def _fetch(s: AsyncSession):
-            stmt = select(ConversationMessageModel).where(ConversationMessageModel.project_id == pid).order_by(ConversationMessageModel.timestamp.asc(), ConversationMessageModel.created_at.asc())
+            stmt = select(ConversationMessageModel).where(ConversationMessageModel.project_id == pid).order_by(ConversationMessageModel.created_at.asc())
             res = await s.execute(stmt)
             messages = res.scalars().all()
             return [
                 {
                     "id": str(m.id),
+                    "conversation_id": str(m.conversation_id),
                     "project_id": str(m.project_id),
                     "role": m.role,
                     "message": m.message,
                     "content": m.message,
-                    "timestamp": m.timestamp.isoformat() if m.timestamp else ""
+                    "workflow_state": m.workflow_state,
+                    "intent": m.intent,
+                    "created_at": m.created_at.isoformat() if m.created_at else ""
                 }
                 for m in messages
             ]

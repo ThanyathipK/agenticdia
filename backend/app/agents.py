@@ -10,7 +10,7 @@ try:
 except ImportError:
     OutputFixingParser = None
 from langgraph.graph import StateGraph, START, END
-from app.repository import RequirementStateRepository, ConversationMessageRepository
+from app.repository import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
 from app.prompt_loader import load_prompt
 
@@ -508,7 +508,9 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="assistant",
-            message=f"⚠️ **Clarification Needed (Requirement Matcher):**\n{clarification_text}"
+            message=f"⚠️ **Clarification Needed (Requirement Matcher):**\n{clarification_text}",
+            workflow_state="requirement_matcher_node",
+            intent="CLARIFICATION"
         )
 
         return {
@@ -841,7 +843,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     await ConversationMessageRepository.save_message(
         project_id=project_id,
         role="gatherer",
-        message=gatherer_msg
+        message=gatherer_msg,
+        workflow_state="gatherer_node",
+        intent="REQUIREMENT_REQUEST"
     )
     
     # Sync to outer structure for backend/frontend backward compatibility
@@ -974,7 +978,9 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="auditor",
-            message=auditor_msg
+            message=auditor_msg,
+            workflow_state="auditor_node",
+            intent="AUDIT"
         )
         
         return {
@@ -1099,11 +1105,25 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         req_state["generated_diagrams"] = result.get("mermaid_diagram", "graph TD\n  Start --> End")
         req_state["current_workflow_state"] = "architect_node"
 
+        # Create an immutable PRD version record
+        try:
+            if db_session:
+                await PRDVersionRepository.create(project_id, {
+                    "generated_prd": req_state["generated_prd"],
+                    "generated_diagram": req_state["generated_diagrams"],
+                    "generated_by": "automated_agent"
+                }, db_session)
+                logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
+        except Exception as version_err:
+            logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
+
         architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="architect",
-            message=architect_msg
+            message=architect_msg,
+            workflow_state="architect_node",
+            intent="PRD_GENERATION"
         )
         
         return {

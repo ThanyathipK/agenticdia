@@ -230,7 +230,47 @@ CREATE TRIGGER handle_updated_at_version_history
     EXECUTE FUNCTION set_updated_at();
 
 -- ==========================================
--- 10. INDEXES FOR LOOK-UP OPTIMISATION & CONSTRAINT SPEED
+-- 9b. PRD VERSIONS TABLE (IMMUTABLE VERSION HISTORY)
+-- ==========================================
+-- Dedicated immutable PRD version repository.
+-- Each PRD generation creates a new version record.
+-- Never overwrites previous versions.
+-- Does NOT store version history inside requirement_states.
+CREATE TABLE prd_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    version_number INT NOT NULL,
+    generated_prd TEXT NOT NULL,
+    generated_diagram TEXT,
+    generated_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_prd_versions_project_id ON prd_versions(project_id);
+CREATE INDEX idx_prd_versions_version_number ON prd_versions(project_id, version_number);
+
+-- ==========================================
+-- 10. CONVERSATION MESSAGES TABLE
+-- ==========================================
+-- Dedicated table for persisting every conversation message per project.
+-- Independent from requirement_states storage.
+CREATE TABLE conversation_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID,
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    role VARCHAR(50) NOT NULL,
+    message TEXT NOT NULL,
+    workflow_state VARCHAR(50) DEFAULT '',
+    intent VARCHAR(50) DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_conversation_messages_project_id ON conversation_messages(project_id);
+CREATE INDEX idx_conversation_messages_conversation_id ON conversation_messages(conversation_id);
+CREATE INDEX idx_conversation_messages_created_at ON conversation_messages(created_at);
+
+-- ==========================================
+-- 11. INDEXES FOR LOOK-UP OPTIMISATION & CONSTRAINT SPEED
 -- ==========================================
 
 -- Primary key lookups are indexed automatically.

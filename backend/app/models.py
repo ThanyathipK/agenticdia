@@ -146,7 +146,7 @@ class ClarificationQuestionModel(Base):
 
 class PRDDocumentModel(Base):
     __tablename__ = "prd_documents"
-    
+
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
     project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     version = Column(Integer, nullable=False)
@@ -154,6 +154,23 @@ class PRDDocumentModel(Base):
     mermaid_diagram = Column("mermaid_graph", Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class PRDVersionModel(Base):
+    """
+    Dedicated immutable PRD version repository.
+    Each PRD generation creates a new version record.
+    Never overwrites previous versions.
+    """
+    __tablename__ = "prd_versions"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    generated_prd = Column(Text, nullable=False)
+    generated_diagram = Column(Text, nullable=True)
+    generated_by = Column(String(100), nullable=False, default="automated_agent")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class VersionHistoryModel(Base):
     __tablename__ = "version_history"
@@ -207,13 +224,19 @@ class RequirementStateModel(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 class ConversationMessageModel(Base):
+    """
+    SQLAlchemy model for persisting conversation messages per project.
+    Uses a dedicated table independent from requirement_states.
+    """
     __tablename__ = "conversation_messages"
     
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(GUID, nullable=True, index=True, default=uuid.uuid4)
     project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(String(50), nullable=False)
     message = Column(Text, nullable=False)
-    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    workflow_state = Column(String(50), nullable=True, default="")
+    intent = Column(String(50), nullable=True, default="")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class PendingActionModel(Base):
