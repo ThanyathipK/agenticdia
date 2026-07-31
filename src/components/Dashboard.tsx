@@ -970,6 +970,20 @@ This document specifies the functional, non-functional, and technical requiremen
 
       const data = response.data;
       const receivedAudit = data.audit_result || {};
+      const pendingActionId = data.pending_action_id;
+      const isPendingMerge = data.pending_merge === true;
+
+      // Handle pending merge for audit results (if applicable)
+      if (isPendingMerge && pendingActionId) {
+        const pendingMergeData = {
+          id: pendingActionId,
+          project_id: projectId,
+          action_type: "MERGE",
+          original_user_message: "Audit validation",
+          proposed_changes: receivedAudit
+        };
+        setPendingActions(prev => [...prev, pendingMergeData]);
+      }
 
       const isValid = receivedAudit.is_valid;
       if (isValid === false) {
@@ -1165,16 +1179,39 @@ This document specifies the functional, non-functional, and technical requiremen
       } else {
         // ==========================================
         // REQUIREMENT_REQUEST: Process as a requirement update
-        // Update structured requirements, version history, etc.
+        // The merge result is stored as a pending action (in-memory).
+        // The user must confirm before changes are persisted to the database.
         // ==========================================
         setSyncStatus("Gathering specifications...");
         setCurrentAgentNode("gatherer_node");
 
         // Successfully got results from backend
         const receivedReqs = data.structured_requirements || {};
+        const pendingActionId = data.pending_action_id;
+        const isPendingMerge = data.pending_merge === true;
 
-        // Update states
-        if (receivedReqs.epic_name) {
+        if (isPendingMerge && pendingActionId) {
+          // Store the pending merge for confirmation
+          const pendingMergeData = {
+            id: pendingActionId,
+            project_id: projectId,
+            action_type: "MERGE",
+            original_user_message: inputMsg,
+            proposed_changes: receivedReqs
+          };
+
+          // Add the pending action to the list so ConfirmationPanel appears
+          setPendingActions(prev => [...prev, pendingMergeData]);
+
+          // Show a message asking the user to confirm
+          setMessages(prev => [...prev, {
+            id: `merge-preview-${Date.now()}`,
+            role: 'assistant',
+            content: `📋 **Merge Preview Ready**\nI have analyzed your input and prepared the merged requirements. Please review the changes below and **Confirm** or **Cancel**.\n\n> *"${inputMsg}"*`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }]);
+        } else if (receivedReqs.epic_name) {
+          // Fallback: if no pending merge (e.g. direct update), apply immediately
           setStructuredRequirements(receivedReqs);
           
           // Advance version count dynamically when structured requirements are updated
@@ -1193,12 +1230,14 @@ This document specifies the functional, non-functional, and technical requiremen
           setSyncStatus(`State updated to Version ${nextVer}.0`);
         }
 
-        setMessages(prev => [...prev, {
-          id: `gatherer-passed-${Date.now()}`,
-          role: 'assistant',
-          content: `📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }]);
+        if (!isPendingMerge) {
+          setMessages(prev => [...prev, {
+            id: `gatherer-passed-${Date.now()}`,
+            role: 'assistant',
+            content: `📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }]);
+        }
       }
 
     } catch (err: any) {

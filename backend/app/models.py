@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, Text, func, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import Column, String, Integer, DateTime, JSON, Text, func, ForeignKey, Boolean, UniqueConstraint, Index
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 import uuid
@@ -254,3 +254,28 @@ class PendingActionModel(Base):
     status = Column(String(50), nullable=False, default="WAITING_CONFIRMATION")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ArtifactEventLogModel(Base):
+    """
+    Append-only immutable event log for tracking all artifact modifications.
+    Stores historical records of CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK events.
+    Never overwrites or deletes existing records.
+    No foreign keys — purely historical traceability, not production data.
+    """
+    __tablename__ = "artifact_event_logs"
+
+    event_id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    artifact_type = Column(String(50), nullable=False, index=True)
+    artifact_id = Column(String(36), nullable=False, index=True)
+    action = Column(String(20), nullable=False, index=True)
+    old_value = Column(JSON, nullable=True)
+    new_value = Column(JSON, nullable=True)
+    performed_by = Column(String(100), nullable=False, default="automated_agent")
+    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Composite index for querying events by artifact
+    __table_args__ = (
+        Index("idx_artifact_event_logs_artifact", "artifact_type", "artifact_id"),
+        Index("idx_artifact_event_logs_timestamp", "timestamp"),
+    )

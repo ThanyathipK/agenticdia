@@ -383,11 +383,7 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
 
     if workflow_type == "CHAT":
         logger.info("[WORKFLOW ROUTER] Handling as CHAT. Generating conversational response.")
-        chat_sys = (
-            "You are a helpful, professional AI Business Analyst assistant for core banking projects. "
-            "Respond cordially and politely to conversational greetings or pleasantries. "
-            "Do NOT attempt to generate, create, or update software requirements."
-        )
+        chat_sys = load_prompt("chat")
         try:
             resp = await llm.ainvoke([SystemMessage(content=chat_sys), HumanMessage(content=raw_input)])
             msg_content = resp.content if hasattr(resp, "content") else str(resp)
@@ -408,12 +404,7 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
         stories = req_state.get("user_stories", [])
         stories_summary = "\n".join([f"- {s.get('ticket_code', 'US')}: {s.get('story_title', '')}" for s in stories[:10]])
 
-        q_sys = (
-            "You are an expert Enterprise Software Architect and Business Analyst. "
-            "Answer the user's question clearly, precisely, and directly. "
-            f"Current Project Context: Epic='{existing_epic}'. Stories:\n{stories_summary}\n"
-            "Do NOT create or modify software requirements JSON. Focus purely on answering the question."
-        )
+        q_sys = load_prompt("question").format(existing_epic=existing_epic, stories_summary=stories_summary)
         try:
             resp = await llm.ainvoke([SystemMessage(content=q_sys), HumanMessage(content=raw_input)])
             msg_content = resp.content if hasattr(resp, "content") else str(resp)
@@ -863,6 +854,124 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         "current_version": version_number
     }
 
+async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Delete Requirement Node:
+    Handles DELETE_REQUIREMENT intent by archiving the matched requirement/user story.
+    Reads the requirement_match from state to identify which story to archive.
+    """
+    logger.info("Executing delete_requirement_node to archive requirements.")
+    project_id = state.get("project_id", "PROJ-UNKNOWN")
+    raw_input = state.get("raw_input", "")
+    
+    # Use session from state if available, otherwise let function create one
+    db_session = state.get("db_session")
+    req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
+    
+    # Get the requirement match result
+    requirement_match = state.get("requirement_match") or {}
+    matched_req_id = requirement_match.get("matched_requirement_id")
+    match_confidence = float(requirement_match.get("confidence", 0.0))
+    match_action = requirement_match.get("action", "DELETE")
+    
+    logger.info(f"[DELETE NODE] Matched requirement: {matched_req_id}, confidence: {match_confidence}, action: {match_action}")
+    
+    existing_stories = list(req_state.get("user_stories", []))
+    
+    if matched_req_id and match_confidence >= 0.75:
+        # Archive the specific matched story
+        archived_stories = []
+        for story in existing_stories:
+            tc = story.get("ticket_code", "")
+            if tc and normalize_ticket_code(tc) == normalize_ticket_code(matched_req_id):
+                archived_story = dict(story)
+                archived_story["status"] = "archived"
+                archived_story["change_type"] = "archived"
+                archived_stories.append(archived_story)
+                logger.info(f"[DELETE NODE] Archiving story: {tc}")
+            else:
+                archived_stories.append(story)
+        
+        req_state["user_stories"] = archived_stories
+        req_state["current_workflow_state"] = "delete_requirement_node"
+        req_state["validation_status"] = "valid"
+        
+        # Update requirements list to reflect archived stories
+        reqs = req_state.get("requirements", [])
+        for req_item in reqs:
+            if isinstance(req_item, dict):
+                req_stories = req_item.get("user_stories", [])
+                updated_req_stories = []
+                for rs in req_stories:
+                    tc = rs.get("ticket_code", "")
+                    if tc and normalize_ticket_code(tc) == normalize_ticket_code(matched_req_id):
+                        archived_rs = dict(rs)
+                        archived_rs["status"] = "archived"
+                        archived_rs["change_type"] = "archived"
+                        updated_req_stories.append(archived_rs)
+                    else:
+                        updated_req_stories.append(rs)
+                req_item["user_stories"] = updated_req_stories
+        
+        # Update acceptance criteria
+        all_ac = []
+        for story in archived_stories:
+            if story.get("status", "active") == "active":
+                all_ac.extend(story.get("acceptance_criteria", []))
+        req_state["acceptance_criteria"] = all_ac
+        
+        delete_msg = f"🗑️ **Requirement Deleted!**\nSuccessfully archived requirement `{matched_req_id}` as requested."
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="assistant",
+            message=delete_msg,
+            workflow_state="delete_requirement_node",
+            intent="DELETE_REQUIREMENT"
+        )
+        
+        return {
+            "requirement_state": req_state,
+            "agent_message": delete_msg,
+            "current_version": req_state.get("version_number", 1)
+        }
+    else:
+        # No clear match - ask for clarification
+        logger.warning(f"[DELETE NODE] No clear match for deletion. matched_req_id={matched_req_id}, confidence={match_confidence}")
+        
+        clarification_text = f"I'm not sure which requirement you want to delete. Please specify the ticket code (e.g., US-001)."
+        if match_action == "AMBIGUOUS":
+            candidates = requirement_match.get("candidates", [])
+            if candidates:
+                clarification_text = f"Your request could refer to multiple requirements: {', '.join(candidates)}. Which requirement did you intend to delete?"
+        
+        cqs = [{
+            "checklist_category": "Delete Requirement Ambiguity",
+            "target_user_story_id": matched_req_id,
+            "question_text": clarification_text,
+            "user_answer": None,
+            "is_resolved": False
+        }]
+        existing_cqs = req_state.get("clarification_questions", []) or []
+        preserved_cqs = [q for q in existing_cqs if not q.get("is_resolved", False)]
+        req_state["clarification_questions"] = preserved_cqs + cqs
+        req_state["validation_status"] = "invalid"
+        req_state["current_workflow_state"] = "delete_requirement_node"
+        
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="assistant",
+            message=f"⚠️ **Clarification Needed (Delete):**\n{clarification_text}",
+            workflow_state="delete_requirement_node",
+            intent="CLARIFY_REQUIREMENT"
+        )
+        
+        return {
+            "requirement_state": req_state,
+            "agent_message": clarification_text,
+            "current_version": req_state.get("version_number", 1)
+        }
+
+
 async def auditor_node(state: AgentState) -> Dict[str, Any]:
     """
     Runs compliance, safety, and business rule audits on structured drafts.
@@ -1151,14 +1260,20 @@ def route_on_demand(state: AgentState) -> str:
     Evaluates target_agent parameter in AgentState.
     Routes execution to the designated on-demand agent node,
     preserving full state between disconnected invocations.
+    New: Supports 'delete_requirement' target for DELETE_REQUIREMENT intent.
     """
     target = state.get("target_agent", "gatherer")
+    detected_intent = state.get("detected_intent", "")
+    
     if target == "auditor":
         logger.info("Routing to auditor_node on-demand.")
         return "auditor_node"
     elif target == "architect":
         logger.info("Routing to architect_node on-demand.")
         return "architect_node"
+    elif target == "delete_requirement" or detected_intent == "DELETE_REQUIREMENT":
+        logger.info("Routing to delete_requirement_node on-demand.")
+        return "delete_requirement_node"
     else:
         logger.info("Routing to router_node before Gatherer.")
         return "router_node"
@@ -1201,6 +1316,7 @@ workflow.add_node("requirement_matcher_node", requirement_matcher_node)
 workflow.add_node("gatherer_node", gatherer_node)
 workflow.add_node("auditor_node", auditor_node)
 workflow.add_node("architect_node", architect_node)
+workflow.add_node("delete_requirement_node", delete_requirement_node)
 
 # Set up conditional routing from START based on target_agent
 workflow.add_conditional_edges(
@@ -1209,7 +1325,8 @@ workflow.add_conditional_edges(
     {
         "router_node": "router_node",
         "auditor_node": "auditor_node",
-        "architect_node": "architect_node"
+        "architect_node": "architect_node",
+        "delete_requirement_node": "delete_requirement_node"
     }
 )
 
@@ -1239,6 +1356,7 @@ workflow.add_conditional_edges(
 workflow.add_edge("gatherer_node", END)
 workflow.add_edge("auditor_node", END)
 workflow.add_edge("architect_node", END)
+workflow.add_edge("delete_requirement_node", END)
 
 # Export compiled graph workflow
 prd_workflow = workflow.compile()

@@ -20,7 +20,8 @@ from app.models import (
     PRDVersionModel,
     VersionHistoryModel,
     ConversationMessageModel,
-    PendingActionModel
+    PendingActionModel,
+    ArtifactEventLogModel
 )
 
 logger = logging.getLogger("app.repository")
@@ -129,6 +130,19 @@ class ProjectRepository:
         if p:
             await session.delete(p)
             await session.flush()
+            # Log DELETE event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="project",
+                    artifact_id=str(project_id),
+                    action="DELETE",
+                    session=session,
+                    old_value={"name": p.name, "description": p.description},
+                    new_value=None,
+                    performed_by="automated_agent"
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log project delete: {log_err}")
             return True
         return False
 
@@ -153,7 +167,7 @@ class EpicRepository:
         return None
 
     @staticmethod
-    async def save_or_update_epic(project_id: str, epic_name: str, session: AsyncSession, version: int = 1) -> Dict[str, Any]:
+    async def save_or_update_epic(project_id: str, epic_name: str, session: AsyncSession, version: int = 1, performed_by: str = "automated_agent") -> Dict[str, Any]:
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
         stmt = select(EpicModel).where(EpicModel.project_id == pid, EpicModel.status == "active").order_by(EpicModel.updated_at.desc())
         result = await session.execute(stmt)
@@ -161,11 +175,26 @@ class EpicRepository:
         
         name_to_use = epic_name.strip() if (epic_name and epic_name.strip()) else "Untitled Epic"
         if epic:
+            old_name = epic.epic_name
+            old_version = epic.version
             if epic_name and epic_name.strip():
                 epic.epic_name = name_to_use
             epic.version = version
             await session.flush()
             await session.refresh(epic)
+            # Log UPDATE event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="epic",
+                    artifact_id=str(epic.id),
+                    action="UPDATE",
+                    session=session,
+                    old_value={"epic_name": old_name, "version": old_version},
+                    new_value={"epic_name": epic.epic_name, "version": epic.version},
+                    performed_by=performed_by
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log epic update: {log_err}")
         else:
             epic = EpicModel(
                 project_id=pid,
@@ -176,6 +205,19 @@ class EpicRepository:
             session.add(epic)
             await session.flush()
             await session.refresh(epic)
+            # Log CREATE event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="epic",
+                    artifact_id=str(epic.id),
+                    action="CREATE",
+                    session=session,
+                    old_value=None,
+                    new_value={"epic_name": epic.epic_name, "version": epic.version, "status": epic.status},
+                    performed_by=performed_by
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log epic create: {log_err}")
             
         return {
             "id": str(epic.id),
@@ -2199,4 +2241,233 @@ class PendingActionRepository:
             await session.flush()
             return True
         return False
+
+
+class ArtifactEventLogRepository:
+    """
+    Append-only immutable event log repository for tracking all artifact modifications.
+    Stores historical records of CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK events.
+    Never overwrites or deletes existing records — purely historical traceability.
+    """
+    VALID_ACTIONS = {"CREATE", "UPDATE", "DELETE", "ARCHIVE", "LOCK", "UNLOCK"}
+
+    @staticmethod
+    async def log_event(
+        artifact_type: str,
+        artifact_id: str,
+        action: str,
+        session: AsyncSession,
+        old_value: Optional[Dict[str, Any]] = None,
+        new_value: Optional[Dict[str, Any]] = None,
+        performed_by: str = "automated_agent"
+    ) -> Dict[str, Any]:
+        """
+        Append a single event to the artifact event log.
+        This is the ONLY write operation — logs are never updated or deleted.
+        
+        Args:
+            artifact_type: Type of artifact (e.g. 'epic', 'requirement', 'user_story', 'acceptance_criteria', 'prd')
+            artifact_id: UUID string of the modified artifact
+            action: One of CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK
+            session: Active database session
+            old_value: Snapshot of the artifact before the change (optional)
+            new_value: Snapshot of the artifact after the change (optional)
+            performed_by: Identifier of who performed the action
+            
+        Returns:
+            The created event log entry
+        """
+        action_upper = action.upper()
+        if action_upper not in ArtifactEventLogRepository.VALID_ACTIONS:
+            raise ValueError(f"Invalid action '{action}'. Must be one of: {', '.join(sorted(ArtifactEventLogRepository.VALID_ACTIONS))}")
+
+        log_entry = ArtifactEventLogModel(
+            event_id=uuid.uuid4(),
+            artifact_type=artifact_type,
+            artifact_id=str(artifact_id),
+            action=action_upper,
+            old_value=old_value,
+            new_value=new_value,
+            performed_by=performed_by
+        )
+        session.add(log_entry)
+        await session.flush()
+        await session.refresh(log_entry)
+
+        logger.info(f"[EVENT LOG] {action_upper} on {artifact_type} ({artifact_id}) by {performed_by}")
+
+        return {
+            "event_id": str(log_entry.event_id),
+            "artifact_type": log_entry.artifact_type,
+            "artifact_id": log_entry.artifact_id,
+            "action": log_entry.action,
+            "old_value": log_entry.old_value,
+            "new_value": log_entry.new_value,
+            "performed_by": log_entry.performed_by,
+            "timestamp": log_entry.timestamp.isoformat() if log_entry.timestamp else ""
+        }
+
+    @staticmethod
+    async def get_by_artifact(
+        artifact_type: str,
+        artifact_id: str,
+        session: AsyncSession,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve all events for a specific artifact, ordered by timestamp descending.
+        """
+        stmt = (
+            select(ArtifactEventLogModel)
+            .where(
+                ArtifactEventLogModel.artifact_type == artifact_type,
+                ArtifactEventLogModel.artifact_id == str(artifact_id)
+            )
+            .order_by(ArtifactEventLogModel.timestamp.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+        return [
+            {
+                "event_id": str(e.event_id),
+                "artifact_type": e.artifact_type,
+                "artifact_id": e.artifact_id,
+                "action": e.action,
+                "old_value": e.old_value,
+                "new_value": e.new_value,
+                "performed_by": e.performed_by,
+                "timestamp": e.timestamp.isoformat() if e.timestamp else ""
+            }
+            for e in events
+        ]
+
+    @staticmethod
+    async def get_by_project(
+        project_id: str,
+        session: AsyncSession,
+        artifact_type: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve all events for a project, optionally filtered by artifact_type and/or action.
+        Since artifact_event_logs has no project_id column, this queries by artifact_type
+        and artifact_id patterns. For project-scoped queries, use the dedicated
+        get_by_project_artifact_types method with known artifact IDs.
+        
+        This method is a convenience wrapper — for production use, consider
+        querying by known artifact IDs from the project.
+        """
+        # Build query with optional filters
+        conditions = []
+        if artifact_type:
+            conditions.append(ArtifactEventLogModel.artifact_type == artifact_type)
+        if action:
+            conditions.append(ArtifactEventLogModel.action == action.upper())
+
+        stmt = select(ArtifactEventLogModel)
+        if conditions:
+            stmt = stmt.where(*conditions)
+        stmt = stmt.order_by(ArtifactEventLogModel.timestamp.desc()).limit(limit).offset(offset)
+
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+        return [
+            {
+                "event_id": str(e.event_id),
+                "artifact_type": e.artifact_type,
+                "artifact_id": e.artifact_id,
+                "action": e.action,
+                "old_value": e.old_value,
+                "new_value": e.new_value,
+                "performed_by": e.performed_by,
+                "timestamp": e.timestamp.isoformat() if e.timestamp else ""
+            }
+            for e in events
+        ]
+
+    @staticmethod
+    async def get_by_action(
+        action: str,
+        session: AsyncSession,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve all events for a specific action type (e.g. all CREATE events).
+        """
+        action_upper = action.upper()
+        stmt = (
+            select(ArtifactEventLogModel)
+            .where(ArtifactEventLogModel.action == action_upper)
+            .order_by(ArtifactEventLogModel.timestamp.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+        return [
+            {
+                "event_id": str(e.event_id),
+                "artifact_type": e.artifact_type,
+                "artifact_id": e.artifact_id,
+                "action": e.action,
+                "old_value": e.old_value,
+                "new_value": e.new_value,
+                "performed_by": e.performed_by,
+                "timestamp": e.timestamp.isoformat() if e.timestamp else ""
+            }
+            for e in events
+        ]
+
+    @staticmethod
+    async def get_recent(
+        session: AsyncSession,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve the most recent events across all artifacts.
+        """
+        stmt = (
+            select(ArtifactEventLogModel)
+            .order_by(ArtifactEventLogModel.timestamp.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+        return [
+            {
+                "event_id": str(e.event_id),
+                "artifact_type": e.artifact_type,
+                "artifact_id": e.artifact_id,
+                "action": e.action,
+                "old_value": e.old_value,
+                "new_value": e.new_value,
+                "performed_by": e.performed_by,
+                "timestamp": e.timestamp.isoformat() if e.timestamp else ""
+            }
+            for e in events
+        ]
+
+    @staticmethod
+    async def count_by_artifact(
+        artifact_type: str,
+        artifact_id: str,
+        session: AsyncSession
+    ) -> int:
+        """
+        Count total events for a specific artifact.
+        """
+        stmt = select(func.count()).select_from(ArtifactEventLogModel).where(
+            ArtifactEventLogModel.artifact_type == artifact_type,
+            ArtifactEventLogModel.artifact_id == str(artifact_id)
+        )
+        result = await session.execute(stmt)
+        return result.scalar() or 0
 

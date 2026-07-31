@@ -122,9 +122,9 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
     """
     Uses LLM for semantic intent classification on user message.
     Returns a dict with: intent, confidence, reason.
-    Supports intents: GENERAL_CHAT, REQUIREMENT_REQUEST.
+    Supports intents: GENERAL_CHAT, CREATE_REQUIREMENT, UPDATE_REQUIREMENT, DELETE_REQUIREMENT, CLARIFY_REQUIREMENT.
     """
-    VALID_INTENTS = ["GENERAL_CHAT", "REQUIREMENT_REQUEST"]
+    VALID_INTENTS = ["GENERAL_CHAT", "CREATE_REQUIREMENT", "UPDATE_REQUIREMENT", "DELETE_REQUIREMENT", "CLARIFY_REQUIREMENT"]
     
     if not raw_input or not str(raw_input).strip():
         return {
@@ -232,11 +232,29 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
             "confidence": 0.90,
             "reason": "The user is asking a question or seeking an explanation."
         }
-    elif any(kw in lower_inp for kw in ["add ", "create ", "new ", "implement ", "remove ", "delete ", "cancel ", "drop ", "no longer need", "update ", "change ", "modify ", "adjust "]):
+    elif any(kw in lower_inp for kw in ["run audit", "run auditor", "audit", "validate", "clarify", "review requirement"]):
         return {
-            "intent": "REQUIREMENT_REQUEST",
+            "intent": "CLARIFY_REQUIREMENT",
             "confidence": 0.85,
-            "reason": "The user is requesting a change to project requirements (add/remove/update)."
+            "reason": "The user is requesting validation, audit, or clarification of requirements."
+        }
+    elif any(kw in lower_inp for kw in ["remove ", "delete ", "cancel ", "drop ", "no longer need", "discard ", "retire ", "archive "]):
+        return {
+            "intent": "DELETE_REQUIREMENT",
+            "confidence": 0.85,
+            "reason": "The user is requesting to remove or delete an existing requirement."
+        }
+    elif any(kw in lower_inp for kw in ["update ", "change ", "modify ", "adjust ", "revise ", "edit "]):
+        return {
+            "intent": "UPDATE_REQUIREMENT",
+            "confidence": 0.85,
+            "reason": "The user is requesting to modify or update an existing requirement."
+        }
+    elif any(kw in lower_inp for kw in ["add ", "create ", "new ", "implement ", "introduce "]):
+        return {
+            "intent": "CREATE_REQUIREMENT",
+            "confidence": 0.85,
+            "reason": "The user is requesting to add a new requirement or feature."
         }
     else:
         return {
@@ -311,15 +329,7 @@ async def generate_general_chat_response(
     
     full_context = "\n\n".join(context_parts)
     
-    system_prompt = (
-        "You are a helpful, knowledgeable AI Business Analyst assistant for enterprise banking projects. "
-        "Answer the user's question naturally and conversationally using the provided project context whenever possible. "
-        "If the user asks about a concept (e.g., 'What is idempotency?'), explain it clearly with relevant examples. "
-        "If the user asks about the project (e.g., 'Summarize the PRD', 'Why was US-001 created?'), use the project context to answer. "
-        "If the user greets you, respond cordially. "
-        "IMPORTANT: Do NOT generate, create, update, or delete any requirements, user stories, acceptance criteria, or PRD content. "
-        "Do NOT output JSON. Respond in natural language only."
-    )
+    system_prompt = load_prompt("general_chat")
     
     try:
         from app.agents import llm

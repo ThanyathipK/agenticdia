@@ -294,3 +294,25 @@ CREATE INDEX idx_epics_is_locked ON epics(is_locked);
 CREATE INDEX idx_audit_results_is_valid ON audit_results(is_valid);
 CREATE INDEX idx_clarification_questions_is_resolved ON clarification_questions(is_resolved);
 CREATE INDEX idx_clarification_questions_category ON clarification_questions(checklist_category);
+
+-- ==========================================
+-- 12. ARTIFACT EVENT LOGS TABLE (APPEND-ONLY)
+-- ==========================================
+-- Immutable, append-only event log for tracking all artifact modifications.
+-- No foreign keys — purely historical traceability, not production data.
+-- Never overwrites or deletes existing records.
+CREATE TABLE artifact_event_logs (
+    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    artifact_type VARCHAR(50) NOT NULL,       -- e.g. 'epic', 'requirement', 'user_story', 'acceptance_criteria', 'prd'
+    artifact_id VARCHAR(36) NOT NULL,          -- UUID of the modified artifact
+    action VARCHAR(20) NOT NULL,               -- CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK
+    old_value JSONB,                           -- Snapshot of the artifact before the change
+    new_value JSONB,                           -- Snapshot of the artifact after the change
+    performed_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes for efficient querying
+CREATE INDEX idx_artifact_event_logs_artifact ON artifact_event_logs(artifact_type, artifact_id);
+CREATE INDEX idx_artifact_event_logs_action ON artifact_event_logs(action);
+CREATE INDEX idx_artifact_event_logs_timestamp ON artifact_event_logs(timestamp);

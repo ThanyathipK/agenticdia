@@ -1,0 +1,63 @@
+{
+  "total_tests": 55,
+  "workflow_accuracy": 94.54545454545455,
+  "intent_accuracy": 96.36363636363636,
+  "misclassifications_count": 5,
+  "misclassifications": [
+    {
+      "test_index": 12,
+      "user_input": "Transfer should support OTP",
+      "expected_workflow": "REQUIREMENT",
+      "predicted_workflow": "REQUIREMENT",
+      "workflow_reason": "The user is requesting a specific feature modification ('Transfer should support OTP'), which aligns with the REQUIREMENT workflow for adding or modifying software requirements.",
+      "expected_intent": "UPDATE_REQUIREMENT",
+      "predicted_intent": "CREATE_REQUIREMENT",
+      "intent_confidence": 0.95,
+      "intent_reason": "The user's message 'Transfer should support OTP' describes a new feature (OTP support) for an existing domain (Transfer). Since the system context explicitly states 'No existing user stories in this project', this is a request to introduce a new requirement that does not currently exist, fitting the definition of CREATE_REQUIREMENT."
+    },
+    {
+      "test_index": 24,
+      "user_input": "Delete US-005",
+      "expected_workflow": "REQUIREMENT",
+      "predicted_workflow": "COMMAND",
+      "workflow_reason": "The user input 'Delete US-005' is a direct imperative instruction to remove a specific requirement, which aligns with the 'COMMAND' workflow type for actions like deleting requirements.",
+      "expected_intent": "DELETE_REQUIREMENT",
+      "predicted_intent": "DELETE_REQUIREMENT",
+      "intent_confidence": 1.0,
+      "intent_reason": "The user explicitly uses the command 'Delete' followed by a specific requirement identifier 'US-005'. This directly matches the definition of DELETE_REQUIREMENT, which covers requests to remove, delete, or cancel existing features or requirements. The existing project context confirms no user stories exist, but the intent classification relies on the user's explicit action to delete a specific item, which falls squarely under the deletion category."
+    },
+    {
+      "test_index": 27,
+      "user_input": "Drop the legacy XML export",
+      "expected_workflow": "REQUIREMENT",
+      "predicted_workflow": "COMMAND",
+      "workflow_reason": "The user is requesting an action ('Drop') to remove a specific feature ('legacy XML export'), which aligns with the definition of a COMMAND for deleting or removing system elements.",
+      "expected_intent": "DELETE_REQUIREMENT",
+      "predicted_intent": "DELETE_REQUIREMENT",
+      "intent_confidence": 1.0,
+      "intent_reason": "The user explicitly uses the command 'Drop' followed by 'the legacy XML export', which directly maps to the intent of removing or discarding an existing feature or requirement. This aligns perfectly with the definition and examples for DELETE_REQUIREMENT (e.g., 'Drop the legacy XML export' is listed as an example). Since the project context indicates no existing user stories, this command implies the removal of a specific feature artifact from the project scope."
+    },
+    {
+      "test_index": 29,
+      "user_input": "Discard the previous reporting format",
+      "expected_workflow": "REQUIREMENT",
+      "predicted_workflow": "COMMAND",
+      "workflow_reason": "The user is issuing a direct instruction ('Discard') to remove or delete an existing reporting format, which aligns with the 'COMMAND' workflow type for actions like deleting or modifying system artifacts.",
+      "expected_intent": "DELETE_REQUIREMENT",
+      "predicted_intent": "DELETE_REQUIREMENT",
+      "intent_confidence": 1.0,
+      "intent_reason": "The user explicitly uses the command 'Discard' followed by 'the previous reporting format'. This indicates a clear intent to remove or retire an existing feature or requirement from the project scope, which aligns perfectly with the definition of DELETE_REQUIREMENT. The action is destructive (removal) rather than additive or modifying."
+    },
+    {
+      "test_index": 35,
+      "user_input": "Could you clarify the user roles for US-003?",
+      "expected_workflow": "QUESTION",
+      "predicted_workflow": "QUESTION",
+      "workflow_reason": "The user is asking for clarification and explanation regarding specific user roles for a requirement (US-003), which fits the definition of a QUESTION workflow.",
+      "expected_intent": "GENERAL_CHAT",
+      "predicted_intent": "CLARIFY_REQUIREMENT",
+      "intent_confidence": 1.0,
+      "intent_reason": "The user explicitly asks to 'clarify' specific details ('user roles') for an existing requirement identifier ('US-003'). This matches the definition of CLARIFY_REQUIREMENT, which covers requests for elaboration, details, or validation of existing requirements. The presence of a specific requirement ID (US-003) confirms the target is an existing artifact, distinguishing this from a general conceptual question."
+    }
+  ]
+}

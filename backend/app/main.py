@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.database import get_db, engine
 from app.models import Base
-from app.repository import RequirementStateRepository, ProjectRepository, ConversationMessageRepository, PendingActionRepository, PRDVersionRepository
+from app.repository import RequirementStateRepository, ProjectRepository, ConversationMessageRepository, PendingActionRepository, PRDVersionRepository, ArtifactEventLogRepository
 from app.schemas import (
     ProjectCreate, 
     UserAnswerSubmit, 
@@ -398,17 +398,25 @@ async def confirm_action(action_id: str, project_id: str, session: AsyncSession 
     
     if not action:
         raise HTTPException(status_code=404, detail="Pending action not found")
-        
-    # 2. Apply proposed changes (Simplified merge: update requirement state directly)
-    # The requirement state is in RequirementStateRepository.
-    # We should probably invoke the agent workflow again with the confirmed changes?
-    # Or just update the DB directly if we know what changed.
     
-    # For now, let's just delete the action, and return success.
-    # We should really integrate the logic to apply changes here.
+    # 2. Extract the proposed changes (the full merged requirement state)
+    proposed_changes = action.get("proposed_changes", {})
+    if not proposed_changes:
+        await PendingActionRepository.delete(action_id, project_id, session)
+        raise HTTPException(status_code=400, detail="No proposed changes found in pending action")
     
+    # 3. Apply proposed changes to the database
+    logger.info(f"[MERGE CONFIRM] Persisting merged state for project {project_id}...")
+    persisted_state = await RequirementStateRepository.save_or_update(project_id, proposed_changes, session)
+    
+    # 4. Delete the pending action
     await PendingActionRepository.delete(action_id, project_id, session)
-    return {"status": "confirmed"}
+    
+    logger.info(f"[MERGE CONFIRM] Merge confirmed and persisted for project {project_id}")
+    return {
+        "status": "confirmed",
+        "requirement_state": persisted_state
+    }
 
 @app.post("/api/cancel-action/{action_id}")
 async def cancel_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)):
@@ -812,8 +820,19 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
         }
     
     # ==========================================
-    # STEP 4: Non-GENERAL_CHAT — proceed to LangGraph workflow
+    # STEP 4: Route based on detected intent
     # ==========================================
+    # Map detected intent to target_agent for LangGraph workflow routing
+    intent_to_target = {
+        "CREATE_REQUIREMENT": "gatherer",
+        "UPDATE_REQUIREMENT": "gatherer",
+        "DELETE_REQUIREMENT": "delete_requirement",
+        "CLARIFY_REQUIREMENT": "auditor",
+    }
+    if detected_intent in intent_to_target:
+        request.target_agent = intent_to_target[detected_intent]
+        logger.info(f"[INTENT ROUTING] Intent {detected_intent} -> target_agent={request.target_agent}")
+    
     current_state = req_state.get("current_workflow_state", "IDLE") if req_state else "IDLE"
     logger.info(f"[WORKFLOW STATE MACHINE] Current workflow state: {current_state}")
 
@@ -945,13 +964,33 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
         workflow_routing = final_state.get("workflow_routing") or {}
         wf_type = str(workflow_routing.get("workflow", "REQUIREMENT")).upper()
 
-        # Persist complete merged changes to database
-        logger.info(f"[DB LOG] Persisting completed merged state and workflow state '{req_state.get('current_workflow_state')}' for project {request.project_id}...")
-        persisted_state = await RequirementStateRepository.save_or_update(request.project_id, req_state, session)
-        if persisted_state:
-            req_state = persisted_state
-        else:
-            logger.info(f"[WORKFLOW ROUTER] Bypassing DB persist for workflow type '{wf_type}'.")
+        # ==========================================
+        # IN-MEMORY MERGE: Store merged state as a pending action instead of directly persisting to DB.
+        # The user must confirm before changes are committed to the database.
+        # ==========================================
+        import uuid
+        from datetime import timedelta
+        
+        logger.info(f"[IN-MEMORY MERGE] Storing merged state as pending action for project {request.project_id}...")
+        
+        # Create a pending action with the full merged state as proposed changes
+        pending_action = await PendingActionRepository.create(
+            project_id=request.project_id,
+            data={
+                "action_type": "MERGE",
+                "target_requirement_id": None,
+                "original_user_message": request.raw_input or "",
+                "proposed_changes": req_state,
+                "affected_user_story_ids": [],
+                "affected_acceptance_criteria_ids": [],
+                "workflow_stage": req_state.get("current_workflow_state", "gatherer_node")
+            },
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            session=session
+        )
+        
+        pending_action_id = pending_action.get("id")
+        logger.info(f"[IN-MEMORY MERGE] Pending action {pending_action_id} created. Awaiting user confirmation.")
         
         # ==========================================
         # STEP 5: Persist assistant response for non-GENERAL_CHAT intents
@@ -1013,7 +1052,9 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
             "audit_result": audit_out,
             "prd_markdown": req_state.get("generated_prd", ""),
             "mermaid_diagram": req_state.get("generated_diagrams", ""),
-            "message": agent_message
+            "message": agent_message,
+            "pending_merge": True,
+            "pending_action_id": pending_action_id
         }
     except Exception as e:
         logger.error(f"Multi-agent workflow execution failed for project {request.project_id}: {str(e)}")
@@ -1141,6 +1182,120 @@ async def get_prd_version_by_number(project_id: str, version_number: int, sessio
     if not version:
         raise HTTPException(status_code=404, detail=f"PRD version {version_number} not found for this project")
     return version
+
+
+# ==========================================
+# ARTIFACT EVENT LOG API
+# ==========================================
+
+@app.get("/api/events", status_code=status.HTTP_200_OK)
+async def get_recent_events(
+    limit: int = 50,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve the most recent artifact event log entries across all projects.
+    Returns events ordered by timestamp descending (newest first).
+    """
+    events = await ArtifactEventLogRepository.get_recent(session, limit=limit, offset=offset)
+    return {
+        "events": events,
+        "total": len(events),
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/api/events/{artifact_type}/{artifact_id}", status_code=status.HTTP_200_OK)
+async def get_artifact_events(
+    artifact_type: str,
+    artifact_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve all events for a specific artifact (e.g. a user story, requirement, epic).
+    """
+    events = await ArtifactEventLogRepository.get_by_artifact(
+        artifact_type, artifact_id, session, limit=limit, offset=offset
+    )
+    return {
+        "artifact_type": artifact_type,
+        "artifact_id": artifact_id,
+        "events": events,
+        "total": len(events),
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/api/events/action/{action}", status_code=status.HTTP_200_OK)
+async def get_events_by_action(
+    action: str,
+    limit: int = 100,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve all events for a specific action type (CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK).
+    """
+    action_upper = action.upper()
+    if action_upper not in ArtifactEventLogRepository.VALID_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid action '{action}'. Must be one of: {', '.join(sorted(ArtifactEventLogRepository.VALID_ACTIONS))}"
+        )
+    events = await ArtifactEventLogRepository.get_by_action(action_upper, session, limit=limit, offset=offset)
+    return {
+        "action": action_upper,
+        "events": events,
+        "total": len(events),
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/api/project/{project_id}/events", status_code=status.HTTP_200_OK)
+async def get_project_events(
+    project_id: str,
+    artifact_type: Optional[str] = None,
+    action: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve events for a project, optionally filtered by artifact_type and/or action.
+    Queries events by known artifact IDs for the project.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    if action:
+        action_upper = action.upper()
+        if action_upper not in ArtifactEventLogRepository.VALID_ACTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid action '{action}'. Must be one of: {', '.join(sorted(ArtifactEventLogRepository.VALID_ACTIONS))}"
+            )
+        action = action_upper
+
+    events = await ArtifactEventLogRepository.get_by_project(
+        project_id, session, artifact_type=artifact_type, action=action, limit=limit, offset=offset
+    )
+    return {
+        "project_id": project_id,
+        "artifact_type": artifact_type,
+        "action": action,
+        "events": events,
+        "total": len(events),
+        "limit": limit,
+        "offset": offset
+    }
 
 
 if __name__ == "__main__":
