@@ -23,6 +23,7 @@ from app.models import (
     PendingActionModel,
     ArtifactEventLogModel
 )
+from app.lock_service import LockService
 
 logger = logging.getLogger("app.repository")
 
@@ -105,6 +106,12 @@ class ProjectRepository:
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if p:
+            # LOCK ENFORCEMENT: Cannot update a locked project
+            LockService.raise_if_locked_model(
+                "project",
+                p,
+                message=f"Project '{p.name}' is locked by {p.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             if "name" in updates:
                 p.name = updates["name"]
             if "description" in updates:
@@ -128,6 +135,12 @@ class ProjectRepository:
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if p:
+            # LOCK ENFORCEMENT: Cannot delete a locked project
+            LockService.raise_if_locked_model(
+                "project",
+                p,
+                message=f"Project '{p.name}' is locked by {p.locked_by or 'unknown'}. Unlock it before deleting."
+            )
             await session.delete(p)
             await session.flush()
             # Log DELETE event
@@ -175,6 +188,12 @@ class EpicRepository:
         
         name_to_use = epic_name.strip() if (epic_name and epic_name.strip()) else "Untitled Epic"
         if epic:
+            # LOCK ENFORCEMENT: Cannot update a locked epic
+            LockService.raise_if_locked_model(
+                "epic",
+                epic,
+                message=f"Epic '{epic.epic_name}' is locked by {epic.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             old_name = epic.epic_name
             old_version = epic.version
             if epic_name and epic_name.strip():
@@ -230,6 +249,16 @@ class EpicRepository:
     @staticmethod
     async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        # LOCK ENFORCEMENT: Cannot create a new epic under a locked project
+        stmt_project = select(ProjectModel).where(ProjectModel.id == pid)
+        res_project = await session.execute(stmt_project)
+        project = res_project.scalar_one_or_none()
+        if project:
+            LockService.raise_if_locked_model(
+                "project",
+                project,
+                message=f"Project '{project.name}' is locked by {project.locked_by or 'unknown'}. Unlock it before creating a new epic."
+            )
         epic = EpicModel(
             project_id=pid,
             epic_name=data.get("epic_name", "Untitled Epic"),
@@ -285,6 +314,12 @@ class EpicRepository:
         result = await session.execute(stmt)
         epic = result.scalar_one_or_none()
         if epic:
+            # LOCK ENFORCEMENT: Cannot update a locked epic
+            LockService.raise_if_locked_model(
+                "epic",
+                epic,
+                message=f"Epic '{epic.epic_name}' is locked by {epic.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             if "epic_name" in updates:
                 epic.epic_name = updates["epic_name"]
             if "version" in updates:
@@ -307,6 +342,12 @@ class EpicRepository:
         result = await session.execute(stmt)
         epic = result.scalar_one_or_none()
         if epic:
+            # LOCK ENFORCEMENT: Cannot delete a locked epic
+            LockService.raise_if_locked_model(
+                "epic",
+                epic,
+                message=f"Epic '{epic.epic_name}' is locked by {epic.locked_by or 'unknown'}. Unlock it before deleting."
+            )
             await session.delete(epic)
             await session.flush()
             return True
@@ -317,6 +358,24 @@ class RequirementRepository:
     Handles atomic requirements of the project.
     """
     @staticmethod
+    def _serialize(req: RequirementModel) -> Dict[str, Any]:
+        """Serialize a RequirementModel to a dict including lock fields."""
+        return {
+            "id": str(req.id),
+            "project_id": str(req.project_id),
+            "epic_id": str(req.epic_id) if req.epic_id else None,
+            "requirement_code": req.requirement_code,
+            "title": req.title,
+            "description": req.description,
+            "priority": req.priority,
+            "status": req.status,
+            "locked": bool(req.locked) if req.locked is not None else False,
+            "locked_by": req.locked_by,
+            "locked_at": req.locked_at.isoformat() if req.locked_at else None,
+            "lock_reason": req.lock_reason
+        }
+
+    @staticmethod
     async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
         req = RequirementModel(
@@ -326,21 +385,15 @@ class RequirementRepository:
             title=data.get("title", "Untitled Requirement"),
             description=data.get("description"),
             priority=data.get("priority"),
-            status=data.get("status", "active")
+            status=data.get("status", "active"),
+            locked=False,
+            locked_by=None,
+            locked_at=None
         )
         session.add(req)
         await session.flush()
         await session.refresh(req)
-        return {
-            "id": str(req.id),
-            "project_id": str(req.project_id),
-            "epic_id": str(req.epic_id) if req.epic_id else None,
-            "requirement_code": req.requirement_code,
-            "title": req.title,
-            "description": req.description,
-            "priority": req.priority,
-            "status": req.status
-        }
+        return RequirementRepository._serialize(req)
 
     @staticmethod
     async def get_by_id(id_val: str, project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
@@ -350,16 +403,7 @@ class RequirementRepository:
         result = await session.execute(stmt)
         req = result.scalar_one_or_none()
         if req:
-            return {
-                "id": str(req.id),
-                "project_id": str(req.project_id),
-                "epic_id": str(req.epic_id) if req.epic_id else None,
-                "requirement_code": req.requirement_code,
-                "title": req.title,
-                "description": req.description,
-                "priority": req.priority,
-                "status": req.status
-            }
+            return RequirementRepository._serialize(req)
         return None
 
     @staticmethod
@@ -368,19 +412,7 @@ class RequirementRepository:
         stmt = select(RequirementModel).where(RequirementModel.project_id == pid)
         result = await session.execute(stmt)
         reqs = result.scalars().all()
-        return [
-            {
-                "id": str(r.id),
-                "project_id": str(r.project_id),
-                "epic_id": str(r.epic_id) if r.epic_id else None,
-                "requirement_code": r.requirement_code,
-                "title": r.title,
-                "description": r.description,
-                "priority": r.priority,
-                "status": r.status
-            }
-            for r in reqs
-        ]
+        return [RequirementRepository._serialize(r) for r in reqs]
 
     @staticmethod
     async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
@@ -390,22 +422,20 @@ class RequirementRepository:
         result = await session.execute(stmt)
         req = result.scalar_one_or_none()
         if req:
+            # LOCK ENFORCEMENT: Cannot update a locked requirement
+            if req.locked:
+                raise PermissionError(
+                    f"Requirement {req.requirement_code} is locked by {req.locked_by or 'unknown'} "
+                    f"at {req.locked_at.isoformat() if req.locked_at else 'unknown time'}. "
+                    f"Unlock it before modifying."
+                )
             if "title" in updates: req.title = updates["title"]
             if "description" in updates: req.description = updates["description"]
             if "priority" in updates: req.priority = updates["priority"]
             if "status" in updates: req.status = updates["status"]
             await session.flush()
             await session.refresh(req)
-            return {
-                "id": str(req.id),
-                "project_id": str(req.project_id),
-                "epic_id": str(req.epic_id) if req.epic_id else None,
-                "requirement_code": req.requirement_code,
-                "title": req.title,
-                "description": req.description,
-                "priority": req.priority,
-                "status": req.status
-            }
+            return RequirementRepository._serialize(req)
         return None
 
     @staticmethod
@@ -416,6 +446,13 @@ class RequirementRepository:
         result = await session.execute(stmt)
         req = result.scalar_one_or_none()
         if req:
+            # LOCK ENFORCEMENT: Cannot delete a locked requirement
+            if req.locked:
+                raise PermissionError(
+                    f"Requirement {req.requirement_code} is locked by {req.locked_by or 'unknown'} "
+                    f"at {req.locked_at.isoformat() if req.locked_at else 'unknown time'}. "
+                    f"Unlock it before deleting."
+                )
             req.status = "deleted"
             # Archive User Stories and Acceptance Criteria related to that Requirement
             stmt_stories = select(UserStoryModel).where(UserStoryModel.requirement_id == rid)
@@ -437,6 +474,89 @@ class RequirementRepository:
             await session.flush()
             return True
         return False
+
+    @staticmethod
+    async def lock(id_val: str, project_id: str, session: AsyncSession, locked_by: str = "user") -> Optional[Dict[str, Any]]:
+        """
+        Lock a requirement so it cannot be updated, deleted, merged, or modified by AI.
+        """
+        rid = uuid.UUID(id_val) if isinstance(id_val, str) else id_val
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            if req.locked:
+                return RequirementRepository._serialize(req)
+            req.locked = True
+            req.locked_by = locked_by
+            req.locked_at = datetime.utcnow()
+            await session.flush()
+            await session.refresh(req)
+            # Log LOCK event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="requirement",
+                    artifact_id=str(req.id),
+                    action="LOCK",
+                    session=session,
+                    old_value={"locked": False},
+                    new_value={"locked": True, "locked_by": locked_by},
+                    performed_by=locked_by
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log requirement lock: {log_err}")
+            return RequirementRepository._serialize(req)
+        return None
+
+    @staticmethod
+    async def unlock(id_val: str, project_id: str, session: AsyncSession, unlocked_by: str = "user") -> Optional[Dict[str, Any]]:
+        """
+        Unlock a requirement so it can be modified again.
+
+        Raises:
+            PermissionError: If the requirement is locked by a different user
+                than the one attempting to unlock it
+        """
+        rid = uuid.UUID(id_val) if isinstance(id_val, str) else id_val
+        pid = uuid.UUID(project_id) if isinstance(project_id, str) else project_id
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            if not req.locked:
+                return RequirementRepository._serialize(req)
+            # Authorization check: only the lock owner can unlock the requirement
+            if req.locked_by != unlocked_by:
+                logger.warning(
+                    f"[UNLOCK] Denied unlock of requirement {req.id}: "
+                    f"locked by {req.locked_by}, attempted by {unlocked_by}"
+                )
+                raise PermissionError(
+                    f"Requirement is locked by {req.locked_by}. "
+                    f"Cannot be unlocked by {unlocked_by}."
+                )
+            old_locked_by = req.locked_by
+            req.locked = False
+            req.locked_by = None
+            req.locked_at = None
+            await session.flush()
+            await session.refresh(req)
+            # Log UNLOCK event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="requirement",
+                    artifact_id=str(req.id),
+                    action="UNLOCK",
+                    session=session,
+                    old_value={"locked": True, "locked_by": old_locked_by},
+                    new_value={"locked": False},
+                    performed_by=unlocked_by
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log requirement unlock: {log_err}")
+            return RequirementRepository._serialize(req)
+        return None
 
 class UserStoryRepository:
     """
@@ -471,7 +591,15 @@ class UserStoryRepository:
             res = await session.execute(stmt)
             req = res.scalars().first()
             if not req:
-                req = RequirementModel(project_id=pid, epic_name="Untitled Epic")
+                req = RequirementModel(
+                    project_id=pid,
+                    requirement_code="REQ-000",
+                    title="Untitled Requirement",
+                    status="active",
+                    locked=False,
+                    locked_by=None,
+                    locked_at=None
+                )
                 session.add(req)
                 await session.flush()
             requirement_id = req.id
@@ -505,6 +633,12 @@ class UserStoryRepository:
                 ticket_code = await UserStoryRepository.generate_unique_ticket_code(pid, session)
         
         if story:
+            # LOCK ENFORCEMENT: Cannot update a locked user story
+            LockService.raise_if_locked_model(
+                "user_story",
+                story,
+                message=f"User Story {story.ticket_code} is locked by {story.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             # Update existing story
             story.ticket_code = ticket_code
             story.story_title = story_title
@@ -576,7 +710,11 @@ class UserStoryRepository:
                 "status": story.status,
                 "version": story.version,
                 "last_modified_by": story.last_modified_by,
-                "change_type": story.change_type
+                "change_type": story.change_type,
+                "is_locked": story.is_locked,
+                "locked_by": story.locked_by,
+                "locked_at": story.locked_at.isoformat() if story.locked_at else None,
+                "lock_reason": story.lock_reason
             }
         return None
 
@@ -609,7 +747,11 @@ class UserStoryRepository:
                 "status": s.status,
                 "version": s.version,
                 "last_modified_by": s.last_modified_by,
-                "change_type": s.change_type
+                "change_type": s.change_type,
+                "is_locked": s.is_locked,
+                "locked_by": s.locked_by,
+                "locked_at": s.locked_at.isoformat() if s.locked_at else None,
+                "lock_reason": s.lock_reason
             }
             for s in stories
         ]
@@ -625,6 +767,12 @@ class UserStoryRepository:
         result = await session.execute(stmt)
         story = result.scalar_one_or_none()
         if story:
+            # LOCK ENFORCEMENT: Cannot update a locked user story
+            LockService.raise_if_locked_model(
+                "user_story",
+                story,
+                message=f"User Story {story.ticket_code} is locked by {story.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             if "ticket_code" in updates:
                 story.ticket_code = updates["ticket_code"]
             if "story_title" in updates:
@@ -671,6 +819,12 @@ class UserStoryRepository:
         result = await session.execute(stmt)
         story = result.scalar_one_or_none()
         if story:
+            # LOCK ENFORCEMENT: Cannot delete a locked user story
+            LockService.raise_if_locked_model(
+                "user_story",
+                story,
+                message=f"User Story {story.ticket_code} is locked by {story.locked_by or 'unknown'}. Unlock it before deleting."
+            )
             await session.delete(story)
             await session.flush()
             return True
@@ -686,6 +840,17 @@ class AcceptanceCriteriaRepository:
         story_id = data.get("user_story_id")
         if story_id and isinstance(story_id, str):
             story_id = uuid.UUID(story_id)
+        # LOCK ENFORCEMENT: Cannot add acceptance criteria to a locked user story
+        if story_id:
+            stmt_story = select(UserStoryModel).where(UserStoryModel.id == story_id)
+            res_story = await session.execute(stmt_story)
+            story = res_story.scalar_one_or_none()
+            if story:
+                LockService.raise_if_locked_model(
+                    "user_story",
+                    story,
+                    message=f"User Story {story.ticket_code} is locked by {story.locked_by or 'unknown'}. Unlock it before adding acceptance criteria."
+                )
         ac = AcceptanceCriteriaModel(
             user_story_id=story_id,
             criteria_text=data.get("criteria_text", ""),
@@ -785,6 +950,12 @@ class AcceptanceCriteriaRepository:
         result = await session.execute(stmt)
         ac = result.scalar_one_or_none()
         if ac:
+            # LOCK ENFORCEMENT: Cannot update a locked acceptance criteria
+            LockService.raise_if_locked_model(
+                "acceptance_criteria",
+                ac,
+                message=f"Acceptance Criteria is locked by {ac.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             if "criteria_text" in updates:
                 ac.criteria_text = updates["criteria_text"]
             if "user_story_id" in updates:
@@ -830,6 +1001,12 @@ class AcceptanceCriteriaRepository:
         result = await session.execute(stmt)
         ac = result.scalar_one_or_none()
         if ac:
+            # LOCK ENFORCEMENT: Cannot delete a locked acceptance criteria
+            LockService.raise_if_locked_model(
+                "acceptance_criteria",
+                ac,
+                message=f"Acceptance Criteria is locked by {ac.locked_by or 'unknown'}. Unlock it before deleting."
+            )
             await session.delete(ac)
             await session.flush()
             return True
@@ -849,7 +1026,15 @@ class ClarificationQuestionRepository:
             res_req = await session.execute(stmt_req)
             req = res_req.scalars().first()
             if not req:
-                req = RequirementModel(project_id=pid, epic_name="Untitled Epic")
+                req = RequirementModel(
+                    project_id=pid,
+                    requirement_code="REQ-000",
+                    title="Untitled Requirement",
+                    status="active",
+                    locked=False,
+                    locked_by=None,
+                    locked_at=None
+                )
                 session.add(req)
                 await session.flush()
             requirement_id = req.id
@@ -889,6 +1074,18 @@ class ClarificationQuestionRepository:
                 us = res_us.scalars().first()
                 if us:
                     story_id_val = us.id
+                    
+        # LOCK ENFORCEMENT: Cannot add clarification questions to a locked user story
+        if story_id_val:
+            stmt_story = select(UserStoryModel).where(UserStoryModel.id == story_id_val)
+            res_story = await session.execute(stmt_story)
+            story = res_story.scalar_one_or_none()
+            if story:
+                LockService.raise_if_locked_model(
+                    "user_story",
+                    story,
+                    message=f"User Story {story.ticket_code} is locked by {story.locked_by or 'unknown'}. Unlock it before adding clarification questions."
+                )
                     
         cq = ClarificationQuestionModel(
             audit_result_id=ar.id,
@@ -1002,6 +1199,12 @@ class ClarificationQuestionRepository:
         result = await session.execute(stmt)
         cq = result.scalar_one_or_none()
         if cq:
+            # LOCK ENFORCEMENT: Cannot update a locked clarification question
+            LockService.raise_if_locked_model(
+                "clarification_question",
+                cq,
+                message=f"Clarification Question is locked by {cq.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             if "checklist_category" in updates:
                 cq.checklist_category = updates["checklist_category"]
             if "question_text" in updates:
@@ -1060,6 +1263,12 @@ class ClarificationQuestionRepository:
         result = await session.execute(stmt)
         cq = result.scalar_one_or_none()
         if cq:
+            # LOCK ENFORCEMENT: Cannot delete a locked clarification question
+            LockService.raise_if_locked_model(
+                "clarification_question",
+                cq,
+                message=f"Clarification Question is locked by {cq.locked_by or 'unknown'}. Unlock it before deleting."
+            )
             await session.delete(cq)
             await session.flush()
             return True
@@ -1078,7 +1287,15 @@ class AuditResultRepository:
             res = await session.execute(stmt)
             req = res.scalars().first()
             if not req:
-                req = RequirementModel(project_id=pid, epic_name="Untitled Epic")
+                req = RequirementModel(
+                    project_id=pid,
+                    requirement_code="REQ-000",
+                    title="Untitled Requirement",
+                    status="active",
+                    locked=False,
+                    locked_by=None,
+                    locked_at=None
+                )
                 session.add(req)
                 await session.flush()
             requirement_id = req.id
@@ -1268,6 +1485,12 @@ class PRDDocumentRepository:
         result = await session.execute(stmt)
         prd = result.scalar_one_or_none()
         if prd:
+            # LOCK ENFORCEMENT: Cannot update a locked PRD document
+            LockService.raise_if_locked_model(
+                "prd_document",
+                prd,
+                message=f"PRD Document is locked by {prd.locked_by or 'unknown'}. Unlock it before modifying."
+            )
             if "version" in updates:
                 prd.version = updates["version"]
             if "prd_markdown" in updates:
@@ -1293,6 +1516,12 @@ class PRDDocumentRepository:
         result = await session.execute(stmt)
         prd = result.scalar_one_or_none()
         if prd:
+            # LOCK ENFORCEMENT: Cannot delete a locked PRD document
+            LockService.raise_if_locked_model(
+                "prd_document",
+                prd,
+                message=f"PRD Document is locked by {prd.locked_by or 'unknown'}. Unlock it before deleting."
+            )
             await session.delete(prd)
             await session.flush()
             return True
@@ -1406,7 +1635,15 @@ class VersionHistoryRepository:
         res_req = await session.execute(stmt_req)
         req = res_req.scalar_one_or_none()
         if not req:
-            req = RequirementModel(project_id=pid, epic_name="Untitled Epic")
+            req = RequirementModel(
+                project_id=pid,
+                requirement_code="REQ-000",
+                title="Untitled Requirement",
+                status="active",
+                locked=False,
+                locked_by=None,
+                locked_at=None
+            )
             session.add(req)
             await session.flush()
             
@@ -1576,10 +1813,15 @@ class RequirementStateRepository:
             
             # Build requirement entry
             req_entry = {
+                "id": str(req.id),
                 "requirement_code": req.requirement_code,
                 "title": req.title,
                 "description": req.description or "",
-                "user_stories": active_stories
+                "user_stories": active_stories,
+                "locked": bool(req.locked) if req.locked is not None else False,
+                "locked_by": req.locked_by,
+                "locked_at": req.locked_at.isoformat() if req.locked_at else None,
+                "lock_reason": req.lock_reason
             }
             requirements_list.append(req_entry)
             all_user_stories.extend(active_stories)
@@ -1805,6 +2047,14 @@ class RequirementStateRepository:
             # Find or create the RequirementModel for this requirement_code
             db_req = db_reqs_by_code.get(req_code)
             if db_req:
+                # LOCK ENFORCEMENT: Skip updating locked requirements (AI cannot modify locked requirements)
+                if db_req.locked:
+                    logger.warning(
+                        f"[LOCK ENFORCEMENT] Skipping update of locked requirement {req_code} "
+                        f"(locked_by={db_req.locked_by or 'unknown'}). AI modification blocked."
+                    )
+                    touched_req_ids.add(str(db_req.id))
+                    continue
                 # Update existing requirement
                 if db_req.status != "active":
                     db_req.status = "active"
@@ -1872,6 +2122,16 @@ class RequirementStateRepository:
                     i_want_to_changed = db_story.i_want_to != story.get("i_want_to", "")
                     so_that_changed = db_story.so_that != story.get("so_that", "")
                     was_archived = db_story.status != "active"
+
+                    # LOCK ENFORCEMENT: Skip modification of locked user stories
+                    if db_story.is_locked:
+                        logger.warning(
+                            f"[LOCK ENFORCEMENT] Skipping update of locked user story "
+                            f"{db_story.ticket_code} (locked_by={db_story.locked_by or 'unknown'}). "
+                            f"AI modification blocked."
+                        )
+                        touched_story_ids.append(db_story.id)
+                        continue
 
                     if rec_action == "UPDATE":
                         story_modified = True
@@ -1989,6 +2249,14 @@ class RequirementStateRepository:
             # Archive any user stories in this requirement that are NOT in the current payload
             for s_id, s_model in stories_by_id.items():
                 if s_id not in touched_story_ids and s_model.status == "active":
+                    # LOCK ENFORCEMENT: Never archive a locked user story
+                    if s_model.is_locked:
+                        logger.warning(
+                            f"[LOCK ENFORCEMENT] Skipping archive of locked user story "
+                            f"{s_model.ticket_code} (locked_by={s_model.locked_by or 'unknown'}). "
+                            f"AI removal blocked."
+                        )
+                        continue
                     s_model.status = "archived"
                     s_model.change_type = "archived"
                     s_model.version = s_model.version + 1
@@ -2010,12 +2278,27 @@ class RequirementStateRepository:
         for r_code, r_model in db_reqs_by_code.items():
             r_id_str = str(r_model.id)
             if r_id_str not in touched_req_ids and r_model.status == "active":
+                # LOCK ENFORCEMENT: Cannot archive/delete a locked requirement
+                if r_model.locked:
+                    logger.warning(
+                        f"[LOCK ENFORCEMENT] Skipping archive of locked requirement {r_code} "
+                        f"(locked_by={r_model.locked_by or 'unknown'}). AI removal blocked."
+                    )
+                    continue
                 r_model.status = "archived"
                 # Also archive all its user stories
                 stmt_orphan_stories = select(UserStoryModel).where(UserStoryModel.requirement_id == r_model.id)
                 res_orphan_stories = await session.execute(stmt_orphan_stories)
                 for orphan_story in res_orphan_stories.scalars().all():
                     if orphan_story.status == "active":
+                        # LOCK ENFORCEMENT: Never archive a locked user story
+                        if orphan_story.is_locked:
+                            logger.warning(
+                                f"[LOCK ENFORCEMENT] Skipping archive of locked user story "
+                                f"{orphan_story.ticket_code} (locked_by={orphan_story.locked_by or 'unknown'}). "
+                                f"AI removal blocked."
+                            )
+                            continue
                         orphan_story.status = "archived"
                         orphan_story.change_type = "archived"
                         orphan_story.version = orphan_story.version + 1

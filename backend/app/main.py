@@ -4,7 +4,7 @@ import httpx
 import traceback
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.database import get_db, engine
-from app.models import Base
-from app.repository import RequirementStateRepository, ProjectRepository, ConversationMessageRepository, PendingActionRepository, PRDVersionRepository, ArtifactEventLogRepository
+from app.models import Base, ClarificationQuestionModel
+from app.repository import RequirementStateRepository, ProjectRepository, ConversationMessageRepository, PendingActionRepository, PRDVersionRepository, ArtifactEventLogRepository, RequirementRepository
 from app.schemas import (
     ProjectCreate, 
     UserAnswerSubmit, 
@@ -91,6 +91,69 @@ async def add_project_column(engine) -> None:
     except Exception as e:
         logger.error(f"Migration step failed: add_project_column. Error: {str(e)}")
         logger.error(traceback.format_exc())
+
+async def add_lock_columns(engine) -> None:
+    """
+    Migration step: Adds lock-related columns to all artifact tables if they do not already exist.
+    """
+    logger.info("Running migration step: add_lock_columns.")
+    columns_to_add = [
+        # Projects
+        ("projects", "is_locked", "BOOLEAN DEFAULT FALSE"),
+        ("projects", "locked_by", "VARCHAR(100)"),
+        ("projects", "locked_at", "TIMESTAMPTZ"),
+        ("projects", "lock_reason", "VARCHAR(255)"),
+        # Epics
+        ("epics", "locked_by", "VARCHAR(100)"),
+        ("epics", "locked_at", "TIMESTAMPTZ"),
+        ("epics", "lock_reason", "VARCHAR(255)"),
+        # Requirements
+        ("requirements", "locked_by", "VARCHAR(100)"),
+        ("requirements", "locked_at", "TIMESTAMPTZ"),
+        ("requirements", "lock_reason", "VARCHAR(255)"),
+        # User Stories
+        ("user_stories", "is_locked", "BOOLEAN DEFAULT FALSE"),
+        ("user_stories", "locked_by", "VARCHAR(100)"),
+        ("user_stories", "locked_at", "TIMESTAMPTZ"),
+        ("user_stories", "lock_reason", "VARCHAR(255)"),
+        # Acceptance Criteria
+        ("acceptance_criteria", "is_locked", "BOOLEAN DEFAULT FALSE"),
+        ("acceptance_criteria", "locked_by", "VARCHAR(100)"),
+        ("acceptance_criteria", "locked_at", "TIMESTAMPTZ"),
+        ("acceptance_criteria", "lock_reason", "VARCHAR(255)"),
+        # Clarification Questions
+        ("clarification_questions", "is_locked", "BOOLEAN DEFAULT FALSE"),
+        ("clarification_questions", "locked_by", "VARCHAR(100)"),
+        ("clarification_questions", "locked_at", "TIMESTAMPTZ"),
+        ("clarification_questions", "lock_reason", "VARCHAR(255)"),
+        # PRD Documents
+        ("prd_documents", "is_locked", "BOOLEAN DEFAULT FALSE"),
+        ("prd_documents", "locked_by", "VARCHAR(100)"),
+        ("prd_documents", "locked_at", "TIMESTAMPTZ"),
+        ("prd_documents", "lock_reason", "VARCHAR(255)"),
+    ]
+    
+    for tbl, col, col_type in columns_to_add:
+        try:
+            async with engine.begin() as conn:
+                def check_needs_col(sync_conn):
+                    from sqlalchemy import inspect
+                    inspector = inspect(sync_conn)
+                    if tbl not in inspector.get_table_names():
+                        return False
+                    columns = [c["name"] for c in inspector.get_columns(tbl)]
+                    return col not in columns
+                
+                needs_col = await conn.run_sync(check_needs_col)
+                if needs_col:
+                    statement = f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type};"
+                    await conn.execute(text(statement))
+                    logger.info(f"Successfully added column {col} to table {tbl}.")
+                else:
+                    logger.info(f"Column {col} on table {tbl} already exists or table does not exist. Skipping.")
+        except Exception as e:
+            logger.error(f"Failed to add column {col} to table {tbl}: {str(e)}")
+            logger.error(traceback.format_exc())
 
 async def add_audit_columns(engine) -> None:
     columns_to_add = [
@@ -294,6 +357,7 @@ async def startup_event():
         await drop_constraint(engine)
         await add_project_column(engine)
         await add_audit_columns(engine)
+        await add_lock_columns(engine)
         await backfill_requirements(engine)
         await backfill_project_ids(engine)
         
@@ -309,11 +373,12 @@ async def startup_event():
         logger.critical(f"Database initialization failed during a critical step: {str(e)}", exc_info=True)
         raise e
 
-# Enterprise CORS middleware to enable external preview sandbox requests
+# Enterprise CORS middleware with explicit allowed origins.
+# allow_credentials is intentionally omitted (False) because the frontend
+# does not send cookies/auth headers, and "*" + credentials is invalid per spec.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.cors_origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -392,6 +457,20 @@ async def get_pending_actions(project_id: str, session: AsyncSession = Depends(g
 
 @app.post("/api/confirm-action/{action_id}")
 async def confirm_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)):
+    # 0. LOCK ENFORCEMENT: Cannot confirm an action on a locked project
+    from app.lock_service import LockService, ArtifactLockError
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    try:
+        lock_info = await LockService.get_lock_status("project", project_id, session, project_id=project_id)
+        LockService.raise_if_locked("project", project_id, lock_info)
+    except ArtifactLockError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
     # 1. Get the action
     actions = await PendingActionRepository.get_by_project(project_id, session)
     action = next((a for a in actions if a["id"] == action_id), None)
@@ -486,61 +565,159 @@ async def post_chat_query(request: ChatSessionRequest):
 async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubmit, db: AsyncSession = Depends(get_db)):
     """
     Submits official BA/PO answer to close an active compliance query roadblock.
-    Triggers automated DB state validation routines.
+    Persists the resolution answer and marks the clarification question as resolved.
     """
     logger.info(f"Updating clarification question {question_id} state with resolution.")
-    
-    # In a full production implementation, we would execute matching DB updates:
-    # db_query = select(ClarificationQuestion).where(ClarificationQuestion.id == question_id)
-    # result = await db.execute(db_query)
-    # question = result.scalar_one_or_none()
-    # if not question: raise HTTPException(status_code=404)
-    # question.user_answer = payload.answer_text
-    # question.is_resolved = True
-    # await db.commit()
+
+    db_query = select(ClarificationQuestionModel).where(ClarificationQuestionModel.id == question_id)
+    result = await db.execute(db_query)
+    question = result.scalar_one_or_none()
+    if not question:
+        raise HTTPException(status_code=404, detail=f"Clarification question {question_id} not found")
+
+    question.user_answer = payload.answer_text
+    question.is_resolved = True
+    await db.commit()
+    await db.refresh(question)
+
+    logger.info(f"Clarification question {question_id} resolved successfully.")
 
     return {
         "status": "success",
         "message": f"Answer to clarification question {question_id} has been logged and registered.",
-        "resolved_at": "now",
-        "is_resolved": True
+        "resolved_at": question.updated_at.isoformat() if question.updated_at else datetime.utcnow().isoformat(),
+        "is_resolved": question.is_resolved
     }
 
 
 @app.post("/api/prd/export/{project_id}", status_code=status.HTTP_200_OK)
-async def post_prd_export_generation(project_id: UUID):
+async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depends(get_db)):
     """
-    Gathers linked user stories and acceptance criteria, dispatches to local LLM,
-    and returns a clean, finalized Production PRD document structured in markdown.
+    Gathers linked user stories and acceptance criteria from the database,
+    dispatches them to the local LLM, and returns a clean, finalized
+    Production PRD document structured in markdown.
     """
     logger.info(f"Triggering automated compliance PRD synthesis for project {project_id}.")
 
-    # Formulate mock context based on standard payload schemas for deterministic prompt templates
-    mock_system_payload_description = (
-        "GIVEN a payment gateway transaction exceeding 100,000 THB\n"
-        "WHEN they click 'Confirm Transfer'\n"
-        "THEN system dispatches an authenticator modal and validates OTP code within 180 seconds."
-    )
+    # Validate project existence
+    project = await ProjectRepository.get_by_id(str(project_id), db)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+
+    # Fetch the real requirement state: requirements, user stories, and acceptance criteria
+    req_state = await RequirementStateRepository.get_by_project_id(str(project_id), db)
+    if not req_state:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No requirement state found for project {project_id}. Gather requirements before exporting a PRD."
+        )
+
+    requirements = req_state.get("requirements", []) or []
+    user_stories = req_state.get("user_stories", []) or []
+    acceptance_criteria = req_state.get("acceptance_criteria", []) or []
+    business_goals = req_state.get("business_goals", []) or []
+    actors = req_state.get("actors", []) or []
+    version_number = req_state.get("version_number", 1)
+
+    if not user_stories and not requirements:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No user stories or requirements found for project {project_id}. Gather requirements before exporting a PRD."
+        )
+
+    # Build a real context payload for the LLM from actual persisted artifacts
+    payload_sections = []
+
+    if business_goals:
+        payload_sections.append("## Business Goals")
+        for goal in business_goals:
+            if isinstance(goal, dict):
+                payload_sections.append(f"- {goal.get('description', goal)}")
+            else:
+                payload_sections.append(f"- {goal}")
+
+    if actors:
+        payload_sections.append("## Actors")
+        for actor in actors:
+            if isinstance(actor, dict):
+                payload_sections.append(f"- {actor.get('name', actor)}")
+            else:
+                payload_sections.append(f"- {actor}")
+
+    if requirements:
+        payload_sections.append("## Requirements")
+        for req in requirements:
+            req_title = req.get("title") or req.get("requirement_code") or "Untitled Requirement"
+            payload_sections.append(f"\n### {req.get('requirement_code', 'REQ')}: {req_title}")
+            if req.get("description"):
+                payload_sections.append(f"Description: {req['description']}")
+            for story in req.get("user_stories", []):
+                story_ac = story.get("acceptance_criteria", []) or []
+                payload_sections.append(
+                    f"- [{story.get('ticket_code', 'US-000')}] {story.get('story_title', 'Untitled Story')}\n"
+                    f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')} "
+                    f"so that {story.get('so_that', '')}."
+                )
+                for ac in story_ac:
+                    payload_sections.append(f"  - Acceptance Criteria: {ac}")
+    else:
+        payload_sections.append("## User Stories")
+        for story in user_stories:
+            payload_sections.append(
+                f"- [{story.get('ticket_code', 'US-000')}] {story.get('story_title', 'Untitled Story')}\n"
+                f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')} "
+                f"so that {story.get('so_that', '')}."
+            )
+        if acceptance_criteria:
+            payload_sections.append("\n## Acceptance Criteria")
+            for ac in acceptance_criteria:
+                if isinstance(ac, dict):
+                    payload_sections.append(f"- {ac.get('criteria_text', ac)}")
+                else:
+                    payload_sections.append(f"- {ac}")
+
+    system_payload_description = "\n".join(payload_sections)
 
     prompt = [
         {
             "role": "system",
-            "content": "You are a senior system architect. Summarize requirements into a formal, compliant PRD in markdown format."
+            "content": (
+                "You are a senior system architect. Synthesize the provided project requirements "
+                "into a formal, compliant Product Requirements Document (PRD) in markdown format. "
+                "Include a mermaid sequence diagram when describing core system flows."
+            )
         },
         {
             "role": "user",
-            "content": f"Synthesize a PRD based on project {project_id}. Mapped Acceptance Criteria is as follows:\n{mock_system_payload_description}"
+            "content": (
+                f"Synthesize a formal PRD for project {project_id} "
+                f"(Project: {project.get('name', 'N/A')}, Version {version_number}).\n\n"
+                f"Persisted Requirements Data:\n{system_payload_description}"
+            )
         }
     ]
 
     prd_response = await call_lm_studio(prompt)
     markdown_content = prd_response.get("text", "# PRD\n\nFailed to synthesize PRD.")
 
+    # Persist the newly generated PRD as an immutable version record
+    version_record = None
+    try:
+        version_record = await PRDVersionRepository.create(str(project_id), {
+            "generated_prd": markdown_content,
+            "generated_diagram": "",
+            "generated_by": "prd_export_endpoint"
+        }, db)
+        logger.info(f"[PRD EXPORT] Created PRD version {version_record['version_number']} for project {project_id}.")
+    except Exception as version_err:
+        logger.error(f"[PRD EXPORT] Failed to create PRD version: {str(version_err)}")
+
     return {
         "project_id": project_id,
-        "version": 1,
+        "version": version_record["version_number"] if version_record else version_number,
+        "version_id": version_record["version_id"] if version_record else None,
         "prd_markdown": markdown_content,
-        "mermaid_diagram": "sequenceDiagram\n  Customer->>Gateway: Transfer Request\n  Gateway-->>Customer: Challenge Modal"
+        "mermaid_diagram": ""
     }
 
 
@@ -583,6 +760,234 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"status": "deleted", "project_id": project_id}
+
+
+# ==========================================
+# GENERIC ARTIFACT LOCK / UNLOCK API
+# ==========================================
+
+class ArtifactLockRequest(BaseModel):
+    """Request body for locking/unlocking any artifact."""
+    locked_by: Optional[str] = Field(default="user", description="Identifier of who is locking/unlocking the artifact.")
+    lock_reason: Optional[str] = Field(default=None, description="Optional reason for locking the artifact.")
+
+@app.post("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock", status_code=status.HTTP_200_OK)
+async def lock_artifact(
+    project_id: str,
+    artifact_type: str,
+    artifact_id: str,
+    payload: ArtifactLockRequest,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Generic lock endpoint for any artifact type.
+    Supported types: project, epic, requirement, user_story, acceptance_criteria, clarification_question, prd_document
+    """
+    from app.lock_service import LockService, ArtifactLockError
+    
+    try:
+        UUID(project_id)
+        UUID(artifact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or artifact_id format")
+    
+    # Validate artifact type
+    valid_types = ["project", "epic", "requirement", "user_story", "acceptance_criteria", "clarification_question", "prd_document"]
+    if artifact_type not in valid_types:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid artifact_type. Must be one of: {', '.join(valid_types)}"
+        )
+    
+    try:
+        lock_info = await LockService.lock_artifact(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            session=session,
+            locked_by=payload.locked_by or "user",
+            lock_reason=payload.lock_reason,
+            project_id=project_id
+        )
+        return {
+            "status": "locked",
+            "artifact": lock_info
+        }
+    except ArtifactLockError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/unlock", status_code=status.HTTP_200_OK)
+async def unlock_artifact(
+    project_id: str,
+    artifact_type: str,
+    artifact_id: str,
+    payload: ArtifactLockRequest,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Generic unlock endpoint for any artifact type.
+    """
+    from app.lock_service import LockService
+    
+    try:
+        UUID(project_id)
+        UUID(artifact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or artifact_id format")
+    
+    # Validate artifact type
+    valid_types = ["project", "epic", "requirement", "user_story", "acceptance_criteria", "clarification_question", "prd_document"]
+    if artifact_type not in valid_types:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid artifact_type. Must be one of: {', '.join(valid_types)}"
+        )
+    
+    try:
+        lock_info = await LockService.unlock_artifact(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            session=session,
+            unlocked_by=payload.locked_by or "user",
+            project_id=project_id
+        )
+        return {
+            "status": "unlocked",
+            "artifact": lock_info
+        }
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock-status", status_code=status.HTTP_200_OK)
+async def get_artifact_lock_status(
+    project_id: str,
+    artifact_type: str,
+    artifact_id: str,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Get the lock status of any artifact.
+    """
+    from app.lock_service import LockService
+    
+    try:
+        UUID(project_id)
+        UUID(artifact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or artifact_id format")
+    
+    # Validate artifact type
+    valid_types = ["project", "epic", "requirement", "user_story", "acceptance_criteria", "clarification_question", "prd_document"]
+    if artifact_type not in valid_types:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid artifact_type. Must be one of: {', '.join(valid_types)}"
+        )
+    
+    try:
+        lock_info = await LockService.get_lock_status(artifact_type, artifact_id, session, project_id=project_id)
+        return lock_info
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ==========================================
+# REQUIREMENT LOCK / UNLOCK API
+# ==========================================
+
+class RequirementLockRequest(BaseModel):
+    """Request body for locking/unlocking a requirement."""
+    locked_by: Optional[str] = Field(default="user", description="Identifier of who is locking/unlocking the requirement.")
+
+@app.post("/api/project/{project_id}/requirements/{requirement_id}/lock", status_code=status.HTTP_200_OK)
+async def lock_requirement(
+    project_id: str,
+    requirement_id: str,
+    payload: RequirementLockRequest,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Lock a requirement so it cannot be updated, deleted, merged, or modified by AI.
+    """
+    try:
+        UUID(project_id)
+        UUID(requirement_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or requirement_id format")
+
+    locked = await RequirementRepository.lock(
+        requirement_id, project_id, session, locked_by=payload.locked_by or "user"
+    )
+    if not locked:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return {
+        "status": "locked",
+        "requirement": locked
+    }
+
+
+@app.post("/api/project/{project_id}/requirements/{requirement_id}/unlock", status_code=status.HTTP_200_OK)
+async def unlock_requirement(
+    project_id: str,
+    requirement_id: str,
+    payload: RequirementLockRequest,
+    session: AsyncSession = Depends(get_db)
+):
+    """
+    Unlock a requirement so it can be modified again.
+    """
+    try:
+        UUID(project_id)
+        UUID(requirement_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or requirement_id format")
+
+    try:
+        unlocked = await RequirementRepository.unlock(
+            requirement_id, project_id, session, unlocked_by=payload.locked_by or "user"
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    if not unlocked:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return {
+        "status": "unlocked",
+        "requirement": unlocked
+    }
+
+
+@app.get("/api/project/{project_id}/requirements", status_code=status.HTTP_200_OK)
+async def get_project_requirements(project_id: str, session: AsyncSession = Depends(get_db)):
+    """
+    Retrieve all requirements for a project, including lock status.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    requirements = await RequirementRepository.get_by_project(project_id, session)
+    return requirements
+
+
+@app.get("/api/project/{project_id}/requirements/{requirement_id}", status_code=status.HTTP_200_OK)
+async def get_requirement(project_id: str, requirement_id: str, session: AsyncSession = Depends(get_db)):
+    """
+    Retrieve a single requirement by ID, including lock status.
+    """
+    try:
+        UUID(project_id)
+        UUID(requirement_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or requirement_id format")
+
+    requirement = await RequirementRepository.get_by_id(requirement_id, project_id, session)
+    if not requirement:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return requirement
 
 
 @app.get("/api/project/{project_id}", status_code=status.HTTP_200_OK)
@@ -670,6 +1075,16 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # LOCK ENFORCEMENT: Cannot update requirement state of a locked project
+    from app.lock_service import LockService, ArtifactLockError
+    try:
+        lock_info = await LockService.get_lock_status("project", project_id, session, project_id=project_id)
+        LockService.raise_if_locked("project", project_id, lock_info)
+    except ArtifactLockError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
     logger.info(f"[DB LOG] Updating RequirementState directly for project {project_id}")
     state = await RequirementStateRepository.save_or_update(project_id, updates, session)
     return state
@@ -684,6 +1099,20 @@ async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSessi
     project_id = payload.get("project_id")
     answers = payload.get("answers", {})
     
+    # LOCK ENFORCEMENT: Cannot submit clarification answers on a locked project
+    from app.lock_service import LockService, ArtifactLockError
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    try:
+        lock_info = await LockService.get_lock_status("project", project_id, session, project_id=project_id)
+        LockService.raise_if_locked("project", project_id, lock_info)
+    except ArtifactLockError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
     req_state = await RequirementStateRepository.get_by_project_id(project_id, session)
     if not req_state:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -758,7 +1187,13 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
     # If the intent is GENERAL_CHAT (greeting, question, explanation request, concept query),
     # generate an LLM response directly without entering any agent workflow.
     # REQUIREMENT_REQUEST intents fall through to the LangGraph workflow below.
-    if detected_intent == "GENERAL_CHAT":
+    #
+    # IMPORTANT: Explicit on-demand agent requests (e.g. "Generate PRD" button sends
+    # target_agent="architect" with empty raw_input) MUST bypass the GENERAL_CHAT
+    # short-circuit. Otherwise the empty raw_input defaults to GENERAL_CHAT and the
+    # architect/auditor workflow never runs.
+    on_demand_agents = ("architect", "auditor", "delete_requirement")
+    if detected_intent == "GENERAL_CHAT" and request.target_agent not in on_demand_agents:
         logger.info("[GENERAL_CHAT] Handling as general chat. Generating conversational response with project context.")
 
         # Load conversation history for context (with error handling for DB failures)

@@ -1,0 +1,515 @@
+"""
+Generic Artifact Locking Service
+Provides lock/unlock functionality for all project artifacts.
+"""
+import logging
+from typing import Optional, Dict, Any
+from datetime import datetime, timezone
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.models import (
+    ProjectModel,
+    EpicModel,
+    RequirementModel,
+    UserStoryModel,
+    AcceptanceCriteriaModel,
+    ClarificationQuestionModel,
+    AuditResultModel,
+    PRDDocumentModel
+)
+
+logger = logging.getLogger("app.lock_service")
+
+
+class ArtifactLockError(Exception):
+    """Raised when an artifact is locked and cannot be modified."""
+    def __init__(self, artifact_type: str, artifact_id: str, locked_by: str, locked_at: str, message: str = ""):
+        self.artifact_type = artifact_type
+        self.artifact_id = artifact_id
+        self.locked_by = locked_by
+        self.locked_at = locked_at
+        self.message = message or f"{artifact_type.capitalize()} is locked by {locked_by} at {locked_at}. Unlock it before modifying."
+        super().__init__(self.message)
+
+
+class LockService:
+    """
+    Generic service for locking and unlocking artifacts.
+    Works with all supported artifact types.
+    """
+
+    # Mapping of artifact types to their models and lock column names
+    ARTIFACT_CONFIG = {
+        "project": {
+            "model": ProjectModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+        "epic": {
+            "model": EpicModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+        "requirement": {
+            "model": RequirementModel,
+            "id_field": "id",
+            "lock_field": "locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+        "user_story": {
+            "model": UserStoryModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+        "acceptance_criteria": {
+            "model": AcceptanceCriteriaModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+        "clarification_question": {
+            "model": ClarificationQuestionModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+        "prd_document": {
+            "model": PRDDocumentModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
+    }
+
+    @staticmethod
+    async def _resolve_artifact_project_id(
+        artifact_type: str,
+        artifact: Any,
+        session: AsyncSession
+    ) -> Optional[str]:
+        """
+        Resolve the project_id that owns the given artifact.
+
+        Returns:
+            The owning project_id as a string, or None if the artifact type
+            has no project association.
+        """
+        try:
+            if artifact_type == "project":
+                return str(getattr(artifact, "id"))
+
+            elif artifact_type in ("epic", "requirement", "user_story", "prd_document"):
+                pid = getattr(artifact, "project_id", None)
+                return str(pid) if pid is not None else None
+
+            elif artifact_type == "acceptance_criteria":
+                # acceptance_criteria -> user_stories.project_id
+                user_story_id = getattr(artifact, "user_story_id", None)
+                if not user_story_id:
+                    return None
+                stmt = select(UserStoryModel.project_id).where(UserStoryModel.id == user_story_id)
+                result = await session.execute(stmt)
+                owning_project_id = result.scalar_one_or_none()
+                return str(owning_project_id) if owning_project_id is not None else None
+
+            elif artifact_type == "clarification_question":
+                # clarification_question -> audit_results.requirement_id -> requirements.project_id
+                audit_result_id = getattr(artifact, "audit_result_id", None)
+                if not audit_result_id:
+                    return None
+                stmt = select(AuditResultModel.requirement_id).where(AuditResultModel.id == audit_result_id)
+                result = await session.execute(stmt)
+                requirement_id = result.scalar_one_or_none()
+                if requirement_id is None:
+                    return None
+                stmt = select(RequirementModel.project_id).where(RequirementModel.id == requirement_id)
+                result = await session.execute(stmt)
+                owning_project_id = result.scalar_one_or_none()
+                return str(owning_project_id) if owning_project_id is not None else None
+        except Exception:
+            logger.exception(f"[LOCK] Failed to resolve project ownership for {artifact_type} {getattr(artifact, 'id', 'unknown')}")
+
+        return None
+
+    @staticmethod
+    async def _verify_project_ownership(
+        artifact_type: str,
+        project_id: Optional[str],
+        artifact: Any,
+        session: AsyncSession
+    ) -> None:
+        """
+        Verify that the artifact belongs to the given project.
+
+        Args:
+            artifact_type: Type of artifact
+            project_id: Project UUID to verify ownership against
+            artifact: The fetched artifact model instance
+            session: Database session
+
+        Raises:
+            ValueError: If the artifact does not belong to the project
+        """
+        if project_id is None:
+            return
+
+        owning_project_id = await LockService._resolve_artifact_project_id(artifact_type, artifact, session)
+        if owning_project_id is None or str(owning_project_id) != str(project_id):
+            # Do not leak whether the artifact exists in another project.
+            raise ValueError(f"{artifact_type.capitalize()} not found in project")
+
+    @staticmethod
+    async def lock_artifact(
+        artifact_type: str,
+        artifact_id: str,
+        session: AsyncSession,
+        locked_by: str = "user",
+        lock_reason: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Lock an artifact to prevent modifications.
+        
+        Args:
+            artifact_type: Type of artifact (project, epic, requirement, user_story, etc.)
+            artifact_id: UUID of the artifact
+            session: Database session
+            locked_by: Who is locking the artifact
+            lock_reason: Optional reason for locking
+            project_id: UUID of the project that must own the artifact. If provided,
+                verification fails with ValueError when the artifact does not belong
+                to the project.
+        
+        Returns:
+            Dict with lock metadata
+        
+        Raises:
+            ValueError: If artifact_type is not supported, if the artifact is not found,
+                or if the artifact does not belong to the given project
+            ArtifactLockError: If the artifact is already locked by a different user
+        """
+        if artifact_type not in LockService.ARTIFACT_CONFIG:
+            raise ValueError(f"Unsupported artifact type: {artifact_type}")
+
+        config = LockService.ARTIFACT_CONFIG[artifact_type]
+        model = config["model"]
+        id_field = config["id_field"]
+        lock_field = config["lock_field"]
+        locked_by_field = config["locked_by_field"]
+        locked_at_field = config["locked_at_field"]
+        lock_reason_field = config["lock_reason_field"]
+
+        # Query the artifact
+        stmt = select(model).where(getattr(model, id_field) == artifact_id)
+        result = await session.execute(stmt)
+        artifact = result.scalar_one_or_none()
+
+        if not artifact:
+            raise ValueError(f"{artifact_type.capitalize()} not found")
+
+        # Verify the artifact belongs to the specified project
+        await LockService._verify_project_ownership(artifact_type, project_id, artifact, session)
+
+        # Check if already locked
+        if getattr(artifact, lock_field):
+            lock_holder = getattr(artifact, locked_by_field)
+            locked_at_value = getattr(artifact, locked_at_field)
+
+            # If the same user attempts to re-lock, treat it as an idempotent no-op.
+            if lock_holder == locked_by:
+                logger.info(f"[LOCK] {artifact_type} {artifact_id} is already locked by {locked_by}. Treating as re-lock no-op.")
+                return LockService._serialize_lock_metadata(artifact, config, artifact_type)
+
+            # A different user holds the lock; raise an error so the caller is
+            # explicitly notified that someone else owns the lock.
+            logger.warning(
+                f"[LOCK] Denied lock of {artifact_type} {artifact_id}: "
+                f"already locked by {lock_holder}, attempted by {locked_by}"
+            )
+            raise ArtifactLockError(
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                locked_by=lock_holder or "unknown",
+                locked_at=locked_at_value.isoformat() if locked_at_value else "unknown time",
+                message=(
+                    f"{artifact_type.capitalize()} is already locked by {lock_holder} "
+                    f"at {locked_at_value.isoformat() if locked_at_value else 'unknown time'}. "
+                    f"Unlock it before modifying."
+                )
+            )
+
+        # Lock the artifact
+        setattr(artifact, lock_field, True)
+        setattr(artifact, locked_by_field, locked_by)
+        setattr(artifact, locked_at_field, datetime.now(timezone.utc))
+        if lock_reason:
+            setattr(artifact, lock_reason_field, lock_reason)
+
+        await session.flush()
+        await session.refresh(artifact)
+
+        # Log the LOCK event
+        try:
+            from app.repository import ArtifactEventLogRepository
+            await ArtifactEventLogRepository.log_event(
+                artifact_type=artifact_type,
+                artifact_id=str(artifact_id),
+                action="LOCK",
+                session=session,
+                old_value={"locked": False},
+                new_value={
+                    "locked": True,
+                    "locked_by": locked_by,
+                    "locked_at": datetime.now(timezone.utc).isoformat(),
+                    "lock_reason": lock_reason
+                },
+                performed_by=locked_by
+            )
+        except Exception as log_err:
+            logger.warning(f"[EVENT LOG] Failed to log lock event for {artifact_type} {artifact_id}: {log_err}")
+
+        logger.info(f"[LOCK] {artifact_type} {artifact_id} locked by {locked_by}")
+        return LockService._serialize_lock_metadata(artifact, config, artifact_type)
+
+    @staticmethod
+    async def unlock_artifact(
+        artifact_type: str,
+        artifact_id: str,
+        session: AsyncSession,
+        unlocked_by: str = "user",
+        project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Unlock an artifact to allow modifications.
+        
+        Args:
+            artifact_type: Type of artifact
+            artifact_id: UUID of the artifact
+            session: Database session
+            unlocked_by: Who is unlocking the artifact
+            project_id: UUID of the project that must own the artifact. If provided,
+                verification fails with ValueError when the artifact does not belong
+                to the project.
+        
+        Returns:
+            Dict with lock metadata
+        
+        Raises:
+            ValueError: If artifact_type is not supported, if the artifact is not found,
+                or if the artifact does not belong to the given project
+            PermissionError: If the artifact is locked by a different user
+                than the one attempting to unlock it
+        """
+        if artifact_type not in LockService.ARTIFACT_CONFIG:
+            raise ValueError(f"Unsupported artifact type: {artifact_type}")
+
+        config = LockService.ARTIFACT_CONFIG[artifact_type]
+        model = config["model"]
+        id_field = config["id_field"]
+        lock_field = config["lock_field"]
+        locked_by_field = config["locked_by_field"]
+        locked_at_field = config["locked_at_field"]
+        lock_reason_field = config["lock_reason_field"]
+
+        # Query the artifact
+        stmt = select(model).where(getattr(model, id_field) == artifact_id)
+        result = await session.execute(stmt)
+        artifact = result.scalar_one_or_none()
+
+        if not artifact:
+            raise ValueError(f"{artifact_type.capitalize()} not found")
+
+        # Verify the artifact belongs to the specified project
+        await LockService._verify_project_ownership(artifact_type, project_id, artifact, session)
+
+        # Check if already unlocked
+        if not getattr(artifact, lock_field):
+            logger.info(f"[UNLOCK] {artifact_type} {artifact_id} is already unlocked.")
+            return LockService._serialize_lock_metadata(artifact, config, artifact_type)
+
+        # Authorization check: only the lock owner can unlock the artifact
+        locked_by_value = getattr(artifact, locked_by_field)
+        if locked_by_value != unlocked_by:
+            logger.warning(
+                f"[UNLOCK] Denied unlock of {artifact_type} {artifact_id}: "
+                f"locked by {locked_by_value}, attempted by {unlocked_by}"
+            )
+            raise PermissionError(
+                f"{artifact_type.capitalize()} is locked by {locked_by_value}. "
+                f"Cannot be unlocked by {unlocked_by}."
+            )
+
+        # Store old values for logging
+        old_locked_by = getattr(artifact, locked_by_field)
+        old_locked_at = getattr(artifact, locked_at_field)
+
+        # Unlock the artifact
+        setattr(artifact, lock_field, False)
+        setattr(artifact, locked_by_field, None)
+        setattr(artifact, locked_at_field, None)
+        setattr(artifact, lock_reason_field, None)
+
+        await session.flush()
+        await session.refresh(artifact)
+
+        # Log the UNLOCK event
+        try:
+            from app.repository import ArtifactEventLogRepository
+            await ArtifactEventLogRepository.log_event(
+                artifact_type=artifact_type,
+                artifact_id=str(artifact_id),
+                action="UNLOCK",
+                session=session,
+                old_value={
+                    "locked": True,
+                    "locked_by": old_locked_by,
+                    "locked_at": old_locked_at.isoformat() if old_locked_at else None
+                },
+                new_value={"locked": False},
+                performed_by=unlocked_by
+            )
+        except Exception as log_err:
+            logger.warning(f"[EVENT LOG] Failed to log unlock event for {artifact_type} {artifact_id}: {log_err}")
+
+        logger.info(f"[UNLOCK] {artifact_type} {artifact_id} unlocked by {unlocked_by}")
+        return LockService._serialize_lock_metadata(artifact, config, artifact_type)
+
+    @staticmethod
+    async def get_lock_status(artifact_type: str, artifact_id: str, session: AsyncSession, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get the lock status of an artifact.
+        
+        Args:
+            artifact_type: Type of artifact
+            artifact_id: UUID of the artifact
+            session: Database session
+            project_id: UUID of the project that must own the artifact. If provided,
+                verification fails with ValueError when the artifact does not belong
+                to the project.
+        
+        Returns:
+            Dict with lock metadata (locked, locked_by, locked_at, lock_reason)
+        
+        Raises:
+            ValueError: If artifact_type is not supported, if the artifact is not found,
+                or if the artifact does not belong to the given project
+        """
+        if artifact_type not in LockService.ARTIFACT_CONFIG:
+            raise ValueError(f"Unsupported artifact type: {artifact_type}")
+
+        config = LockService.ARTIFACT_CONFIG[artifact_type]
+        model = config["model"]
+        id_field = config["id_field"]
+
+        stmt = select(model).where(getattr(model, id_field) == artifact_id)
+        result = await session.execute(stmt)
+        artifact = result.scalar_one_or_none()
+
+        if not artifact:
+            raise ValueError(f"{artifact_type.capitalize()} not found")
+
+        # Verify the artifact belongs to the specified project
+        await LockService._verify_project_ownership(artifact_type, project_id, artifact, session)
+
+        return LockService._serialize_lock_metadata(artifact, config, artifact_type)
+
+    @staticmethod
+    async def check_is_locked(artifact_type: str, artifact_id: str, session: AsyncSession) -> bool:
+        """
+        Quick check if an artifact is locked.
+        Returns True if locked, False otherwise.
+        """
+        if artifact_type not in LockService.ARTIFACT_CONFIG:
+            raise ValueError(f"Unsupported artifact type: {artifact_type}")
+
+        config = LockService.ARTIFACT_CONFIG[artifact_type]
+        model = config["model"]
+        id_field = config["id_field"]
+        lock_field = config["lock_field"]
+
+        stmt = select(getattr(model, lock_field)).where(getattr(model, id_field) == artifact_id)
+        result = await session.execute(stmt)
+        is_locked = result.scalar_one_or_none()
+        return bool(is_locked) if is_locked is not None else False
+
+    @staticmethod
+    def _serialize_lock_metadata(artifact: Any, config: Dict[str, str], artifact_type: str) -> Dict[str, Any]:
+        """Serialize lock metadata from an artifact model."""
+        return {
+            "artifact_type": artifact_type,
+            "artifact_id": str(getattr(artifact, config["id_field"])),
+            "locked": bool(getattr(artifact, config["lock_field"])) if getattr(artifact, config["lock_field"]) is not None else False,
+            "locked_by": getattr(artifact, config["locked_by_field"]),
+            "locked_at": getattr(artifact, config["locked_at_field"]).isoformat() if getattr(artifact, config["locked_at_field"]) else None,
+            "lock_reason": getattr(artifact, config["lock_reason_field"])
+        }
+
+    @staticmethod
+    def raise_if_locked(artifact_type: str, artifact_id: str, lock_info: Dict[str, Any], message: str = ""):
+        """
+        Raise ArtifactLockError if the artifact is locked.
+        
+        Args:
+            artifact_type: Type of artifact
+            artifact_id: UUID of the artifact
+            lock_info: Lock metadata dict from get_lock_status or _serialize_lock_metadata
+            message: Optional custom error message. If empty, a default message is used.
+        
+        Raises:
+            ArtifactLockError: If artifact is locked
+        """
+        if lock_info.get("locked"):
+            raise ArtifactLockError(
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                locked_by=lock_info.get("locked_by", "unknown"),
+                locked_at=lock_info.get("locked_at", "unknown time"),
+                message=message
+            )
+
+    @staticmethod
+    def raise_if_locked_model(artifact_type: str, artifact: Any, message: str = ""):
+        """
+        Raise ArtifactLockError if the given artifact model is locked.
+        
+        Args:
+            artifact_type: Type of artifact
+            artifact: The fetched artifact model instance
+            message: Optional custom error message. If empty, a default message is used.
+        
+        Raises:
+            ValueError: If artifact_type is not supported
+            ArtifactLockError: If artifact is locked
+        """
+        if artifact_type not in LockService.ARTIFACT_CONFIG:
+            raise ValueError(f"Unsupported artifact type: {artifact_type}")
+
+        config = LockService.ARTIFACT_CONFIG[artifact_type]
+        lock_field = config["lock_field"]
+
+        if getattr(artifact, lock_field):
+            lock_info = LockService._serialize_lock_metadata(artifact, config, artifact_type)
+            LockService.raise_if_locked(
+                artifact_type,
+                str(getattr(artifact, config["id_field"])),
+                lock_info,
+                message=message
+            )

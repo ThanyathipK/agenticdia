@@ -46,6 +46,10 @@ CREATE TABLE projects (
     name VARCHAR(255) NOT NULL,
     description TEXT,
     industry_standard VARCHAR(100) NOT NULL, -- e.g., 'Krungsri Nimble', 'ISO-20022', 'PCI-DSS'
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -65,6 +69,9 @@ CREATE TABLE epics (
     epic_name VARCHAR(255) NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     status VARCHAR(50) NOT NULL DEFAULT 'active'
@@ -89,6 +96,10 @@ CREATE TABLE requirements (
     priority VARCHAR(50),
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     version INTEGER NOT NULL DEFAULT 1,
+    locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -115,6 +126,10 @@ CREATE TABLE user_stories (
     version INTEGER NOT NULL DEFAULT 1,
     last_modified_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
     change_type VARCHAR(50) NOT NULL DEFAULT 'created',
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -139,6 +154,10 @@ CREATE TABLE acceptance_criteria (
     version INTEGER NOT NULL DEFAULT 1,
     last_modified_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
     change_type VARCHAR(50) NOT NULL DEFAULT 'created',
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -180,6 +199,10 @@ CREATE TABLE clarification_questions (
     question_text TEXT NOT NULL,
     user_answer TEXT, -- Nullable until answered by Business Stakeholder
     is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -199,6 +222,10 @@ CREATE TABLE prd_documents (
     version INT NOT NULL,
     prd_markdown TEXT NOT NULL,
     mermaid_diagram TEXT, -- System architecture flowcharts or state diagrams
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

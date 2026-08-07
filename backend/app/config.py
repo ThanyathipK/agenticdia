@@ -1,5 +1,6 @@
 import os
 import logging
+from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Set up standard logging configuration for enterprise-grade audits
@@ -44,6 +45,15 @@ class Settings(BaseSettings):
     # Application details
     APP_NAME: str = "Enterprise Requirements Architecture Core"
     DEBUG: bool = False
+
+    # CORS security: explicit allowed origins (comma-separated in .env).
+    # Never use "*" with allow_credentials=True — browsers reject this combination.
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """Parse the comma-separated CORS_ORIGINS string into a list."""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     # Force configurations from .env file if available
     model_config = SettingsConfigDict(

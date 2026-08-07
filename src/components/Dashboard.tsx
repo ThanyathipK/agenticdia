@@ -55,10 +55,14 @@ interface UserStory {
 }
 
 interface RequirementItem {
+  id?: string;
   requirement_code: string;
   title: string;
   description?: string;
   user_stories: UserStory[];
+  locked?: boolean;
+  locked_by?: string;
+  locked_at?: string;
 }
 
 interface StructuredRequirements {
@@ -540,6 +544,119 @@ export default function Dashboard() {
     }
   };
 
+  // Lock state for all artifacts - ISOLATED from project state
+  const [lockedArtifacts, setLockedArtifacts] = useState<Record<string, { locked: boolean; locked_by?: string; locked_at?: string; lock_reason?: string }>>({});
+  const [lockedRequirements, setLockedRequirements] = useState<Record<string, { locked: boolean; locked_by?: string; locked_at?: string; artifact_id?: string }>>({});
+
+  // Generic lock artifact function - ISOLATED, no full project reload
+  const handleLockArtifact = async (artifactType: string, artifactId: string, artifactCode: string) => {
+    if (!projectId) return;
+    
+    // Optimistic update - immediately update UI
+    const optimisticLock = { 
+      locked: true, 
+      locked_by: "user", 
+      locked_at: new Date().toISOString() 
+    };
+    
+    setLockedArtifacts(prev => ({
+      ...prev,
+      [artifactCode]: optimisticLock
+    }));
+    
+    if (artifactType === "requirement") {
+      setLockedRequirements(prev => ({
+        ...prev,
+        [artifactCode]: { ...optimisticLock, artifact_id: artifactId }
+      }));
+    }
+    
+    setSyncStatus(`${artifactType.replace('_', ' ')} ${artifactCode} locked.`);
+    
+    try {
+      await axios.post(`/api/project/${projectId}/artifacts/${artifactType}/${artifactId}/lock`, {
+        locked_by: "user"
+      });
+      // Success - optimistic update already applied
+    } catch (err: any) {
+      // Rollback on failure
+      console.error(`Failed to lock ${artifactType}:`, err);
+      setLockedArtifacts(prev => ({
+        ...prev,
+        [artifactCode]: { locked: false }
+      }));
+      if (artifactType === "requirement") {
+        setLockedRequirements(prev => ({
+          ...prev,
+          [artifactCode]: { locked: false, artifact_id: artifactId }
+        }));
+      }
+      setSyncStatus(`Failed to lock ${artifactType}.`);
+    }
+  };
+
+  // Generic unlock artifact function - ISOLATED, no full project reload
+  const handleUnlockArtifact = async (artifactType: string, artifactId: string, artifactCode: string) => {
+    if (!projectId) return;
+    
+    // Optimistic update - immediately update UI
+    setLockedArtifacts(prev => ({
+      ...prev,
+      [artifactCode]: { locked: false }
+    }));
+    
+    if (artifactType === "requirement") {
+      setLockedRequirements(prev => ({
+        ...prev,
+        [artifactCode]: { locked: false, artifact_id: artifactId }
+      }));
+    }
+    
+    setSyncStatus(`${artifactType.replace('_', ' ')} ${artifactCode} unlocked.`);
+    
+    try {
+      await axios.post(`/api/project/${projectId}/artifacts/${artifactType}/${artifactId}/unlock`, {
+        locked_by: "user"
+      });
+      // Success - optimistic update already applied
+    } catch (err: any) {
+      // Rollback on failure
+      console.error(`Failed to unlock ${artifactType}:`, err);
+      setLockedArtifacts(prev => ({
+        ...prev,
+        [artifactCode]: { locked: true }
+      }));
+      if (artifactType === "requirement") {
+        setLockedRequirements(prev => ({
+          ...prev,
+          [artifactCode]: { locked: true, artifact_id: artifactId }
+        }));
+      }
+      setSyncStatus(`Failed to unlock ${artifactType}.`);
+    }
+  };
+
+  // Legacy functions for backward compatibility
+  const handleLockRequirement = async (requirementCode: string) => {
+    const reqs = structuredRequirements.requirements || [];
+    const req = reqs.find(r => r.requirement_code === requirementCode);
+    if (!req) return;
+    // Try to get ID from req.id or from lockedRequirements state
+    const reqId = req.id || lockedRequirements[requirementCode]?.artifact_id;
+    if (!reqId) return;
+    await handleLockArtifact("requirement", reqId, requirementCode);
+  };
+
+  const handleUnlockRequirement = async (requirementCode: string) => {
+    const reqs = structuredRequirements.requirements || [];
+    const req = reqs.find(r => r.requirement_code === requirementCode);
+    if (!req) return;
+    // Try to get ID from req.id or from lockedRequirements state
+    const reqId = req.id || lockedRequirements[requirementCode]?.artifact_id;
+    if (!reqId) return;
+    await handleUnlockArtifact("requirement", reqId, requirementCode);
+  };
+
   // Current Artifact state
   const [structuredRequirements, setStructuredRequirements] = useState<StructuredRequirements>({
     epic_name: "PromptPay Real-Time Merchant Settlement Engine",
@@ -677,11 +794,41 @@ This document specifies the functional, non-functional, and technical requiremen
             setStructuredRequirements(prev => {
               const currentStoriesStr = JSON.stringify(prev.user_stories);
               const newStoriesStr = JSON.stringify(data.user_stories);
-              if (currentStoriesStr !== newStoriesStr || prev.epic_name !== (data.requirements.epic_name || "")) {
+              
+              // Build requirements list preserving lock info
+              let newRequirements: RequirementItem[] | undefined;
+              if (Array.isArray(data.requirements)) {
+                newRequirements = data.requirements.map((r: any) => ({
+                  id: r.id,
+                  requirement_code: r.requirement_code,
+                  title: r.title,
+                  description: r.description || "",
+                  user_stories: r.user_stories || [],
+                  locked: r.locked || false,
+                  locked_by: r.locked_by,
+                  locked_at: r.locked_at
+                }));
+              }
+              
+              const currentReqsStr = JSON.stringify(prev.requirements);
+              const newReqsStr = JSON.stringify(newRequirements);
+              const epicName = Array.isArray(data.requirements) 
+                ? (data.requirements[0]?.title || "Structured Requirements Draft")
+                : (data.requirements?.epic_name || "");
+              
+              // Always update if stories/epic/requirements changed, OR if lock states changed
+              const hasLockChanges = newRequirements && prev.requirements ? 
+                newRequirements.some((nr, i) => {
+                  const pr = prev.requirements?.[i];
+                  return pr && (nr.locked !== pr.locked || nr.locked_by !== pr.locked_by || nr.locked_at !== pr.locked_at);
+                }) : false;
+              
+              if (currentStoriesStr !== newStoriesStr || prev.epic_name !== epicName || currentReqsStr !== newReqsStr || hasLockChanges) {
                 return {
-                  epic_name: data.requirements.epic_name || "Structured Requirements Draft",
+                  epic_name: epicName,
                   version: data.version_number || 1,
-                  user_stories: data.user_stories || []
+                  user_stories: data.user_stories || [],
+                  requirements: newRequirements || prev.requirements
                 };
               }
               return prev;
@@ -757,15 +904,15 @@ This document specifies the functional, non-functional, and technical requiremen
       }
     };
 
-    // Run immediately, then poll every 1500ms for fast feedback
+    // Run immediately, then poll every 3000ms for balanced performance
     pollState();
-    const interval = setInterval(pollState, 1500);
+    const interval = setInterval(pollState, 3000);
 
     return () => {
       isSubscribed = false;
       clearInterval(interval);
     };
-  }, [projectId, prdMarkdown, currentVersion, editingSectionId]);
+  }, [projectId, currentVersion, editingSectionId]);
 
   // Sync sections whenever prdMarkdown or structuredRequirements.user_stories changes
   useEffect(() => {
@@ -872,16 +1019,67 @@ This document specifies the functional, non-functional, and technical requiremen
   const loadProjectState = async (projId: string, retries = 5, delay = 1000) => {
     setIsLoading(true);
     setSyncStatus("Loading project state from Supabase...");
+    
+    // Clear lock states when loading a new project to prevent state pollution
+    setLockedArtifacts({});
+    setLockedRequirements({});
+    
     try {
       const response = await axios.get(`/api/project/${projId}`);
       const data = response.data;
       if (data) {
         // Always load from Supabase — no frontend cache fallback.
+        // Parse requirements list preserving lock info
+        let reqsForState: RequirementItem[] | undefined;
+        if (Array.isArray(data.requirements)) {
+          reqsForState = data.requirements.map((r: any) => ({
+            id: r.id,
+            requirement_code: r.requirement_code,
+            title: r.title,
+            description: r.description || "",
+            user_stories: r.user_stories || [],
+            locked: r.locked || false,
+            locked_by: r.locked_by,
+            locked_at: r.locked_at
+          }));
+        }
+        
+        const epicName = Array.isArray(data.requirements) 
+          ? (data.requirements[0]?.title || "Structured Requirements Draft")
+          : (data.requirements?.epic_name || "Structured Requirements Draft");
+        
         setStructuredRequirements({
-          epic_name: data.requirements?.epic_name || "Structured Requirements Draft",
+          epic_name: epicName,
           version: data.version_number || 1,
-          user_stories: data.user_stories || []
+          user_stories: data.user_stories || [],
+          requirements: reqsForState
         });
+        
+        // Update locked artifacts from requirements - ONLY use backend data for new project
+        if (Array.isArray(data.requirements)) {
+          const newLockedArtifacts: Record<string, any> = {};
+          const newLockedReqs: Record<string, any> = {};
+          
+          // Add all locks from backend data only (no merging with previous project state)
+          for (const req of data.requirements) {
+            if (req.locked) {
+              newLockedArtifacts[req.requirement_code] = {
+                locked: true,
+                locked_by: req.locked_by,
+                locked_at: req.locked_at
+              };
+              newLockedReqs[req.requirement_code] = {
+                locked: true,
+                locked_by: req.locked_by,
+                locked_at: req.locked_at,
+                artifact_id: req.id
+              };
+            }
+          }
+          
+          setLockedArtifacts(newLockedArtifacts);
+          setLockedRequirements(newLockedReqs);
+        }
         
         setCurrentVersion(data.version_number || 1);
         
@@ -2387,6 +2585,63 @@ To run compliance checks on these updated specifications, please click the **Val
               </div>
             </div>
 
+            {/* Requirement Lock Status Panel */}
+            {(structuredRequirements.requirements && structuredRequirements.requirements.length > 0) && (
+              <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-2xl shadow-sm">
+                <div className="flex items-center gap-2 mb-3">
+                  <Lock className="text-primary w-4 h-4" />
+                  <h3 className="font-bold text-sm text-on-surface">Requirement Lock Status</h3>
+                  <span className="text-[10px] text-on-surface-variant font-mono ml-auto">
+                    Locked requirements cannot be updated, deleted, merged, or modified by AI
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {structuredRequirements.requirements.map((req) => {
+                    const isLocked = req.locked || lockedRequirements[req.requirement_code]?.locked;
+                    return (
+                      <div key={req.requirement_code} className={`flex items-center justify-between p-3 rounded-xl border ${isLocked ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${isLocked ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-mono font-bold text-on-surface">{req.requirement_code}</span>
+                              <span className="text-xs text-on-surface truncate">{req.title}</span>
+                            </div>
+                            {isLocked && (
+                              <p className="text-[10px] text-amber-700 font-mono mt-0.5">
+                                🔒 Locked by {req.locked_by || lockedRequirements[req.requirement_code]?.locked_by || 'user'} 
+                                {req.locked_at || lockedRequirements[req.requirement_code]?.locked_at ? ` at ${new Date(req.locked_at || lockedRequirements[req.requirement_code]?.locked_at || '').toLocaleString()}` : ''}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => isLocked ? handleUnlockRequirement(req.requirement_code) : handleLockRequirement(req.requirement_code)}
+                          className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                            isLocked 
+                              ? 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200' 
+                              : 'bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20'
+                          }`}
+                        >
+                          {isLocked ? (
+                            <>
+                              <Unlock className="w-3.5 h-3.5" />
+                              <span>Unlock</span>
+                            </>
+                          ) : (
+                            <>
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>Lock</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <div className="max-w-4xl mx-auto">
               
               {/* TAB 1: PRD PREVIEW */}
@@ -2427,18 +2682,53 @@ To run compliance checks on these updated specifications, please click the **Val
                                   <span>{safeTitle}</span>
                                 </h3>
                                 
-                                {!isEditing && (
-                                  <button
-                                    onClick={() => {
-                                      setEditingSectionId(section.id);
-                                      setEditBuffer(safeContent);
-                                    }}
-                                    className="opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold"
-                                  >
-                                    <Pencil className="w-3.5 h-3.5 text-primary" />
-                                    <span>Edit</span>
-                                  </button>
-                                )}
+                                <div className="flex items-center gap-2">
+                                  {/* Lock/Unlock button for this section */}
+                                  {section.id === 'user_stories' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (
+                                    <button
+                                      onClick={() => {
+                                        const req = structuredRequirements.requirements![0];
+                                        const isLocked = req.locked || lockedRequirements[req.requirement_code]?.locked;
+                                        if (isLocked) {
+                                          handleUnlockRequirement(req.requirement_code);
+                                        } else {
+                                          handleLockRequirement(req.requirement_code);
+                                        }
+                                      }}
+                                      className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border shadow-sm cursor-pointer z-10 font-semibold ${
+                                        (structuredRequirements.requirements![0].locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.locked)
+                                          ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                                          : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                                      }`}
+                                    >
+                                      {(structuredRequirements.requirements![0].locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.locked) ? (
+                                        <>
+                                          <Unlock className="w-3.5 h-3.5 text-amber-700" />
+                                          <span>Unlock</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Lock className="w-3.5 h-3.5 text-primary" />
+                                          <span>Lock</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  )}
+                                  
+                                  {!isEditing && (
+                                    <button
+                                      onClick={() => {
+                                        setEditingSectionId(section.id);
+                                        setEditBuffer(safeContent);
+                                      }}
+                                      disabled={section.id === 'user_stories' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (structuredRequirements.requirements[0].locked || lockedRequirements[structuredRequirements.requirements[0].requirement_code]?.locked)}
+                                      className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold disabled:opacity-30 disabled:cursor-not-allowed`}
+                                    >
+                                      <Pencil className="w-3.5 h-3.5 text-primary" />
+                                      <span>Edit</span>
+                                    </button>
+                                  )}
+                                </div>
                               </div>
 
                               {isEditing ? (

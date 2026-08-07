@@ -10,6 +10,7 @@ try:
 except ImportError:
     OutputFixingParser = None
 from langgraph.graph import StateGraph, START, END
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.repository import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
 from app.prompt_loader import load_prompt
@@ -521,6 +522,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     """
     Standardizes messy Product Owner input into high-quality Agile structures.
     Reads/writes to the centralized RequirementState object via persistence service.
+    Respects artifact locks - skips locked requirements and user stories.
     """
     logger.info("Executing gatherer_node to structure requirements.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
@@ -532,6 +534,15 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     
     # Store existing user stories before processing passed_structured or raw_input
     existing_user_stories = list(req_state.get("user_stories", []))
+    
+    # Filter out locked user stories
+    # Check both "is_locked" (DB field) and "locked" (legacy/requirement field) for robustness
+    unlocked_user_stories = [
+        us for us in existing_user_stories
+        if not (us.get("is_locked", False) or us.get("locked", False))
+    ]
+    if len(unlocked_user_stories) != len(existing_user_stories):
+        logger.info(f"[GATHERER] Filtered out {len(existing_user_stories) - len(unlocked_user_stories)} locked user stories.")
 
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
@@ -583,7 +594,8 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             }]
             logger.info(f"Gatherer using Requirement Matcher result: target_id={matched_req_id}, action={rec_action}")
         else:
-            semantic_recs = await detect_semantic_changes(raw_input, req_state.get("user_stories", []))
+            # Only detect semantic changes on unlocked user stories
+            semantic_recs = await detect_semantic_changes(raw_input, unlocked_user_stories)
 
         
         # Check for low confidence changes
@@ -626,7 +638,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         context_lines = []
         if existing_epic:
             context_lines.append(f"CURRENT ACTIVE EPIC: {existing_epic}\n(Note: DO NOT change this Epic Name unless the user explicitly requests to change or rename the epic)\n")
-        for story in req_state.get("user_stories", []):
+        for story in unlocked_user_stories:
             context_lines.append(
                 f"- Story {story.get('ticket_code', 'UNKNOWN')}: '{story.get('story_title', '')}'\n"
                 f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')}, So that {story.get('so_that', '')}\n"
@@ -754,9 +766,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             req_desc = req_item.get("description", "")
             newly_generated_stories = req_item.get("user_stories", [])
             
-            # Merge stories for this requirement
+            # Merge stories for this requirement (only unlocked stories)
             merged_stories = merge_user_stories(
-                existing_stories=existing_user_stories,
+                existing_stories=unlocked_user_stories,
                 new_incoming_stories=newly_generated_stories,
                 semantic_recs=semantic_recs
             )
@@ -802,7 +814,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         newly_generated_stories = result.get("user_stories", [])
         
         merged_stories = merge_user_stories(
-            existing_stories=existing_user_stories,
+            existing_stories=unlocked_user_stories,
             new_incoming_stories=newly_generated_stories,
             semantic_recs=semantic_recs
         )
@@ -881,16 +893,50 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
     if matched_req_id and match_confidence >= 0.75:
         # Archive the specific matched story
         archived_stories = []
+        matched_story_found = False
+        matched_story_locked = False
         for story in existing_stories:
             tc = story.get("ticket_code", "")
             if tc and normalize_ticket_code(tc) == normalize_ticket_code(matched_req_id):
-                archived_story = dict(story)
-                archived_story["status"] = "archived"
-                archived_story["change_type"] = "archived"
-                archived_stories.append(archived_story)
-                logger.info(f"[DELETE NODE] Archiving story: {tc}")
+                matched_story_found = True
+                # LOCK ENFORCEMENT: Never archive a locked user story
+                # Check both "is_locked" (DB field) and "locked" (legacy/requirement field) for robustness
+                if story.get("is_locked", False) or story.get("locked", False):
+                    matched_story_locked = True
+                    logger.warning(
+                        f"[DELETE NODE] Skipping archive of locked user story {tc} "
+                        f"(locked_by={story.get('locked_by', 'unknown')}). AI removal blocked."
+                    )
+                    archived_stories.append(story)
+                else:
+                    archived_story = dict(story)
+                    archived_story["status"] = "archived"
+                    archived_story["change_type"] = "archived"
+                    archived_stories.append(archived_story)
+                    logger.info(f"[DELETE NODE] Archiving story: {tc}")
             else:
                 archived_stories.append(story)
+        
+        # LOCK ENFORCEMENT: If the matched story is locked, block the deletion entirely
+        if matched_story_found and matched_story_locked:
+            lock_msg = (
+                f"🔒 **Cannot Delete Locked Requirement!**\n"
+                f"Requirement `{matched_req_id}` is locked and cannot be deleted. "
+                f"Unlock it before deleting."
+            )
+            logger.warning(f"[DELETE NODE] Blocked deletion of locked requirement {matched_req_id}.")
+            await ConversationMessageRepository.save_message(
+                project_id=project_id,
+                role="assistant",
+                message=lock_msg,
+                workflow_state="delete_requirement_node",
+                intent="DELETE_REQUIREMENT"
+            )
+            return {
+                "requirement_state": req_state,
+                "agent_message": lock_msg,
+                "current_version": req_state.get("version_number", 1)
+            }
         
         req_state["user_stories"] = archived_stories
         req_state["current_workflow_state"] = "delete_requirement_node"
@@ -905,10 +951,18 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
                 for rs in req_stories:
                     tc = rs.get("ticket_code", "")
                     if tc and normalize_ticket_code(tc) == normalize_ticket_code(matched_req_id):
-                        archived_rs = dict(rs)
-                        archived_rs["status"] = "archived"
-                        archived_rs["change_type"] = "archived"
-                        updated_req_stories.append(archived_rs)
+                        # LOCK ENFORCEMENT: Never archive a locked user story
+                        if rs.get("is_locked", False) or rs.get("locked", False):
+                            logger.warning(
+                                f"[DELETE NODE] Skipping archive of locked user story {tc} "
+                                f"(locked_by={rs.get('locked_by', 'unknown')}). AI removal blocked."
+                            )
+                            updated_req_stories.append(rs)
+                        else:
+                            archived_rs = dict(rs)
+                            archived_rs["status"] = "archived"
+                            archived_rs["change_type"] = "archived"
+                            updated_req_stories.append(archived_rs)
                     else:
                         updated_req_stories.append(rs)
                 req_item["user_stories"] = updated_req_stories
@@ -987,15 +1041,20 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
+        # LOCK ENFORCEMENT: Exclude locked user stories from audit
+        passed_stories = [
+            us for us in passed_structured.get("user_stories", [])
+            if not (us.get("is_locked", False) or us.get("locked", False))
+        ]
         req_state["requirements"] = [
             {
                 "requirement_code": "REQ-001",
                 "title": passed_structured.get("epic_name", ""),
                 "description": "",
-                "user_stories": passed_structured.get("user_stories", [])
+                "user_stories": passed_stories
             }
         ]
-        req_state["user_stories"] = passed_structured.get("user_stories", [])
+        req_state["user_stories"] = passed_stories
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
         all_ac = []
         for us in req_state["user_stories"]:
@@ -1005,9 +1064,16 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     current_version = req_state["version_number"]
     
     # Step 10 compliance: Segment user stories by change_type
+    # LOCK ENFORCEMENT: Exclude locked user stories from audit
     all_stories = req_state.get("user_stories", [])
-    to_audit_stories = [story for story in all_stories if story.get("change_type") in ["created", "updated", None]]
-    unchanged_stories = [story for story in all_stories if story.get("change_type") == "unchanged"]
+    unlocked_stories = [
+        story for story in all_stories
+        if not (story.get("is_locked", False) or story.get("locked", False))
+    ]
+    if len(unlocked_stories) != len(all_stories):
+        logger.info(f"[AUDITOR] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from audit.")
+    to_audit_stories = [story for story in unlocked_stories if story.get("change_type") in ["created", "updated", None]]
+    unchanged_stories = [story for story in unlocked_stories if story.get("change_type") == "unchanged"]
     
     logger.info(f"Auditor Node: {len(to_audit_stories)} stories to audit, {len(unchanged_stories)} unchanged stories.")
     
@@ -1137,15 +1203,20 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
+        # LOCK ENFORCEMENT: Exclude locked user stories from PRD generation
+        passed_stories = [
+            us for us in passed_structured.get("user_stories", [])
+            if not (us.get("is_locked", False) or us.get("locked", False))
+        ]
         req_state["requirements"] = [
             {
                 "requirement_code": "REQ-001",
                 "title": passed_structured.get("epic_name", ""),
                 "description": "",
-                "user_stories": passed_structured.get("user_stories", [])
+                "user_stories": passed_stories
             }
         ]
-        req_state["user_stories"] = passed_structured.get("user_stories", [])
+        req_state["user_stories"] = passed_stories
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
         all_ac = []
         for us in req_state["user_stories"]:
@@ -1155,9 +1226,16 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     current_version = req_state["version_number"]
     
     # Step 11 compliance: Segment user stories to check for changes
+    # LOCK ENFORCEMENT: Exclude locked user stories from PRD generation
     all_stories = req_state.get("user_stories", [])
-    to_build_stories = [story for story in all_stories if story.get("change_type") in ["created", "updated", None]]
-    unchanged_stories = [story for story in all_stories if story.get("change_type") == "unchanged"]
+    unlocked_stories = [
+        story for story in all_stories
+        if not (story.get("is_locked", False) or story.get("locked", False))
+    ]
+    if len(unlocked_stories) != len(all_stories):
+        logger.info(f"[ARCHITECT] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from PRD generation.")
+    to_build_stories = [story for story in unlocked_stories if story.get("change_type") in ["created", "updated", None]]
+    unchanged_stories = [story for story in unlocked_stories if story.get("change_type") == "unchanged"]
     
     # If everything is unchanged, and we have an existing PRD/Diagram, bypass LLM entirely
     existing_prd = req_state.get("generated_prd")
@@ -1177,7 +1255,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     structured_reqs_for_prompt = {
         "epic_name": epic_name,
         "version": req_state["version_number"],
-        "user_stories": req_state["user_stories"]
+        "user_stories": unlocked_stories
     }
     version_history_summaries = state.get("version_history_summaries", "No previous revision logs available.")
     
