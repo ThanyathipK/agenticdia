@@ -88,7 +88,7 @@ class RequirementModel(Base):
     priority = Column(String(50), nullable=True)
     status = Column(String(50), nullable=False, default="active", server_default="active")
     version = Column(Integer, nullable=False, default=1, server_default="1")
-    locked = Column(Boolean, nullable=False, default=False, server_default="false")
+    is_locked = Column(Boolean, nullable=False, default=False, server_default="false")
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
     lock_reason = Column(String(255), nullable=True)

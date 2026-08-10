@@ -140,3 +140,46 @@ class PendingAction(BaseModel):
     created_at: datetime
     expires_at: datetime
     status: str = "WAITING_CONFIRMATION"
+
+
+# ==========================================
+# 8. ROUTER REQUEST SCHEMAS
+# ==========================================
+
+class ProcessRequirementsRequest(BaseModel):
+    """Request body for the multi-agent Agile requirements processing endpoint."""
+    project_id: str
+    raw_input: Optional[str] = Field(default="")
+    current_version: Optional[int] = Field(default=1)
+    version_history_summaries: Optional[str] = Field(default="No previous history.")
+    target_agent: Optional[str] = Field(default="gatherer")
+    structured_requirements: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class ArtifactLockRequest(BaseModel):
+    """Request body for locking/unlocking any artifact."""
+    locked_by: Optional[str] = Field(default="user", description="Identifier of who is locking/unlocking the artifact.")
+    lock_reason: Optional[str] = Field(default=None, description="Optional reason for locking the artifact.")
+
+
+class RequirementLockRequest(BaseModel):
+    """Request body for locking/unlocking a requirement."""
+    locked_by: Optional[str] = Field(default="user", description="Identifier of who is locking/unlocking the requirement.")
+
+
+class WorkflowRouterRequest(BaseModel):
+    """Request body for the workflow router endpoint."""
+    message: str
+
+
+class IntentDetectorRequest(BaseModel):
+    """Request body for the intent detector endpoint."""
+    message: str
+    project_id: Optional[str] = None
+
+
+class RequirementMatcherRequest(BaseModel):
+    """Request body for the requirement matcher endpoint."""
+    message: str
+    project_id: Optional[str] = None
+    detected_intent: Optional[str] = "UPDATE"

@@ -60,7 +60,7 @@ class LockService:
         "requirement": {
             "model": RequirementModel,
             "id_field": "id",
-            "lock_field": "locked",
+            "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
             "lock_reason_field": "lock_reason",
@@ -274,9 +274,9 @@ class LockService:
                 artifact_id=str(artifact_id),
                 action="LOCK",
                 session=session,
-                old_value={"locked": False},
+                old_value={"is_locked": False},
                 new_value={
-                    "locked": True,
+                    "is_locked": True,
                     "locked_by": locked_by,
                     "locked_at": datetime.now(timezone.utc).isoformat(),
                     "lock_reason": lock_reason
@@ -379,11 +379,11 @@ class LockService:
                 action="UNLOCK",
                 session=session,
                 old_value={
-                    "locked": True,
+                    "is_locked": True,
                     "locked_by": old_locked_by,
                     "locked_at": old_locked_at.isoformat() if old_locked_at else None
                 },
-                new_value={"locked": False},
+                new_value={"is_locked": False},
                 performed_by=unlocked_by
             )
         except Exception as log_err:
@@ -406,7 +406,7 @@ class LockService:
                 to the project.
         
         Returns:
-            Dict with lock metadata (locked, locked_by, locked_at, lock_reason)
+            Dict with lock metadata (is_locked, locked_by, locked_at, lock_reason)
         
         Raises:
             ValueError: If artifact_type is not supported, if the artifact is not found,
@@ -456,7 +456,7 @@ class LockService:
         return {
             "artifact_type": artifact_type,
             "artifact_id": str(getattr(artifact, config["id_field"])),
-            "locked": bool(getattr(artifact, config["lock_field"])) if getattr(artifact, config["lock_field"]) is not None else False,
+            "is_locked": bool(getattr(artifact, config["lock_field"])) if getattr(artifact, config["lock_field"]) is not None else False,
             "locked_by": getattr(artifact, config["locked_by_field"]),
             "locked_at": getattr(artifact, config["locked_at_field"]).isoformat() if getattr(artifact, config["locked_at_field"]) else None,
             "lock_reason": getattr(artifact, config["lock_reason_field"])
@@ -476,7 +476,7 @@ class LockService:
         Raises:
             ArtifactLockError: If artifact is locked
         """
-        if lock_info.get("locked"):
+        if lock_info.get("is_locked"):
             raise ArtifactLockError(
                 artifact_type=artifact_type,
                 artifact_id=artifact_id,

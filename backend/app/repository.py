@@ -369,7 +369,7 @@ class RequirementRepository:
             "description": req.description,
             "priority": req.priority,
             "status": req.status,
-            "locked": bool(req.locked) if req.locked is not None else False,
+            "is_locked": bool(req.is_locked) if req.is_locked is not None else False,
             "locked_by": req.locked_by,
             "locked_at": req.locked_at.isoformat() if req.locked_at else None,
             "lock_reason": req.lock_reason
@@ -386,7 +386,7 @@ class RequirementRepository:
             description=data.get("description"),
             priority=data.get("priority"),
             status=data.get("status", "active"),
-            locked=False,
+            is_locked=False,
             locked_by=None,
             locked_at=None
         )
@@ -423,7 +423,7 @@ class RequirementRepository:
         req = result.scalar_one_or_none()
         if req:
             # LOCK ENFORCEMENT: Cannot update a locked requirement
-            if req.locked:
+            if req.is_locked:
                 raise PermissionError(
                     f"Requirement {req.requirement_code} is locked by {req.locked_by or 'unknown'} "
                     f"at {req.locked_at.isoformat() if req.locked_at else 'unknown time'}. "
@@ -447,7 +447,7 @@ class RequirementRepository:
         req = result.scalar_one_or_none()
         if req:
             # LOCK ENFORCEMENT: Cannot delete a locked requirement
-            if req.locked:
+            if req.is_locked:
                 raise PermissionError(
                     f"Requirement {req.requirement_code} is locked by {req.locked_by or 'unknown'} "
                     f"at {req.locked_at.isoformat() if req.locked_at else 'unknown time'}. "
@@ -486,9 +486,9 @@ class RequirementRepository:
         result = await session.execute(stmt)
         req = result.scalar_one_or_none()
         if req:
-            if req.locked:
+            if req.is_locked:
                 return RequirementRepository._serialize(req)
-            req.locked = True
+            req.is_locked = True
             req.locked_by = locked_by
             req.locked_at = datetime.utcnow()
             await session.flush()
@@ -500,8 +500,8 @@ class RequirementRepository:
                     artifact_id=str(req.id),
                     action="LOCK",
                     session=session,
-                    old_value={"locked": False},
-                    new_value={"locked": True, "locked_by": locked_by},
+                    old_value={"is_locked": False},
+                    new_value={"is_locked": True, "locked_by": locked_by},
                     performed_by=locked_by
                 )
             except Exception as log_err:
@@ -524,7 +524,7 @@ class RequirementRepository:
         result = await session.execute(stmt)
         req = result.scalar_one_or_none()
         if req:
-            if not req.locked:
+            if not req.is_locked:
                 return RequirementRepository._serialize(req)
             # Authorization check: only the lock owner can unlock the requirement
             if req.locked_by != unlocked_by:
@@ -537,7 +537,7 @@ class RequirementRepository:
                     f"Cannot be unlocked by {unlocked_by}."
                 )
             old_locked_by = req.locked_by
-            req.locked = False
+            req.is_locked = False
             req.locked_by = None
             req.locked_at = None
             await session.flush()
@@ -549,8 +549,8 @@ class RequirementRepository:
                     artifact_id=str(req.id),
                     action="UNLOCK",
                     session=session,
-                    old_value={"locked": True, "locked_by": old_locked_by},
-                    new_value={"locked": False},
+                    old_value={"is_locked": True, "locked_by": old_locked_by},
+                    new_value={"is_locked": False},
                     performed_by=unlocked_by
                 )
             except Exception as log_err:
@@ -596,7 +596,7 @@ class UserStoryRepository:
                     requirement_code="REQ-000",
                     title="Untitled Requirement",
                     status="active",
-                    locked=False,
+                    is_locked=False,
                     locked_by=None,
                     locked_at=None
                 )
@@ -1031,7 +1031,7 @@ class ClarificationQuestionRepository:
                     requirement_code="REQ-000",
                     title="Untitled Requirement",
                     status="active",
-                    locked=False,
+                    is_locked=False,
                     locked_by=None,
                     locked_at=None
                 )
@@ -1292,7 +1292,7 @@ class AuditResultRepository:
                     requirement_code="REQ-000",
                     title="Untitled Requirement",
                     status="active",
-                    locked=False,
+                    is_locked=False,
                     locked_by=None,
                     locked_at=None
                 )
@@ -1640,7 +1640,7 @@ class VersionHistoryRepository:
                 requirement_code="REQ-000",
                 title="Untitled Requirement",
                 status="active",
-                locked=False,
+                is_locked=False,
                 locked_by=None,
                 locked_at=None
             )
@@ -1818,7 +1818,7 @@ class RequirementStateRepository:
                 "title": req.title,
                 "description": req.description or "",
                 "user_stories": active_stories,
-                "locked": bool(req.locked) if req.locked is not None else False,
+                "is_locked": bool(req.is_locked) if req.is_locked is not None else False,
                 "locked_by": req.locked_by,
                 "locked_at": req.locked_at.isoformat() if req.locked_at else None,
                 "lock_reason": req.lock_reason
@@ -2048,7 +2048,7 @@ class RequirementStateRepository:
             db_req = db_reqs_by_code.get(req_code)
             if db_req:
                 # LOCK ENFORCEMENT: Skip updating locked requirements (AI cannot modify locked requirements)
-                if db_req.locked:
+                if db_req.is_locked:
                     logger.warning(
                         f"[LOCK ENFORCEMENT] Skipping update of locked requirement {req_code} "
                         f"(locked_by={db_req.locked_by or 'unknown'}). AI modification blocked."
@@ -2279,7 +2279,7 @@ class RequirementStateRepository:
             r_id_str = str(r_model.id)
             if r_id_str not in touched_req_ids and r_model.status == "active":
                 # LOCK ENFORCEMENT: Cannot archive/delete a locked requirement
-                if r_model.locked:
+                if r_model.is_locked:
                     logger.warning(
                         f"[LOCK ENFORCEMENT] Skipping archive of locked requirement {r_code} "
                         f"(locked_by={r_model.locked_by or 'unknown'}). AI removal blocked."

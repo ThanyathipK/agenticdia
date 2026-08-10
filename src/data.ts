@@ -46,6 +46,10 @@ export const TABLES: TableSchema[] = [
       { name: 'name', type: 'VARCHAR(255)', constraints: 'NOT NULL', description: 'System or microservice name (e.g., Loan Originator System).' },
       { name: 'description', type: 'TEXT', constraints: 'NULL', description: 'High-level business context and scope definitions.' },
       { name: 'industry_standard', type: 'VARCHAR(100)', constraints: 'NOT NULL', description: 'Compliance guideline baseline (e.g., Krungsri Nimble).' },
+      { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, project-level mutations are blocked.' },
+      { name: 'locked_by', type: 'VARCHAR(100)', constraints: 'NULL', description: 'Corporate stakeholder or agent that applied the lock.' },
+      { name: 'locked_at', type: 'TIMESTAMPTZ', constraints: 'NULL', description: 'UTC timestamp when the lock was applied.' },
+      { name: 'lock_reason', type: 'VARCHAR(255)', constraints: 'NULL', description: 'Justification for the lock (e.g., External Audit, Migration).' },
       { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Timezone-aware initialization timestamp.' },
       { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'System modification tracker timestamp.' }
     ],
@@ -87,10 +91,14 @@ export const TABLES: TableSchema[] = [
       { name: 'priority', type: 'VARCHAR(50)', constraints: 'NULL', description: 'Business priority: High, Medium, Low, Critical.' },
       { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, deprecated, superseded.' },
       { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Current version number for change tracking.' },
+      { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, modifications are blocked.' },
+      { name: 'locked_by', type: 'VARCHAR(100)', constraints: 'NULL', description: 'Corporate stakeholder or agent that applied the lock.' },
+      { name: 'locked_at', type: 'TIMESTAMPTZ', constraints: 'NULL', description: 'UTC timestamp when the lock was applied.' },
+      { name: 'lock_reason', type: 'VARCHAR(255)', constraints: 'NULL', description: 'Justification for the lock (e.g., External Audit, Migration).' },
       { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date requirement was created.' },
       { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date requirement was last modified.' }
     ],
-    indexes: ['idx_requirements_project_id (project_id)', 'idx_requirements_epic_id (epic_id)'],
+    indexes: ['idx_requirements_project_id (project_id)'],
     relations: [
       { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' },
       { fromColumn: 'epic_id', toTable: 'epics', toColumn: 'id', onDelete: 'CASCADE' }
@@ -114,9 +122,13 @@ export const TABLES: TableSchema[] = [
       { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, archived, deprecated.' },
       { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Current version for change tracking.' },
       { name: 'last_modified_by', type: 'VARCHAR(100)', constraints: 'NOT NULL', defaultValue: 'automated_agent', description: 'Entity that last modified this record.' },
-      { name: 'change_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'created', description: 'Type of last change: created, updated, deleted.' }
+      { name: 'change_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'created', description: 'Type of last change: created, updated, deleted.' },
+      { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, modifications are blocked.' },
+      { name: 'locked_by', type: 'VARCHAR(100)', constraints: 'NULL', description: 'Corporate stakeholder or agent that applied the lock.' },
+      { name: 'locked_at', type: 'TIMESTAMPTZ', constraints: 'NULL', description: 'UTC timestamp when the lock was applied.' },
+      { name: 'lock_reason', type: 'VARCHAR(255)', constraints: 'NULL', description: 'Justification for the lock (e.g., External Audit, Migration).' }
     ],
-    indexes: ['idx_user_stories_requirement_id (requirement_id)', 'idx_user_stories_project_id (project_id)'],
+    indexes: ['idx_user_stories_requirement_id (requirement_id)', 'uq_user_stories_project_id_ticket_code (project_id, ticket_code)'],
     relations: [
       { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' },
       { fromColumn: 'requirement_id', toTable: 'requirements', toColumn: 'id', onDelete: 'CASCADE' }
@@ -135,7 +147,11 @@ export const TABLES: TableSchema[] = [
       { name: 'status', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'active', description: 'Lifecycle status: active, archived, deprecated.' },
       { name: 'version', type: 'INT', constraints: 'NOT NULL', defaultValue: '1', description: 'Current version for change tracking.' },
       { name: 'last_modified_by', type: 'VARCHAR(100)', constraints: 'NOT NULL', defaultValue: 'automated_agent', description: 'Entity that last modified this record.' },
-      { name: 'change_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'created', description: 'Type of last change: created, updated, deleted.' }
+      { name: 'change_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', defaultValue: 'created', description: 'Type of last change: created, updated, deleted.' },
+      { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, modifications are blocked.' },
+      { name: 'locked_by', type: 'VARCHAR(100)', constraints: 'NULL', description: 'Corporate stakeholder or agent that applied the lock.' },
+      { name: 'locked_at', type: 'TIMESTAMPTZ', constraints: 'NULL', description: 'UTC timestamp when the lock was applied.' },
+      { name: 'lock_reason', type: 'VARCHAR(255)', constraints: 'NULL', description: 'Justification for the lock (e.g., External Audit, Migration).' }
     ],
     indexes: ['idx_acceptance_criteria_user_story_id (user_story_id)'],
     relations: [
@@ -149,7 +165,7 @@ export const TABLES: TableSchema[] = [
     columns: [
       { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Audit report ID.' },
       { name: 'requirement_id', type: 'UUID', constraints: 'NOT NULL REFERENCES requirements(id)', description: 'Audited requirement reference.' },
-      { name: 'version_reviewed', type: 'INT', constraints: 'NOT NULL', description: 'The requirement version snapshot index analyzed.' },
+      { name: 'audit_version_reviewed', type: 'INT', constraints: 'NOT NULL', description: 'The requirement version snapshot index analyzed.' },
       { name: 'is_valid', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Whether the requirement matches all regulations.' },
       { name: 'passed_checks', type: 'JSONB', constraints: 'NOT NULL', defaultValue: "\'[]\'::jsonb", description: 'Array of validated compliance checks.' },
       { name: 'failed_checks', type: 'JSONB', constraints: 'NOT NULL', defaultValue: "\'[]\'::jsonb", description: 'Array of failed compliance parameters.' },
@@ -173,6 +189,10 @@ export const TABLES: TableSchema[] = [
       { name: 'question_text', type: 'TEXT', constraints: 'NOT NULL', description: 'System or expert drafted compliance query.' },
       { name: 'user_answer', type: 'TEXT', constraints: 'NULL', description: 'Official stakeholder resolution reply.' },
       { name: 'is_resolved', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Lock resolver status.' },
+      { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, modifications are blocked.' },
+      { name: 'locked_by', type: 'VARCHAR(100)', constraints: 'NULL', description: 'Corporate stakeholder or agent that applied the lock.' },
+      { name: 'locked_at', type: 'TIMESTAMPTZ', constraints: 'NULL', description: 'UTC timestamp when the lock was applied.' },
+      { name: 'lock_reason', type: 'VARCHAR(255)', constraints: 'NULL', description: 'Justification for the lock (e.g., External Audit, Migration).' },
       { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date logged.' },
       { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Date last modified.' }
     ],
@@ -195,8 +215,12 @@ export const TABLES: TableSchema[] = [
       { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'PRD Document ID.' },
       { name: 'project_id', type: 'UUID', constraints: 'NOT NULL REFERENCES projects(id)', description: 'Target banking system.' },
       { name: 'version', type: 'INT', constraints: 'NOT NULL', description: 'Target build index.' },
-      { name: 'markdown_content', type: 'TEXT', constraints: 'NOT NULL', description: 'Compiled functional specifications in markdown.' },
-      { name: 'mermaid_graph', type: 'TEXT', constraints: 'NULL', description: 'Live architecture diagram schema.' },
+      { name: 'prd_markdown', type: 'TEXT', constraints: 'NOT NULL', description: 'Compiled functional specifications in markdown.' },
+      { name: 'mermaid_diagram', type: 'TEXT', constraints: 'NULL', description: 'Live architecture diagram schema.' },
+      { name: 'is_locked', type: 'BOOLEAN', constraints: 'NOT NULL', defaultValue: 'FALSE', description: 'Audit lock flag. When TRUE, modifications are blocked.' },
+      { name: 'locked_by', type: 'VARCHAR(100)', constraints: 'NULL', description: 'Corporate stakeholder or agent that applied the lock.' },
+      { name: 'locked_at', type: 'TIMESTAMPTZ', constraints: 'NULL', description: 'UTC timestamp when the lock was applied.' },
+      { name: 'lock_reason', type: 'VARCHAR(255)', constraints: 'NULL', description: 'Justification for the lock (e.g., External Audit, Migration).' },
       { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Export generation date.' },
       { name: 'updated_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Last modification timestamp.' }
     ],
@@ -230,6 +254,71 @@ export const TABLES: TableSchema[] = [
       { fromColumn: 'requirement_id', toTable: 'requirements', toColumn: 'id', onDelete: 'CASCADE' },
       { fromColumn: 'changed_by_user_id', toTable: 'users', toColumn: 'id', onDelete: 'RESTRICT' }
     ]
+  },
+  {
+    name: 'prd_versions',
+    description: 'Immutable version history for generated PRDs. Each PRD generation creates a new record; previous versions are never overwritten.',
+    bankingContext: 'Provides immutable traceability for every PRD artifact produced by the system, satisfying immutable-audit requirements.',
+    columns: [
+      { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'PRD version record ID.' },
+      { name: 'project_id', type: 'UUID', constraints: 'NOT NULL REFERENCES projects(id)', description: 'Related banking project.' },
+      { name: 'version_number', type: 'INT', constraints: 'NOT NULL', description: 'Sequential PRD version for this project.' },
+      { name: 'generated_prd', type: 'TEXT', constraints: 'NOT NULL', description: 'Full generated PRD markdown at this version.' },
+      { name: 'generated_diagram', type: 'TEXT', constraints: 'NULL', description: 'Generated architecture diagram at this version.' },
+      { name: 'generated_by', type: 'VARCHAR(100)', constraints: 'NOT NULL', defaultValue: 'automated_agent', description: 'Agent or user that produced this version.' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Timestamp this version was created.' }
+    ],
+    indexes: [
+      'idx_prd_versions_project_id (project_id)',
+      'idx_prd_versions_version_number (project_id, version_number)'
+    ],
+    relations: [
+      { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' }
+    ]
+  },
+  {
+    name: 'conversation_messages',
+    description: 'Persists every conversation message per project for chat/voice audit and replay.',
+    bankingContext: 'Supports regulatory replay and customer-interaction audit trails by storing every inbound and outbound message with workflow context.',
+    columns: [
+      { name: 'id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Message unique identifier.' },
+      { name: 'conversation_id', type: 'UUID', constraints: 'NULL', description: 'Groups messages into a single conversation thread.' },
+      { name: 'project_id', type: 'UUID', constraints: 'NOT NULL REFERENCES projects(id)', description: 'Project context for multi-tenant isolation.' },
+      { name: 'role', type: 'VARCHAR(50)', constraints: 'NOT NULL', description: 'Speaker role: user, assistant, system.' },
+      { name: 'message', type: 'TEXT', constraints: 'NOT NULL', description: 'Full message content.' },
+      { name: 'workflow_state', type: 'VARCHAR(50)', constraints: 'NULL', defaultValue: "''", description: 'Current workflow or FSM state at time of message.' },
+      { name: 'intent', type: 'VARCHAR(50)', constraints: 'NULL', defaultValue: "''", description: 'Detected user intent classification.' },
+      { name: 'created_at', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'Timestamp the message was recorded.' }
+    ],
+    indexes: [
+      'idx_conversation_messages_project_id (project_id)',
+      'idx_conversation_messages_conversation_id (conversation_id)',
+      'idx_conversation_messages_created_at (created_at)'
+    ],
+    relations: [
+      { fromColumn: 'project_id', toTable: 'projects', toColumn: 'id', onDelete: 'CASCADE' }
+    ]
+  },
+  {
+    name: 'artifact_event_logs',
+    description: 'Immutable append-only event log tracking every artifact mutation across the platform.',
+    bankingContext: 'Provides tamper-evident traceability for all CREATE/UPDATE/DELETE/ARCHIVE/LOCK/UNLOCK actions on banking artifacts.',
+    columns: [
+      { name: 'event_id', type: 'UUID', constraints: 'PRIMARY KEY', defaultValue: 'gen_random_uuid()', description: 'Unique event log entry ID.' },
+      { name: 'artifact_type', type: 'VARCHAR(50)', constraints: 'NOT NULL', description: 'Type of artifact mutated: epic, requirement, user_story, acceptance_criteria, prd.' },
+      { name: 'artifact_id', type: 'VARCHAR(36)', constraints: 'NOT NULL', description: 'UUID of the artifact that was mutated.' },
+      { name: 'action', type: 'VARCHAR(20)', constraints: 'NOT NULL', description: 'CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK.' },
+      { name: 'old_value', type: 'JSONB', constraints: 'NULL', description: 'Full artifact snapshot before the change.' },
+      { name: 'new_value', type: 'JSONB', constraints: 'NULL', description: 'Full artifact snapshot after the change.' },
+      { name: 'performed_by', type: 'VARCHAR(100)', constraints: 'NOT NULL', defaultValue: 'automated_agent', description: 'User or agent that triggered the change.' },
+      { name: 'timestamp', type: 'TIMESTAMPTZ', constraints: 'NOT NULL', defaultValue: 'NOW()', description: 'When the mutation occurred.' }
+    ],
+    indexes: [
+      'idx_artifact_event_logs_artifact (artifact_type, artifact_id)',
+      'idx_artifact_event_logs_action (action)',
+      'idx_artifact_event_logs_timestamp (timestamp)'
+    ],
+    relations: []
   }
 ];
 
@@ -247,6 +336,10 @@ export interface ProjectRow {
   name: string;
   description: string;
   industry_standard: string;
+  is_locked: boolean;
+  locked_by: string | null;
+  locked_at: string | null;
+  lock_reason: string | null;
   created_at: string;
 }
 
@@ -270,6 +363,10 @@ export interface RequirementRow {
   priority: string | null;
   status: string;
   version: number;
+  is_locked: boolean;
+  locked_by: string | null;
+  locked_at: string | null;
+  lock_reason: string | null;
   created_at: string;
 }
 
@@ -286,6 +383,10 @@ export interface UserStoryRow {
   version: number;
   last_modified_by: string;
   change_type: string;
+  is_locked: boolean;
+  locked_by: string | null;
+  locked_at: string | null;
+  lock_reason: string | null;
   created_at: string;
 }
 
@@ -297,13 +398,17 @@ export interface AcceptanceCriterionRow {
   version: number;
   last_modified_by: string;
   change_type: string;
+  is_locked: boolean;
+  locked_by: string | null;
+  locked_at: string | null;
+  lock_reason: string | null;
   created_at: string;
 }
 
 export interface AuditResultRow {
   id: string;
   requirement_id: string;
-  version_reviewed: number;
+  audit_version_reviewed: number;
   is_valid: boolean;
   passed_checks: string; // JSON string
   failed_checks: string; // JSON string
@@ -318,6 +423,10 @@ export interface ClarificationQuestionRow {
   question_text: string;
   user_answer: string | null;
   is_resolved: boolean;
+  is_locked: boolean;
+  locked_by: string | null;
+  locked_at: string | null;
+  lock_reason: string | null;
   created_at: string;
 }
 
@@ -325,8 +434,12 @@ export interface PrdDocumentRow {
   id: string;
   project_id: string;
   version: number;
-  markdown_content: string;
-  mermaid_graph: string;
+  prd_markdown: string;
+  mermaid_diagram: string | null;
+  is_locked: boolean;
+  locked_by: string | null;
+  locked_at: string | null;
+  lock_reason: string | null;
   created_at: string;
 }
 
@@ -339,6 +452,38 @@ export interface VersionHistoryRow {
   change_description: string;
   state_snapshot: string; // JSON string representation
   created_at: string;
+}
+
+export interface PrdVersionRow {
+  id: string;
+  project_id: string;
+  version_number: number;
+  generated_prd: string;
+  generated_diagram: string | null;
+  generated_by: string;
+  created_at: string;
+}
+
+export interface ConversationMessageRow {
+  id: string;
+  conversation_id: string | null;
+  project_id: string;
+  role: string;
+  message: string;
+  workflow_state: string;
+  intent: string;
+  created_at: string;
+}
+
+export interface ArtifactEventLogRow {
+  event_id: string;
+  artifact_type: string;
+  artifact_id: string;
+  action: string;
+  old_value: string | null; // JSON string
+  new_value: string | null; // JSON string
+  performed_by: string;
+  timestamp: string;
 }
 
 export const INITIAL_USERS: UserRow[] = [
@@ -354,6 +499,10 @@ export const INITIAL_PROJECTS: ProjectRow[] = [
     name: 'Krungsri FastPay Gateway',
     description: 'High-throughput payment gateway conforming to national instant settlement protocols and PCI-DSS standards.',
     industry_standard: 'Krungsri Nimble Baseline',
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T10:00:00Z'
   },
   {
@@ -362,6 +511,10 @@ export const INITIAL_PROJECTS: ProjectRow[] = [
     name: 'Nimble Ledger Hub',
     description: 'Double-entry general ledger service providing near-real-time compliance checks & immutable transaction state.',
     industry_standard: 'ISO-20022 Financial',
+    is_locked: true,
+    locked_by: 'compliance.auditor@sec.or.th',
+    locked_at: '2026-07-09T11:35:00Z',
+    lock_reason: 'Pending ISO-20022 certification audit',
     created_at: '2026-07-09T11:30:00Z'
   }
 ];
@@ -398,6 +551,10 @@ export const INITIAL_REQUIREMENTS: RequirementRow[] = [
     priority: 'Critical',
     status: 'active',
     version: 2,
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T10:30:00Z'
   },
   {
@@ -410,6 +567,10 @@ export const INITIAL_REQUIREMENTS: RequirementRow[] = [
     priority: 'High',
     status: 'active',
     version: 1,
+    is_locked: true,
+    locked_by: 'compliance.auditor@sec.or.th',
+    locked_at: '2026-07-09T12:05:00Z',
+    lock_reason: 'External audit in progress',
     created_at: '2026-07-09T12:00:00Z'
   }
 ];
@@ -428,6 +589,10 @@ export const INITIAL_USER_STORIES: UserStoryRow[] = [
     version: 1,
     last_modified_by: 'automated_agent',
     change_type: 'created',
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T10:45:00Z'
   },
   {
@@ -443,6 +608,10 @@ export const INITIAL_USER_STORIES: UserStoryRow[] = [
     version: 1,
     last_modified_by: 'automated_agent',
     change_type: 'created',
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T11:00:00Z'
   },
   {
@@ -458,6 +627,10 @@ export const INITIAL_USER_STORIES: UserStoryRow[] = [
     version: 1,
     last_modified_by: 'automated_agent',
     change_type: 'created',
+    is_locked: true,
+    locked_by: 'compliance.auditor@sec.or.th',
+    locked_at: '2026-07-09T12:20:00Z',
+    lock_reason: 'Pending ISO validation',
     created_at: '2026-07-09T12:15:00Z'
   }
 ];
@@ -471,6 +644,10 @@ export const INITIAL_ACCEPTANCE_CRITERIA: AcceptanceCriterionRow[] = [
     version: 1,
     last_modified_by: 'automated_agent',
     change_type: 'created',
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T10:50:00Z'
   },
   {
@@ -481,6 +658,10 @@ export const INITIAL_ACCEPTANCE_CRITERIA: AcceptanceCriterionRow[] = [
     version: 1,
     last_modified_by: 'automated_agent',
     change_type: 'created',
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T10:52:00Z'
   },
   {
@@ -491,6 +672,10 @@ export const INITIAL_ACCEPTANCE_CRITERIA: AcceptanceCriterionRow[] = [
     version: 1,
     last_modified_by: 'automated_agent',
     change_type: 'created',
+    is_locked: true,
+    locked_by: 'compliance.auditor@sec.or.th',
+    locked_at: '2026-07-09T12:25:00Z',
+    lock_reason: 'Awaiting ISO compliance sign-off',
     created_at: '2026-07-09T12:20:00Z'
   }
 ];
@@ -499,7 +684,7 @@ export const INITIAL_AUDIT_RESULTS: AuditResultRow[] = [
   {
     id: 'ar111111-6666-4444-9999-dddddddddddd',
     requirement_id: 'r1111111-3333-4444-9999-bbbbbbbbbbbb',
-    version_reviewed: 1,
+    audit_version_reviewed: 1,
     is_valid: false,
     passed_checks: JSON.stringify([
       { rule: 'PRIMARY_KEY_UUID', message: 'All stories and criteria are correctly referenced using UUID v4 keys.' },
@@ -514,7 +699,7 @@ export const INITIAL_AUDIT_RESULTS: AuditResultRow[] = [
   {
     id: 'ar222222-6666-4444-9999-dddddddddddd',
     requirement_id: 'r2222222-3333-4444-9999-bbbbbbbbbbbb',
-    version_reviewed: 1,
+    audit_version_reviewed: 1,
     is_valid: true,
     passed_checks: JSON.stringify([
       { rule: 'PRIMARY_KEY_UUID', message: 'All tables verified on UUID v4.' },
@@ -535,6 +720,10 @@ export const INITIAL_QUESTIONS: ClarificationQuestionRow[] = [
     question_text: 'Are grace periods for corporate transfers compliant with Krungsri Nimble standards? SEC audit guidelines usually mandate re-authorization for single-transfer requests exceeding 1,000,000 THB regardless of grace window.',
     user_answer: 'Verified. We will add a threshold constraint: transfers exceeding 1M THB bypass the grace period cache and always prompt.',
     is_resolved: true,
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T11:20:00Z'
   },
   {
@@ -545,6 +734,10 @@ export const INITIAL_QUESTIONS: ClarificationQuestionRow[] = [
     question_text: 'If the customer loses cellular signal during active transfer, what is the fallback method? SMS OTP backup, or physical token token-generator?',
     user_answer: null,
     is_resolved: false,
+    is_locked: true,
+    locked_by: 'compliance.auditor@sec.or.th',
+    locked_at: '2026-07-09T11:30:00Z',
+    lock_reason: 'Pending failsafe review',
     created_at: '2026-07-09T11:25:00Z'
   }
 ];
@@ -554,8 +747,12 @@ export const INITIAL_PRD_DOCS: PrdDocumentRow[] = [
     id: 'prd11111-8888-4444-9999-ffffffffffff',
     project_id: 'p1111111-1111-4444-8888-999999999999',
     version: 2,
-    markdown_content: `# SYSTEM REQUIREMENT DOCUMENT\n## Project: Krungsri FastPay Gateway\n\n### 1. Functional Architecture\nThis service provides transaction routing and multi-factor validation hooks. All incoming high-value transactions must validate users against a cryptographically signed mobile Authenticator system.\n\n### 2. State & Integrity Control\nAll transactions are indexed on UUID v4, and state is preserved on time-zone locked tables utilizing automatic audit fields.`,
-    mermaid_graph: `sequenceDiagram\n  Customer->>Gateway: Transfer > 100,000 THB\n  Gateway->>AuthService: Request MFA Challenge\n  AuthService->>CustomerDevice: Prompt OTP Verification\n  CustomerDevice-->>AuthService: Submit OTP (6-digits)\n  AuthService-->>Gateway: Authenticity Approved\n  Gateway->>Ledger: Commit Transaction`,
+    prd_markdown: `# SYSTEM REQUIREMENT DOCUMENT\n## Project: Krungsri FastPay Gateway\n\n### 1. Functional Architecture\nThis service provides transaction routing and multi-factor validation hooks. All incoming high-value transactions must validate users against a cryptographically signed mobile Authenticator system.\n\n### 2. State & Integrity Control\nAll transactions are indexed on UUID v4, and state is preserved on time-zone locked tables utilizing automatic audit fields.`,
+    mermaid_diagram: `sequenceDiagram\n  Customer->>Gateway: Transfer > 100,000 THB\n  Gateway->>AuthService: Request MFA Challenge\n  AuthService->>CustomerDevice: Prompt OTP Verification\n  CustomerDevice-->>AuthService: Submit OTP (6-digits)\n  AuthService-->>Gateway: Authenticity Approved\n  Gateway->>Ledger: Commit Transaction`,
+    is_locked: false,
+    locked_by: null,
+    locked_at: null,
+    lock_reason: null,
     created_at: '2026-07-09T11:45:00Z'
   }
 ];
@@ -596,5 +793,72 @@ export const INITIAL_VERSION_HISTORY: VersionHistoryRow[] = [
       ]
     }),
     created_at: '2026-07-09T11:40:00Z'
+  }
+];
+
+export const INITIAL_PRD_VERSIONS: PrdVersionRow[] = [
+  {
+    id: 'pv111111-aaaa-4444-9999-cccccccccccc',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    version_number: 1,
+    generated_prd: '# FastPay Gateway PRD v1\nInitial draft generated by Architect Agent.',
+    generated_diagram: 'sequenceDiagram\n  Customer->>Gateway: Initiate Transfer',
+    generated_by: 'architect_agent',
+    created_at: '2026-07-09T10:00:00Z'
+  },
+  {
+    id: 'pv222222-aaaa-4444-9999-cccccccccccc',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    version_number: 2,
+    generated_prd: '# FastPay Gateway PRD v2\nAdded OTP fallback and grace period logic.',
+    generated_diagram: 'sequenceDiagram\n  Customer->>Gateway: Transfer > 100K\n  Gateway->>Auth: MFA',
+    generated_by: 'architect_agent',
+    created_at: '2026-07-09T11:00:00Z'
+  }
+];
+
+export const INITIAL_CONVERSATION_MESSAGES: ConversationMessageRow[] = [
+  {
+    id: 'cm111111-bbbb-4444-9999-dddddddddddd',
+    conversation_id: 'conv-001',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    role: 'user',
+    message: 'We need to support corporate batch transfers with a grace period for MFA.',
+    workflow_state: 'gather',
+    intent: 'functional_requirement',
+    created_at: '2026-07-09T09:00:00Z'
+  },
+  {
+    id: 'cm222222-bbbb-4444-9999-dddddddddddd',
+    conversation_id: 'conv-001',
+    project_id: 'p1111111-1111-4444-8888-999999999999',
+    role: 'assistant',
+    message: 'Understood. I will add a 5-minute grace window for batch transfers under 1M THB.',
+    workflow_state: 'confirm',
+    intent: 'acknowledgement',
+    created_at: '2026-07-09T09:01:00Z'
+  }
+];
+
+export const INITIAL_ARTIFACT_EVENT_LOGS: ArtifactEventLogRow[] = [
+  {
+    event_id: 'ael111111-cccc-4444-9999-eeeeeeeeeeee',
+    artifact_type: 'user_story',
+    artifact_id: 'us222222-4444-4444-9999-bbbbbbbbbbbb',
+    action: 'CREATE',
+    old_value: null,
+    new_value: JSON.stringify({ ticket_code: 'US-PAY-002', title: 'MFA Grace Periods & Caching' }),
+    performed_by: 'automated_agent',
+    timestamp: '2026-07-09T11:00:00Z'
+  },
+  {
+    event_id: 'ael222222-cccc-4444-9999-eeeeeeeeeeee',
+    artifact_type: 'user_story',
+    artifact_id: 'us222222-4444-4444-9999-bbbbbbbbbbbb',
+    action: 'LOCK',
+    old_value: JSON.stringify({ is_locked: false }),
+    new_value: JSON.stringify({ is_locked: true, lock_reason: 'Regulatory clarification pending' }),
+    performed_by: 'compliance.auditor@sec.or.th',
+    timestamp: '2026-07-09T11:10:00Z'
   }
 ];

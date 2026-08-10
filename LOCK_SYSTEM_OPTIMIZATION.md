@@ -56,7 +56,7 @@ const handleLockArtifact = async (artifactType, artifactId, artifactCode) => {
   // Optimistic update - instant UI feedback
   setLockedArtifacts(prev => ({
     ...prev,
-    [artifactCode]: { locked: true, locked_by: "user", locked_at: new Date().toISOString() }
+    [artifactCode]: { is_locked: true, locked_by: "user", locked_at: new Date().toISOString() }
   }));
   
   try {
@@ -66,7 +66,7 @@ const handleLockArtifact = async (artifactType, artifactId, artifactCode) => {
     // Rollback on failure
     setLockedArtifacts(prev => ({
       ...prev,
-      [artifactCode]: { locked: false }
+      [artifactCode]: { is_locked: false }
     }));
   }
   // NO loadProjectState() call!
@@ -155,10 +155,10 @@ User clicks Lock → Optimistic UI update → Background API call
 
 ## Migration Notes
 
-- **No database changes required**
-- **No API changes required**
+- **Database rename:** `requirements.locked` → `requirements.is_locked` (Alembic revision `0002_requirements_lock_field_rename`; also applied to `backend/init.sql`)
+- **API contract:** requirement lock status now serializes under `is_locked`, matching `user_stories` and the generic lock endpoints
 - **Fully backward compatible**
-- **Existing lock states preserved**
+- **Existing lock states preserved** (column rename keeps the boolean value)
 
 ## Conclusion
 

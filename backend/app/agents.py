@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.repository import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
 from app.prompt_loader import load_prompt
+from app.config import settings
 
 
 # Set up logging configuration for the multi-agent framework
@@ -85,12 +86,12 @@ class AgentState(TypedDict, total=False):
 # ==========================================
 # Safe context limit mapping designed for MacBook Air/Pro M4 16GB execution bounds
 llm = ChatOpenAI(
-    base_url="http://localhost:1234/v1",
-    api_key="lm-studio",
-    model="qwen-3.5-9b",
-    temperature=0.0,
+    base_url=settings.LM_STUDIO_URL,
+    api_key=settings.LM_STUDIO_API_KEY,
+    model=settings.LM_STUDIO_MODEL_FALLBACK,
+    temperature=settings.TEMPERATURE,
     max_tokens=3000,  # Optimized for structured output
-    model_kwargs={"seed": 42}
+    seed=42  # Deterministic sampling; declared as a first-class param (avoids model_kwargs warning)
 )
 
 # Json Output Parser for strict structured JSON outputs
@@ -536,10 +537,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     existing_user_stories = list(req_state.get("user_stories", []))
     
     # Filter out locked user stories
-    # Check both "is_locked" (DB field) and "locked" (legacy/requirement field) for robustness
     unlocked_user_stories = [
         us for us in existing_user_stories
-        if not (us.get("is_locked", False) or us.get("locked", False))
+        if not us.get("is_locked", False)
     ]
     if len(unlocked_user_stories) != len(existing_user_stories):
         logger.info(f"[GATHERER] Filtered out {len(existing_user_stories) - len(unlocked_user_stories)} locked user stories.")
@@ -900,8 +900,7 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
             if tc and normalize_ticket_code(tc) == normalize_ticket_code(matched_req_id):
                 matched_story_found = True
                 # LOCK ENFORCEMENT: Never archive a locked user story
-                # Check both "is_locked" (DB field) and "locked" (legacy/requirement field) for robustness
-                if story.get("is_locked", False) or story.get("locked", False):
+                if story.get("is_locked", False):
                     matched_story_locked = True
                     logger.warning(
                         f"[DELETE NODE] Skipping archive of locked user story {tc} "
@@ -952,7 +951,7 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
                     tc = rs.get("ticket_code", "")
                     if tc and normalize_ticket_code(tc) == normalize_ticket_code(matched_req_id):
                         # LOCK ENFORCEMENT: Never archive a locked user story
-                        if rs.get("is_locked", False) or rs.get("locked", False):
+                        if rs.get("is_locked", False):
                             logger.warning(
                                 f"[DELETE NODE] Skipping archive of locked user story {tc} "
                                 f"(locked_by={rs.get('locked_by', 'unknown')}). AI removal blocked."
@@ -1044,7 +1043,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         # LOCK ENFORCEMENT: Exclude locked user stories from audit
         passed_stories = [
             us for us in passed_structured.get("user_stories", [])
-            if not (us.get("is_locked", False) or us.get("locked", False))
+            if not (us.get("is_locked", False))
         ]
         req_state["requirements"] = [
             {
@@ -1068,7 +1067,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     all_stories = req_state.get("user_stories", [])
     unlocked_stories = [
         story for story in all_stories
-        if not (story.get("is_locked", False) or story.get("locked", False))
+        if not (story.get("is_locked", False))
     ]
     if len(unlocked_stories) != len(all_stories):
         logger.info(f"[AUDITOR] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from audit.")
@@ -1206,7 +1205,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         # LOCK ENFORCEMENT: Exclude locked user stories from PRD generation
         passed_stories = [
             us for us in passed_structured.get("user_stories", [])
-            if not (us.get("is_locked", False) or us.get("locked", False))
+            if not (us.get("is_locked", False))
         ]
         req_state["requirements"] = [
             {
@@ -1230,7 +1229,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     all_stories = req_state.get("user_stories", [])
     unlocked_stories = [
         story for story in all_stories
-        if not (story.get("is_locked", False) or story.get("locked", False))
+        if not (story.get("is_locked", False))
     ]
     if len(unlocked_stories) != len(all_stories):
         logger.info(f"[ARCHITECT] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from PRD generation.")

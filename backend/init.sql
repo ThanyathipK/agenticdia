@@ -96,7 +96,7 @@ CREATE TABLE requirements (
     priority VARCHAR(50),
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     version INTEGER NOT NULL DEFAULT 1,
-    locked BOOLEAN NOT NULL DEFAULT FALSE,
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
     lock_reason VARCHAR(255),

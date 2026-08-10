@@ -1,6 +1,7 @@
 fastapi[standard]
 uvicorn
 sqlalchemy
+alembic
 asyncpg
 pydantic
 pydantic-settings

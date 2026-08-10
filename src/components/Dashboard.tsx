@@ -60,7 +60,7 @@ interface RequirementItem {
   title: string;
   description?: string;
   user_stories: UserStory[];
-  locked?: boolean;
+  is_locked?: boolean;
   locked_by?: string;
   locked_at?: string;
 }
@@ -545,8 +545,8 @@ export default function Dashboard() {
   };
 
   // Lock state for all artifacts - ISOLATED from project state
-  const [lockedArtifacts, setLockedArtifacts] = useState<Record<string, { locked: boolean; locked_by?: string; locked_at?: string; lock_reason?: string }>>({});
-  const [lockedRequirements, setLockedRequirements] = useState<Record<string, { locked: boolean; locked_by?: string; locked_at?: string; artifact_id?: string }>>({});
+  const [lockedArtifacts, setLockedArtifacts] = useState<Record<string, { is_locked: boolean; locked_by?: string; locked_at?: string; lock_reason?: string }>>({});
+  const [lockedRequirements, setLockedRequirements] = useState<Record<string, { is_locked: boolean; locked_by?: string; locked_at?: string; artifact_id?: string }>>({});
 
   // Generic lock artifact function - ISOLATED, no full project reload
   const handleLockArtifact = async (artifactType: string, artifactId: string, artifactCode: string) => {
@@ -554,7 +554,7 @@ export default function Dashboard() {
     
     // Optimistic update - immediately update UI
     const optimisticLock = { 
-      locked: true, 
+      is_locked: true, 
       locked_by: "user", 
       locked_at: new Date().toISOString() 
     };
@@ -583,12 +583,12 @@ export default function Dashboard() {
       console.error(`Failed to lock ${artifactType}:`, err);
       setLockedArtifacts(prev => ({
         ...prev,
-        [artifactCode]: { locked: false }
+        [artifactCode]: { is_locked: false }
       }));
       if (artifactType === "requirement") {
         setLockedRequirements(prev => ({
           ...prev,
-          [artifactCode]: { locked: false, artifact_id: artifactId }
+          [artifactCode]: { is_locked: false, artifact_id: artifactId }
         }));
       }
       setSyncStatus(`Failed to lock ${artifactType}.`);
@@ -602,13 +602,13 @@ export default function Dashboard() {
     // Optimistic update - immediately update UI
     setLockedArtifacts(prev => ({
       ...prev,
-      [artifactCode]: { locked: false }
+      [artifactCode]: { is_locked: false }
     }));
     
     if (artifactType === "requirement") {
       setLockedRequirements(prev => ({
         ...prev,
-        [artifactCode]: { locked: false, artifact_id: artifactId }
+        [artifactCode]: { is_locked: false, artifact_id: artifactId }
       }));
     }
     
@@ -624,12 +624,12 @@ export default function Dashboard() {
       console.error(`Failed to unlock ${artifactType}:`, err);
       setLockedArtifacts(prev => ({
         ...prev,
-        [artifactCode]: { locked: true }
+        [artifactCode]: { is_locked: true }
       }));
       if (artifactType === "requirement") {
         setLockedRequirements(prev => ({
           ...prev,
-          [artifactCode]: { locked: true, artifact_id: artifactId }
+          [artifactCode]: { is_locked: true, artifact_id: artifactId }
         }));
       }
       setSyncStatus(`Failed to unlock ${artifactType}.`);
@@ -776,13 +776,29 @@ This document specifies the functional, non-functional, and technical requiremen
     }
   }, [projectId]);
 
-  // Real-time synchronization polling (simulating database subscription)
+  // Live refs so the SSE handler below always reads the freshest state without
+  // having to reconnect the EventSource every time these values change.
+  const prdMarkdownRef = useRef(prdMarkdown);
+  const currentVersionRef = useRef(currentVersion);
+  const editingSectionIdRef = useRef(editingSectionId);
+  useEffect(() => {
+    prdMarkdownRef.current = prdMarkdown;
+    currentVersionRef.current = currentVersion;
+    editingSectionIdRef.current = editingSectionId;
+  });
+
+  // Real-time synchronization via Server-Sent Events (SSE).
+  // Replaces the previous 3s polling: the backend pushes a change event through
+  // the `/api/project/{id}/sse` stream and we refresh state once per real change.
   useEffect(() => {
     if (!projectId || projectId === "null") return;
 
     let isSubscribed = true;
-    
-    const pollState = async () => {
+    let refreshInFlight = false;
+
+    const refreshFromServer = async () => {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
       try {
         const response = await axios.get(`/api/project/${projectId}`);
         if (!isSubscribed) return;
@@ -804,7 +820,7 @@ This document specifies the functional, non-functional, and technical requiremen
                   title: r.title,
                   description: r.description || "",
                   user_stories: r.user_stories || [],
-                  locked: r.locked || false,
+                  is_locked: r.is_locked || false,
                   locked_by: r.locked_by,
                   locked_at: r.locked_at
                 }));
@@ -820,7 +836,7 @@ This document specifies the functional, non-functional, and technical requiremen
               const hasLockChanges = newRequirements && prev.requirements ? 
                 newRequirements.some((nr, i) => {
                   const pr = prev.requirements?.[i];
-                  return pr && (nr.locked !== pr.locked || nr.locked_by !== pr.locked_by || nr.locked_at !== pr.locked_at);
+                  return pr && (nr.is_locked !== pr.is_locked || nr.locked_by !== pr.locked_by || nr.locked_at !== pr.locked_at);
                 }) : false;
               
               if (currentStoriesStr !== newStoriesStr || prev.epic_name !== epicName || currentReqsStr !== newReqsStr || hasLockChanges) {
@@ -836,7 +852,7 @@ This document specifies the functional, non-functional, and technical requiremen
           }
           
           // 2. Sync version number if changed
-          if (data.version_number !== undefined && data.version_number !== currentVersion) {
+          if (data.version_number !== undefined && data.version_number !== currentVersionRef.current) {
             setCurrentVersion(data.version_number);
           }
           
@@ -865,7 +881,7 @@ This document specifies the functional, non-functional, and technical requiremen
           
           // 4. Sync generated PRD markdown if changed AND the user is not actively editing any section
           const safeGeneratedPRD = getSafeSectionContent(data.generated_prd);
-          if (safeGeneratedPRD && safeGeneratedPRD !== prdMarkdown && editingSectionId === null) {
+          if (safeGeneratedPRD && safeGeneratedPRD !== prdMarkdownRef.current && editingSectionIdRef.current === null) {
             setPrdMarkdown(safeGeneratedPRD);
           }
           
@@ -892,27 +908,51 @@ This document specifies the functional, non-functional, and technical requiremen
           // 7. Sync pending actions
           try {
             const actionsResponse = await axios.get(`/api/pending-actions/${projectId}`);
-            setPendingActions(actionsResponse.data || []);
+            if (isSubscribed) setPendingActions(actionsResponse.data || []);
           } catch (err: any) {
             console.warn("Error fetching pending actions:", err);
           }
           
-          setSyncStatus("Synced with Supabase Cloud");
+          setSyncStatus("Synced via live updates");
         }
       } catch (err: any) {
-        console.warn("Polling state sync error:", err.message || err);
+        console.warn("SSE state refresh error:", err.message || err);
+      } finally {
+        refreshInFlight = false;
       }
     };
 
-    // Run immediately, then poll every 3000ms for balanced performance
-    pollState();
-    const interval = setInterval(pollState, 3000);
+    // Open the Server-Sent Events stream. The backend publishes a change event
+    // whenever the project state is mutated, so no periodic polling is needed.
+    const source = new EventSource(`/api/project/${projectId}/sse`);
+    source.onopen = () => {
+      if (isSubscribed) setSyncStatus("Live updates connected");
+    };
+    source.onmessage = (event) => {
+      if (!isSubscribed) return;
+      try {
+        const message = JSON.parse(event.data);
+        // Every server event signals that project state changed; refresh once.
+        if (message && message.event) {
+          refreshFromServer();
+        }
+      } catch (err) {
+        // Ignore malformed or heartbeat payloads.
+      }
+    };
+    source.onerror = () => {
+      // EventSource reconnects automatically; surface a subtle status while down.
+      if (isSubscribed) setSyncStatus("Live updates reconnecting...");
+    };
+
+    // Run once immediately, mirroring the previous "run immediately" behavior.
+    refreshFromServer();
 
     return () => {
       isSubscribed = false;
-      clearInterval(interval);
+      source.close();
     };
-  }, [projectId, currentVersion, editingSectionId]);
+  }, [projectId]);
 
   // Sync sections whenever prdMarkdown or structuredRequirements.user_stories changes
   useEffect(() => {
@@ -1038,7 +1078,7 @@ This document specifies the functional, non-functional, and technical requiremen
             title: r.title,
             description: r.description || "",
             user_stories: r.user_stories || [],
-            locked: r.locked || false,
+            is_locked: r.is_locked || false,
             locked_by: r.locked_by,
             locked_at: r.locked_at
           }));
@@ -1062,14 +1102,14 @@ This document specifies the functional, non-functional, and technical requiremen
           
           // Add all locks from backend data only (no merging with previous project state)
           for (const req of data.requirements) {
-            if (req.locked) {
+            if (req.is_locked) {
               newLockedArtifacts[req.requirement_code] = {
-                locked: true,
+                is_locked: true,
                 locked_by: req.locked_by,
                 locked_at: req.locked_at
               };
               newLockedReqs[req.requirement_code] = {
-                locked: true,
+                is_locked: true,
                 locked_by: req.locked_by,
                 locked_at: req.locked_at,
                 artifact_id: req.id
@@ -2597,7 +2637,7 @@ To run compliance checks on these updated specifications, please click the **Val
                 </div>
                 <div className="space-y-2">
                   {structuredRequirements.requirements.map((req) => {
-                    const isLocked = req.locked || lockedRequirements[req.requirement_code]?.locked;
+                    const isLocked = req.is_locked || lockedRequirements[req.requirement_code]?.is_locked;
                     return (
                       <div key={req.requirement_code} className={`flex items-center justify-between p-3 rounded-xl border ${isLocked ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
                         <div className="flex items-center gap-3 min-w-0">
@@ -2688,7 +2728,7 @@ To run compliance checks on these updated specifications, please click the **Val
                                     <button
                                       onClick={() => {
                                         const req = structuredRequirements.requirements![0];
-                                        const isLocked = req.locked || lockedRequirements[req.requirement_code]?.locked;
+                                        const isLocked = req.is_locked || lockedRequirements[req.requirement_code]?.is_locked;
                                         if (isLocked) {
                                           handleUnlockRequirement(req.requirement_code);
                                         } else {
@@ -2696,12 +2736,12 @@ To run compliance checks on these updated specifications, please click the **Val
                                         }
                                       }}
                                       className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border shadow-sm cursor-pointer z-10 font-semibold ${
-                                        (structuredRequirements.requirements![0].locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.locked)
+                                        (structuredRequirements.requirements![0].is_locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.is_locked)
                                           ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
                                           : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
                                       }`}
                                     >
-                                      {(structuredRequirements.requirements![0].locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.locked) ? (
+                                      {(structuredRequirements.requirements![0].is_locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.is_locked) ? (
                                         <>
                                           <Unlock className="w-3.5 h-3.5 text-amber-700" />
                                           <span>Unlock</span>
@@ -2721,7 +2761,7 @@ To run compliance checks on these updated specifications, please click the **Val
                                         setEditingSectionId(section.id);
                                         setEditBuffer(safeContent);
                                       }}
-                                      disabled={section.id === 'user_stories' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (structuredRequirements.requirements[0].locked || lockedRequirements[structuredRequirements.requirements[0].requirement_code]?.locked)}
+                                      disabled={section.id === 'user_stories' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (structuredRequirements.requirements[0].is_locked || lockedRequirements[structuredRequirements.requirements[0].requirement_code]?.is_locked)}
                                       className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold disabled:opacity-30 disabled:cursor-not-allowed`}
                                     >
                                       <Pencil className="w-3.5 h-3.5 text-primary" />
