@@ -1,8 +1,33 @@
+# Dependencies
 node_modules/
+
+# Builds / output
 build/
 dist/
 coverage/
+
+# OS
 .DS_Store
+
+# Logs
 *.log
+
+# Env files
 .env*
 !.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Node runtime artifacts
+server.js
