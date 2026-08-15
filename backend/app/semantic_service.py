@@ -7,7 +7,8 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.agents import llm
 from app.schemas import RequirementIntentDetectionResult, WorkflowRoutingResult, RequirementMatcherResult
-from app.prompt_loader import load_prompt
+from app.prompt_loader import load_prompt, _PromptProxy
+from app.llm_utils import invoke_llm_structured
 
 logger = logging.getLogger("app.semantic_service")
 
@@ -20,16 +21,6 @@ class SemanticChange(BaseModel):
 
 class SemanticChangeDetectionResult(BaseModel):
     changes: List[SemanticChange] = Field(..., description="List of all detected changes")
-
-class _PromptProxy:
-    def __init__(self, name: str):
-        self.name = name
-    def __str__(self) -> str:
-        return load_prompt(self.name)
-    def __add__(self, other: str) -> str:
-        return load_prompt(self.name) + str(other)
-    def __radd__(self, other: str) -> str:
-        return str(other) + load_prompt(self.name)
 
 SEMANTIC_CHANGE_DETECTION_PROMPT = _PromptProxy("semantic")
 REQUIREMENT_INTENT_DETECTION_PROMPT = _PromptProxy("intent")
@@ -61,56 +52,35 @@ async def detect_semantic_changes(raw_input: str, current_stories: List[Dict[str
     pydantic_parser = JsonOutputParser(pydantic_object=SemanticChangeDetectionResult)
     format_instructions = pydantic_parser.get_format_instructions()
     
-    result = None
-    
-    # Attempt with structured output
+    # Prefer .with_structured_output(), falling back to raw JSON parse
     try:
-        logger.info("Attempting .with_structured_output() for semantic change detection.")
-        chain = prompt_template | llm.with_structured_output(SemanticChangeDetectionResult)
-        parsed_output = await chain.ainvoke({
-            "current_context": current_context,
-            "new_message": raw_input,
-            "format_instructions": "Output ONLY raw JSON matching the schema."
-        })
-        result = parsed_output.dict() if hasattr(parsed_output, "dict") else dict(parsed_output)
-        logger.info("Successfully obtained structured output for semantic changes.")
-    except Exception as e:
-        logger.warning(f"with_structured_output failed for semantic changes: {str(e)}. Falling back to manual parse.")
-        
-        try:
-            raw_chain = prompt_template | llm
-            raw_response = await raw_chain.ainvoke({
+        result = await invoke_llm_structured(
+            llm,
+            prompt_template,
+            SemanticChangeDetectionResult,
+            variables={
                 "current_context": current_context,
                 "new_message": raw_input,
-                "format_instructions": format_instructions
-            })
-            
-            # Extract content from response
-            content = ""
-            if hasattr(raw_response, "content") and isinstance(raw_response.content, str):
-                content = raw_response.content
-            
-            clean_content = content.strip()
-            if clean_content.startswith("```json"): clean_content = clean_content[7:]
-            elif clean_content.startswith("```"): clean_content = clean_content[3:]
-            if clean_content.endswith("```"): clean_content = clean_content[:-3]
-            clean_content = clean_content.strip()
-            
-            result = json.loads(clean_content)
-        except Exception as e2:
-            logger.error(f"Semantic change detection parsing failed completely: {str(e2)}")
-            # Fallback to a safe default NEW_REQUIREMENT if LLM fails
-            result = {
-                "changes": [
-                    {
-                        "change_type": "NEW_REQUIREMENT",
-                        "target_requirement_id": None,
-                        "confidence": 1.0,
-                        "reason": f"Fallback due to analysis failure: {str(e2)}",
-                        "recommended_action": "INSERT"
-                    }
-                ]
-            }
+                "format_instructions": "Output ONLY raw JSON matching the schema.",
+            },
+            description="semantic change detection",
+            format_instructions=format_instructions,
+        )
+        logger.info("Successfully obtained structured output for semantic changes.")
+    except Exception as e2:
+        logger.error(f"Semantic change detection parsing failed completely: {str(e2)}")
+        # Fallback to a safe default NEW_REQUIREMENT if LLM fails
+        result = {
+            "changes": [
+                {
+                    "change_type": "NEW_REQUIREMENT",
+                    "target_requirement_id": None,
+                    "confidence": 1.0,
+                    "reason": f"Fallback due to analysis failure: {str(e2)}",
+                    "recommended_action": "INSERT"
+                }
+            ]
+        }
 
     # Format into a clean list of changes
     changes = result.get("changes", [])
@@ -153,68 +123,33 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
     pydantic_parser = JsonOutputParser(pydantic_object=RequirementIntentDetectionResult)
     format_instructions = pydantic_parser.get_format_instructions()
     
-    # Attempt 1: with_structured_output
+    # Prefer .with_structured_output(), falling back to raw JSON parse
+    def _is_valid_intent(result: Dict[str, Any]) -> bool:
+        return str(result.get("intent", "")).strip().upper() in VALID_INTENTS
+
     try:
-        chain = prompt_template | llm.with_structured_output(RequirementIntentDetectionResult)
-        parsed_output = await chain.ainvoke({
-            "current_context": current_context,
-            "user_message": raw_input,
-            "format_instructions": "Output ONLY raw JSON matching the schema."
-        })
-        if hasattr(parsed_output, "dict"):
-            res_dict = parsed_output.dict()
-        elif isinstance(parsed_output, dict):
-            res_dict = parsed_output
-        else:
-            res_dict = dict(parsed_output)
-
-        intent = str(res_dict.get("intent", "")).strip().upper()
-        confidence = float(res_dict.get("confidence", 0.95))
-        reason = str(res_dict.get("reason") or res_dict.get("reasoning") or "")
-
-        if intent in VALID_INTENTS:
-            logger.info(f"Successfully detected requirement intent via LLM: {intent} (confidence: {confidence}, reason: {reason})")
-            return {
-                "intent": intent,
-                "confidence": confidence,
-                "reason": reason
-            }
-    except Exception as e:
-        logger.warning(f"with_structured_output failed for intent detection: {str(e)}. Retrying with raw invocation.")
-        
-    # Attempt 2: Raw invocation + JSON parse
-    try:
-        raw_chain = prompt_template | llm
-        raw_response = await raw_chain.ainvoke({
-            "current_context": current_context,
-            "user_message": raw_input,
-            "format_instructions": format_instructions
-        })
-        
-        content = ""
-        if hasattr(raw_response, "content") and isinstance(raw_response.content, str):
-            content = raw_response.content
-        elif isinstance(raw_response, dict) and "content" in raw_response:
-            content = raw_response["content"]
-            
-        clean_content = str(content).strip()
-        if clean_content.startswith("```json"): clean_content = clean_content[7:]
-        elif clean_content.startswith("```"): clean_content = clean_content[3:]
-        if clean_content.endswith("```"): clean_content = clean_content[:-3]
-        clean_content = clean_content.strip()
-        
-        data = json.loads(clean_content)
-        intent = str(data.get("intent", "")).strip().upper()
-        confidence = float(data.get("confidence", 0.90))
-        reason = str(data.get("reason") or data.get("reasoning") or "")
-
-        if intent in VALID_INTENTS:
-            logger.info(f"Successfully parsed requirement intent from raw LLM output: {intent} (confidence: {confidence})")
-            return {
-                "intent": intent,
-                "confidence": confidence,
-                "reason": reason
-            }
+        result = await invoke_llm_structured(
+            llm,
+            prompt_template,
+            RequirementIntentDetectionResult,
+            variables={
+                "current_context": current_context,
+                "user_message": raw_input,
+                "format_instructions": "Output ONLY raw JSON matching the schema.",
+            },
+            description="intent detection",
+            format_instructions=format_instructions,
+            validate=_is_valid_intent,
+        )
+        intent = str(result.get("intent", "")).strip().upper()
+        confidence = float(result.get("confidence", 0.90))
+        reason = str(result.get("reason") or result.get("reasoning") or "")
+        logger.info(f"Successfully detected requirement intent via LLM: {intent} (confidence: {confidence})")
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "reason": reason
+        }
     except Exception as e2:
         logger.error(f"Intent detection parsing failed completely: {str(e2)}")
 
@@ -385,65 +320,28 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
     pydantic_parser = JsonOutputParser(pydantic_object=RequirementMatcherResult)
     format_instructions = pydantic_parser.get_format_instructions()
 
-    # Attempt 1: with_structured_output
+    # Prefer .with_structured_output(), falling back to raw JSON parse
     try:
-        chain = prompt_template | llm.with_structured_output(RequirementMatcherResult)
-        parsed_output = await chain.ainvoke({
-            "current_context": current_context,
-            "detected_intent": detected_intent,
-            "user_message": raw_input,
-            "format_instructions": "Output ONLY raw JSON matching the schema."
-        })
-        if hasattr(parsed_output, "dict"):
-            res_dict = parsed_output.dict()
-        elif isinstance(parsed_output, dict):
-            res_dict = parsed_output
-        else:
-            res_dict = dict(parsed_output)
-
-        confidence = float(res_dict.get("confidence", 0.95))
-        status_val = str(res_dict.get("status", "MATCHED")).upper()
-        
+        result = await invoke_llm_structured(
+            llm,
+            prompt_template,
+            RequirementMatcherResult,
+            variables={
+                "current_context": current_context,
+                "detected_intent": detected_intent,
+                "user_message": raw_input,
+                "format_instructions": "Output ONLY raw JSON matching the schema.",
+            },
+            description="requirement matcher",
+            format_instructions=format_instructions,
+        )
+        confidence = float(result.get("confidence", 0.85))
+        status_val = str(result.get("status", "MATCHED")).upper()
         if confidence < 0.75 and status_val == "MATCHED":
-            res_dict["status"] = "LOW_CONFIDENCE"
-            res_dict["reason"] = f"Confidence {confidence} is below threshold (0.75). Clarification required."
-
-        logger.info(f"Successfully ran Requirement Matcher via structured output: {res_dict}")
-        return res_dict
-    except Exception as e:
-        logger.warning(f"with_structured_output failed for requirement matcher: {str(e)}. Retrying with raw invocation.")
-
-    # Attempt 2: Raw invocation + JSON parse
-    try:
-        raw_chain = prompt_template | llm
-        raw_response = await raw_chain.ainvoke({
-            "current_context": current_context,
-            "detected_intent": detected_intent,
-            "user_message": raw_input,
-            "format_instructions": format_instructions
-        })
-
-        content = ""
-        if hasattr(raw_response, "content") and isinstance(raw_response.content, str):
-            content = raw_response.content
-        elif isinstance(raw_response, dict) and "content" in raw_response:
-            content = raw_response["content"]
-
-        clean_content = str(content).strip()
-        if clean_content.startswith("```json"): clean_content = clean_content[7:]
-        elif clean_content.startswith("```"): clean_content = clean_content[3:]
-        if clean_content.endswith("```"): clean_content = clean_content[:-3]
-        clean_content = clean_content.strip()
-
-        data = json.loads(clean_content)
-        confidence = float(data.get("confidence", 0.85))
-        status_val = str(data.get("status", "MATCHED")).upper()
-        if confidence < 0.75 and status_val == "MATCHED":
-            data["status"] = "LOW_CONFIDENCE"
-            data["reason"] = f"Confidence {confidence} is below threshold (0.75). Clarification required."
-
-        logger.info(f"Successfully parsed requirement matcher from raw LLM output: {data}")
-        return data
+            result["status"] = "LOW_CONFIDENCE"
+            result["reason"] = f"Confidence {confidence} is below threshold (0.75). Clarification required."
+        logger.info(f"Requirement matcher result: {result}")
+        return result
     except Exception as e2:
         logger.error(f"Requirement matcher parsing failed completely: {str(e2)}")
 
@@ -492,57 +390,31 @@ async def classify_workflow(raw_input: str) -> Dict[str, Any]:
     pydantic_parser = JsonOutputParser(pydantic_object=WorkflowRoutingResult)
     format_instructions = pydantic_parser.get_format_instructions()
 
-    # Attempt 1: with_structured_output
+    # Prefer .with_structured_output(), falling back to raw JSON parse
+    VALID_WORKFLOWS = ["CHAT", "QUESTION", "COMMAND", "REQUIREMENT"]
+
+    def _is_valid_workflow(result: Dict[str, Any]) -> bool:
+        return str(result.get("workflow", "")).strip().upper() in VALID_WORKFLOWS
+
     try:
-        chain = prompt_template | llm.with_structured_output(WorkflowRoutingResult)
-        parsed_output = await chain.ainvoke({
-            "user_message": clean_input,
-            "format_instructions": "Output ONLY raw JSON matching the schema."
-        })
-        if hasattr(parsed_output, "dict"):
-            res_dict = parsed_output.dict()
-        elif isinstance(parsed_output, dict):
-            res_dict = parsed_output
-        else:
-            res_dict = dict(parsed_output)
-
-        wf = str(res_dict.get("workflow", "")).strip().upper()
-        if wf in ["CHAT", "QUESTION", "COMMAND", "REQUIREMENT"]:
-            res_dict["workflow"] = wf
-            res_dict["confidence"] = float(res_dict.get("confidence", 0.95))
-            res_dict["reason"] = str(res_dict.get("reason", ""))
-            logger.info(f"Workflow router classified input via LLM structured output: {res_dict}")
-            return res_dict
-    except Exception as e:
-        logger.warning(f"with_structured_output failed for workflow routing: {str(e)}. Retrying raw invocation.")
-
-    # Attempt 2: Raw invocation + JsonOutputParser
-    try:
-        raw_chain = prompt_template | llm
-        raw_response = await raw_chain.ainvoke({
-            "user_message": clean_input,
-            "format_instructions": format_instructions
-        })
-        content = ""
-        if hasattr(raw_response, "content") and isinstance(raw_response.content, str):
-            content = raw_response.content
-        elif isinstance(raw_response, dict) and "content" in raw_response:
-            content = raw_response["content"]
-
-        clean_content = str(content).strip()
-        if clean_content.startswith("```json"): clean_content = clean_content[7:]
-        elif clean_content.startswith("```"): clean_content = clean_content[3:]
-        if clean_content.endswith("```"): clean_content = clean_content[:-3]
-        clean_content = clean_content.strip()
-
-        data = json.loads(clean_content)
-        wf = str(data.get("workflow", "")).strip().upper()
-        if wf in ["CHAT", "QUESTION", "COMMAND", "REQUIREMENT"]:
-            data["workflow"] = wf
-            data["confidence"] = float(data.get("confidence", 0.90))
-            data["reason"] = str(data.get("reason", ""))
-            logger.info(f"Workflow router classified input via raw LLM response: {data}")
-            return data
+        result = await invoke_llm_structured(
+            llm,
+            prompt_template,
+            WorkflowRoutingResult,
+            variables={
+                "user_message": clean_input,
+                "format_instructions": "Output ONLY raw JSON matching the schema.",
+            },
+            description="workflow routing",
+            format_instructions=format_instructions,
+            validate=_is_valid_workflow,
+        )
+        wf = str(result.get("workflow", "")).strip().upper()
+        result["workflow"] = wf
+        result["confidence"] = float(result.get("confidence", 0.90))
+        result["reason"] = str(result.get("reason", ""))
+        logger.info(f"Workflow router classified input via LLM: {result}")
+        return result
     except Exception as e2:
         logger.error(f"Workflow router raw parsing failed: {str(e2)}")
 

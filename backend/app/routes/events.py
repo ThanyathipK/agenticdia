@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.event_manager import event_manager
 from app.repository import ArtifactEventLogRepository
+from app.schemas import (
+    EventListResponse,
+    ArtifactEventListResponse,
+    ActionEventListResponse,
+    ProjectEventListResponse,
+)
 
 logger = logging.getLogger("app.routes.events")
 
@@ -72,15 +78,22 @@ async def stream_project_events(project_id: str):
     )
 
 
-@router.get("/api/events", status_code=status.HTTP_200_OK)
+@router.get("/api/events", response_model=EventListResponse, status_code=status.HTTP_200_OK)
 async def get_recent_events(
     limit: int = 50,
     offset: int = 0,
     session: AsyncSession = Depends(get_db)
-):
+) -> EventListResponse:
     """
     Retrieve the most recent artifact event log entries across all projects.
-    Returns events ordered by timestamp descending (newest first).
+
+    Args:
+        limit: Maximum number of events to return.
+        offset: Pagination offset.
+        session: Active asynchronous database session.
+
+    Returns:
+        EventListResponse: Newest-first events with pagination metadata.
     """
     events = await ArtifactEventLogRepository.get_recent(session, limit=limit, offset=offset)
     return {
@@ -91,16 +104,26 @@ async def get_recent_events(
     }
 
 
-@router.get("/api/events/{artifact_type}/{artifact_id}", status_code=status.HTTP_200_OK)
+@router.get("/api/events/{artifact_type}/{artifact_id}", response_model=ArtifactEventListResponse, status_code=status.HTTP_200_OK)
 async def get_artifact_events(
     artifact_type: str,
     artifact_id: str,
     limit: int = 100,
     offset: int = 0,
     session: AsyncSession = Depends(get_db)
-):
+) -> ArtifactEventListResponse:
     """
     Retrieve all events for a specific artifact (e.g. a user story, requirement, epic).
+
+    Args:
+        artifact_type: Type of artifact queried.
+        artifact_id: UUID string of the artifact.
+        limit: Maximum number of events to return.
+        offset: Pagination offset.
+        session: Active asynchronous database session.
+
+    Returns:
+        ArtifactEventListResponse: Newest-first events for the artifact.
     """
     events = await ArtifactEventLogRepository.get_by_artifact(
         artifact_type, artifact_id, session, limit=limit, offset=offset
@@ -115,15 +138,27 @@ async def get_artifact_events(
     }
 
 
-@router.get("/api/events/action/{action}", status_code=status.HTTP_200_OK)
+@router.get("/api/events/action/{action}", response_model=ActionEventListResponse, status_code=status.HTTP_200_OK)
 async def get_events_by_action(
     action: str,
     limit: int = 100,
     offset: int = 0,
     session: AsyncSession = Depends(get_db)
-):
+) -> ActionEventListResponse:
     """
     Retrieve all events for a specific action type (CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK).
+
+    Args:
+        action: The action type to filter by.
+        limit: Maximum number of events to return.
+        offset: Pagination offset.
+        session: Active asynchronous database session.
+
+    Returns:
+        ActionEventListResponse: Newest-first events for the action.
+
+    Raises:
+        HTTPException: 400 if ``action`` is not a valid event action.
     """
     action_upper = action.upper()
     if action_upper not in ArtifactEventLogRepository.VALID_ACTIONS:
@@ -141,7 +176,7 @@ async def get_events_by_action(
     }
 
 
-@router.get("/api/project/{project_id}/events", status_code=status.HTTP_200_OK)
+@router.get("/api/project/{project_id}/events", response_model=ProjectEventListResponse, status_code=status.HTTP_200_OK)
 async def get_project_events(
     project_id: str,
     artifact_type: Optional[str] = None,
@@ -149,10 +184,26 @@ async def get_project_events(
     limit: int = 100,
     offset: int = 0,
     session: AsyncSession = Depends(get_db)
-):
+) -> ProjectEventListResponse:
     """
     Retrieve events for a project, optionally filtered by artifact_type and/or action.
+
     Queries events by known artifact IDs for the project.
+
+    Args:
+        project_id: Project UUID string.
+        artifact_type: Optional artifact-type filter.
+        action: Optional action-type filter.
+        limit: Maximum number of events to return.
+        offset: Pagination offset.
+        session: Active asynchronous database session.
+
+    Returns:
+        ProjectEventListResponse: Newest-first events for the project.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID or ``action``
+            is invalid.
     """
     try:
         UUID(project_id)

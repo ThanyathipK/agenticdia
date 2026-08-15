@@ -1,6 +1,7 @@
 import React from 'react';
 import { Check, X, AlertTriangle } from 'lucide-react';
 import axios from 'axios';
+import { handleError } from './Toast';
 
 interface PendingAction {
   id: string;
@@ -22,7 +23,7 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
       await axios.post(`/api/confirm-action/${action.id}?project_id=${action.project_id}`);
       onConfirm();
     } catch (error) {
-      console.error("Failed to confirm action", error);
+      handleError("Failed to confirm the action.", error);
     }
   };
 
@@ -31,7 +32,7 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
       await axios.post(`/api/cancel-action/${action.id}?project_id=${action.project_id}`);
       onCancel();
     } catch (error) {
-      console.error("Failed to cancel action", error);
+      handleError("Failed to cancel the action.", error);
     }
   };
 

@@ -1,4 +1,5 @@
 import logging
+from typing import List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,7 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.repository import PendingActionRepository, RequirementStateRepository
-from app.schemas import ArtifactLockRequest
+from app.schemas import (
+    ArtifactLockRequest,
+    ArtifactLockResponse,
+    LockStatusResponse,
+    PendingActionResponse,
+    ConfirmActionResponse,
+    ActionStatusResponse,
+)
 from app.event_manager import event_manager
 
 logger = logging.getLogger("app.routes.lock")
@@ -29,17 +37,33 @@ VALID_ARTIFACT_TYPES = [
 # GENERIC ARTIFACT LOCK / UNLOCK API
 # ==========================================
 
-@router.post("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock", status_code=status.HTTP_200_OK)
+@router.post("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock", response_model=ArtifactLockResponse, status_code=status.HTTP_200_OK)
 async def lock_artifact(
     project_id: str,
     artifact_type: str,
     artifact_id: str,
     payload: ArtifactLockRequest,
     session: AsyncSession = Depends(get_db)
-):
+) -> ArtifactLockResponse:
     """
     Generic lock endpoint for any artifact type.
-    Supported types: project, epic, requirement, user_story, acceptance_criteria, clarification_question, prd_document
+
+    Supported types: project, epic, requirement, user_story, acceptance_criteria,
+    clarification_question, prd_document.
+
+    Args:
+        project_id: Owning project UUID string.
+        artifact_type: One of the supported artifact types.
+        artifact_id: Artifact UUID string.
+        payload: Optional locking identity and reason.
+        session: Active asynchronous database session.
+
+    Returns:
+        ArtifactLockResponse: Confirmation with the artifact's lock metadata.
+
+    Raises:
+        HTTPException: 400 on invalid IDs or unsupported artifact type; 409 if
+            the artifact is already locked; 404 if the artifact is not found.
     """
     from app.lock_service import LockService, ArtifactLockError
 
@@ -80,16 +104,30 @@ async def lock_artifact(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.post("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/unlock", status_code=status.HTTP_200_OK)
+@router.post("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/unlock", response_model=ArtifactLockResponse, status_code=status.HTTP_200_OK)
 async def unlock_artifact(
     project_id: str,
     artifact_type: str,
     artifact_id: str,
     payload: ArtifactLockRequest,
     session: AsyncSession = Depends(get_db)
-):
+) -> ArtifactLockResponse:
     """
     Generic unlock endpoint for any artifact type.
+
+    Args:
+        project_id: Owning project UUID string.
+        artifact_type: One of the supported artifact types.
+        artifact_id: Artifact UUID string.
+        payload: Optional unlocking identity.
+        session: Active asynchronous database session.
+
+    Returns:
+        ArtifactLockResponse: Confirmation with the artifact's lock metadata.
+
+    Raises:
+        HTTPException: 400 on invalid IDs or unsupported artifact type; 409 if
+            locked by a different user; 404 if the artifact is not found.
     """
     from app.lock_service import LockService
 
@@ -129,15 +167,28 @@ async def unlock_artifact(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.get("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock-status", status_code=status.HTTP_200_OK)
+@router.get("/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock-status", response_model=LockStatusResponse, status_code=status.HTTP_200_OK)
 async def get_artifact_lock_status(
     project_id: str,
     artifact_type: str,
     artifact_id: str,
     session: AsyncSession = Depends(get_db)
-):
+) -> LockStatusResponse:
     """
     Get the lock status of any artifact.
+
+    Args:
+        project_id: Owning project UUID string.
+        artifact_type: One of the supported artifact types.
+        artifact_id: Artifact UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        LockStatusResponse: The artifact's lock metadata.
+
+    Raises:
+        HTTPException: 400 on invalid IDs or unsupported artifact type; 404 if
+            the artifact is not found.
     """
     from app.lock_service import LockService
 
@@ -165,15 +216,41 @@ async def get_artifact_lock_status(
 # PENDING ACTIONS API
 # ==========================================
 
-@router.get("/api/pending-actions/{project_id}")
-async def get_pending_actions(project_id: str, session: AsyncSession = Depends(get_db)):
+@router.get("/api/pending-actions/{project_id}", response_model=List[PendingActionResponse], status_code=status.HTTP_200_OK)
+async def get_pending_actions(project_id: str, session: AsyncSession = Depends(get_db)) -> List[PendingActionResponse]:
+    """
+    Retrieve all pending (awaiting-confirmation) actions for a project.
+
+    Args:
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        List[PendingActionResponse]: Pending actions for the project.
+    """
     actions = await PendingActionRepository.get_by_project(project_id, session)
     return actions
 
 
-@router.post("/api/confirm-action/{action_id}")
-async def confirm_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)):
-    # 0. LOCK ENFORCEMENT: Cannot confirm an action on a locked project
+@router.post("/api/confirm-action/{action_id}", response_model=ConfirmActionResponse, status_code=status.HTTP_200_OK)
+async def confirm_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ConfirmActionResponse:
+    """
+    Confirm a pending merge action, applying its proposed changes to the database.
+
+    Refuses to confirm when the project is locked.
+
+    Args:
+        action_id: Pending-action UUID string.
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        ConfirmActionResponse: The persisted, merged requirement state.
+
+    Raises:
+        HTTPException: 400 on invalid project ID or missing proposed changes;
+            404 if the action does not exist; 409 if the project is locked.
+    """
     from app.lock_service import LockService, ArtifactLockError
     try:
         UUID(project_id)
@@ -219,8 +296,19 @@ async def confirm_action(action_id: str, project_id: str, session: AsyncSession 
     }
 
 
-@router.post("/api/cancel-action/{action_id}")
-async def cancel_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)):
+@router.post("/api/cancel-action/{action_id}", response_model=ActionStatusResponse, status_code=status.HTTP_200_OK)
+async def cancel_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ActionStatusResponse:
+    """
+    Cancel (delete) a pending action without applying its proposed changes.
+
+    Args:
+        action_id: Pending-action UUID string.
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        ActionStatusResponse: Confirmation with status 'cancelled'.
+    """
     await PendingActionRepository.delete(action_id, project_id, session)
     await event_manager.publish(project_id, "action_cancelled", {
         "project_id": project_id,

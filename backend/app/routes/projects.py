@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,7 +13,16 @@ from app.repository import (
     ConversationMessageRepository,
     PRDVersionRepository,
 )
-from app.schemas import ProjectCreate
+from app.schemas import (
+    ProjectCreate,
+    ProjectSummary,
+    ProjectCreated,
+    ProjectDeleteResponse,
+    RequirementStateResponse,
+    ConversationMessageResponse,
+    PRDVersionResponse,
+    PRDExportResponse,
+)
 from app.llm_client import call_lm_studio
 from app.event_manager import event_manager
 
@@ -22,13 +31,32 @@ logger = logging.getLogger("app.routes.projects")
 router = APIRouter()
 
 
-@router.get("/api/projects", status_code=status.HTTP_200_OK)
-async def get_projects(db: AsyncSession = Depends(get_db)):
+@router.get("/api/projects", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
+async def get_projects(db: AsyncSession = Depends(get_db)) -> List[ProjectSummary]:
+    """
+    List all projects.
+
+    Args:
+        db: Active asynchronous database session.
+
+    Returns:
+        List[ProjectSummary]: All project summary records.
+    """
     return await ProjectRepository.list_all(db)
 
 
-@router.post("/api/projects", status_code=status.HTTP_201_CREATED)
-async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_db)):
+@router.post("/api/projects", response_model=ProjectCreated, status_code=status.HTTP_201_CREATED)
+async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_db)) -> ProjectCreated:
+    """
+    Create a new project and initialize its requirement state.
+
+    Args:
+        payload: Project creation payload.
+        db: Active asynchronous database session.
+
+    Returns:
+        ProjectCreated: The new project's UUID string and name.
+    """
     project_data = payload.dict()
     project_data["id"] = str(uuid.uuid4())
     # Use system user UUID as default until proper auth is implemented
@@ -38,9 +66,22 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
     return created_project
 
 
-@router.put("/api/projects/{project_id}", status_code=status.HTTP_200_OK)
-async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSession = Depends(get_db)):
-    """Update an existing project (rename)."""
+@router.put("/api/projects/{project_id}", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
+async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+    """
+    Update an existing project (rename).
+
+    Args:
+        project_id: Project UUID string.
+        payload: Updated project fields.
+        db: Active asynchronous database session.
+
+    Returns:
+        ProjectSummary: The updated project record.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if not found.
+    """
     try:
         UUID(project_id)
     except ValueError:
@@ -57,9 +98,21 @@ async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSessi
     return updated
 
 
-@router.delete("/api/projects/{project_id}", status_code=status.HTTP_200_OK)
-async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Delete an existing project."""
+@router.delete("/api/projects/{project_id}", response_model=ProjectDeleteResponse, status_code=status.HTTP_200_OK)
+async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)) -> ProjectDeleteResponse:
+    """
+    Delete an existing project.
+
+    Args:
+        project_id: Project UUID string.
+        db: Active asynchronous database session.
+
+    Returns:
+        ProjectDeleteResponse: Confirmation containing the deleted project ID.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if not found.
+    """
     try:
         UUID(project_id)
     except ValueError:
@@ -72,11 +125,23 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
     return {"status": "deleted", "project_id": project_id}
 
 
-@router.get("/api/project/{project_id}", status_code=status.HTTP_200_OK)
-async def get_project_requirement_state(project_id: str, session: AsyncSession = Depends(get_db)):
+@router.get("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
+async def get_project_requirement_state(project_id: str, session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
     """
     Retrieves the centralized RequirementState for a project from Supabase.
-    If it doesn't exist, returns default initialized values.
+
+    If it doesn't exist, returns default initialized values. Includes the
+    persisted conversation history for the project.
+
+    Args:
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        RequirementStateResponse: The flattened requirement state.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID.
     """
     try:
         UUID(project_id)
@@ -138,8 +203,20 @@ async def get_project_requirement_state(project_id: str, session: AsyncSession =
     return state
 
 
-@router.get("/api/project/{project_id}/conversations", status_code=status.HTTP_200_OK)
-async def get_project_conversations(project_id: str):
+@router.get("/api/project/{project_id}/conversations", response_model=List[ConversationMessageResponse], status_code=status.HTTP_200_OK)
+async def get_project_conversations(project_id: str) -> List[ConversationMessageResponse]:
+    """
+    Retrieve the persisted conversation history for a project.
+
+    Args:
+        project_id: Project UUID string.
+
+    Returns:
+        List[ConversationMessageResponse]: All conversation messages, oldest first.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID.
+    """
     try:
         UUID(project_id)
     except ValueError:
@@ -147,11 +224,25 @@ async def get_project_conversations(project_id: str):
     return await ConversationMessageRepository.get_conversation_history(project_id)
 
 
-@router.put("/api/project/{project_id}", status_code=status.HTTP_200_OK)
-async def update_project_requirement_state(project_id: str, updates: Dict[str, Any], session: AsyncSession = Depends(get_db)):
+@router.put("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
+async def update_project_requirement_state(project_id: str, updates: Dict[str, Any], session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
     """
     Directly updates the centralized RequirementState for a project in the database.
-    Useful for saving manual PRD edits and synchronizing sections.
+
+    Useful for saving manual PRD edits and synchronizing sections. Refuses to
+    mutate a locked project.
+
+    Args:
+        project_id: Project UUID string.
+        updates: Partial requirement-state payload to apply.
+        session: Active asynchronous database session.
+
+    Returns:
+        RequirementStateResponse: The updated, flattened requirement state.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 409 if the
+            project is locked; 404 if the project cannot be resolved.
     """
     try:
         UUID(project_id)
@@ -174,12 +265,25 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
     return state
 
 
-@router.post("/api/prd/export/{project_id}", status_code=status.HTTP_200_OK)
-async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depends(get_db)):
+@router.post("/api/prd/export/{project_id}", response_model=PRDExportResponse, status_code=status.HTTP_200_OK)
+async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depends(get_db)) -> PRDExportResponse:
     """
     Gathers linked user stories and acceptance criteria from the database,
     dispatches them to the local LLM, and returns a clean, finalized
     Production PRD document structured in markdown.
+
+    A new immutable PRD version record is persisted on success.
+
+    Args:
+        project_id: Project UUID.
+        db: Active asynchronous database session.
+
+    Returns:
+        PRDExportResponse: The generated PRD markdown, diagram, version and
+            version record ID.
+
+    Raises:
+        HTTPException: 404 if the project or its requirement state is missing.
     """
     logger.info(f"Triggering automated compliance PRD synthesis for project {project_id}.")
 
@@ -314,11 +418,20 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
 # PRD VERSION HISTORY API
 # ==========================================
 
-@router.get("/api/project/{project_id}/prd-versions", status_code=status.HTTP_200_OK)
-async def get_prd_versions(project_id: str, session: AsyncSession = Depends(get_db)):
+@router.get("/api/project/{project_id}/prd-versions", response_model=List[PRDVersionResponse], status_code=status.HTTP_200_OK)
+async def get_prd_versions(project_id: str, session: AsyncSession = Depends(get_db)) -> List[PRDVersionResponse]:
     """
     Retrieves all PRD versions for a project.
-    Returns an ordered list of immutable PRD version records.
+
+    Args:
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        List[PRDVersionResponse]: Immutable PRD version records, newest first.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID.
     """
     try:
         UUID(project_id)
@@ -329,10 +442,21 @@ async def get_prd_versions(project_id: str, session: AsyncSession = Depends(get_
     return versions
 
 
-@router.get("/api/project/{project_id}/prd-versions/latest", status_code=status.HTTP_200_OK)
-async def get_latest_prd_version(project_id: str, session: AsyncSession = Depends(get_db)):
+@router.get("/api/project/{project_id}/prd-versions/latest", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)
+async def get_latest_prd_version(project_id: str, session: AsyncSession = Depends(get_db)) -> PRDVersionResponse:
     """
     Retrieves the latest PRD version for a project.
+
+    Args:
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        PRDVersionResponse: The most recent immutable PRD version record.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if no
+            PRD versions exist for the project.
     """
     try:
         UUID(project_id)
@@ -345,10 +469,22 @@ async def get_latest_prd_version(project_id: str, session: AsyncSession = Depend
     return version
 
 
-@router.get("/api/project/{project_id}/prd-versions/{version_number}", status_code=status.HTTP_200_OK)
-async def get_prd_version_by_number(project_id: str, version_number: int, session: AsyncSession = Depends(get_db)):
+@router.get("/api/project/{project_id}/prd-versions/{version_number}", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)
+async def get_prd_version_by_number(project_id: str, version_number: int, session: AsyncSession = Depends(get_db)) -> PRDVersionResponse:
     """
     Retrieves a specific PRD version by version number.
+
+    Args:
+        project_id: Project UUID string.
+        version_number: Monotonic PRD version number.
+        session: Active asynchronous database session.
+
+    Returns:
+        PRDVersionResponse: The requested immutable PRD version record.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if the
+            requested version does not exist for the project.
     """
     try:
         UUID(project_id)

@@ -1,11 +1,14 @@
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
+from app.rate_limit import rate_limit_dependency
+from app.input_validation import validate_text_budget, validate_body_budget
 from app.repository import (
     RequirementRepository,
     RequirementStateRepository,
@@ -19,6 +22,14 @@ from app.schemas import (
     WorkflowRouterRequest,
     IntentDetectorRequest,
     RequirementMatcherRequest,
+    RequirementDetail,
+    RequirementLockResponse,
+    AuditRespondResponse,
+    RequirementStateResponse,
+    ProcessRequirementsResponse,
+    WorkflowRoutingResult,
+    RequirementIntentDetectionResult,
+    RequirementMatcherResult,
 )
 from app.agents import prd_workflow
 from app.event_manager import event_manager
@@ -32,10 +43,20 @@ router = APIRouter()
 # REQUIREMENT CRUD API
 # ==========================================
 
-@router.get("/api/project/{project_id}/requirements", status_code=status.HTTP_200_OK)
-async def get_project_requirements(project_id: str, session: AsyncSession = Depends(get_db)):
+@router.get("/api/project/{project_id}/requirements", response_model=List[RequirementDetail], status_code=status.HTTP_200_OK)
+async def get_project_requirements(project_id: str, session: AsyncSession = Depends(get_db)) -> List[RequirementDetail]:
     """
     Retrieve all requirements for a project, including lock status.
+
+    Args:
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        List[RequirementDetail]: All requirement records for the project.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID.
     """
     try:
         UUID(project_id)
@@ -46,10 +67,21 @@ async def get_project_requirements(project_id: str, session: AsyncSession = Depe
     return requirements
 
 
-@router.get("/api/project/{project_id}/requirements/{requirement_id}", status_code=status.HTTP_200_OK)
-async def get_requirement(project_id: str, requirement_id: str, session: AsyncSession = Depends(get_db)):
+@router.get("/api/project/{project_id}/requirements/{requirement_id}", response_model=RequirementDetail, status_code=status.HTTP_200_OK)
+async def get_requirement(project_id: str, requirement_id: str, session: AsyncSession = Depends(get_db)) -> RequirementDetail:
     """
     Retrieve a single requirement by ID, including lock status.
+
+    Args:
+        project_id: Project UUID string.
+        requirement_id: Requirement UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        RequirementDetail: The requested requirement record.
+
+    Raises:
+        HTTPException: 400 if either ID is not a valid UUID; 404 if not found.
     """
     try:
         UUID(project_id)
@@ -67,15 +99,28 @@ async def get_requirement(project_id: str, requirement_id: str, session: AsyncSe
 # REQUIREMENT LOCK / UNLOCK API
 # ==========================================
 
-@router.post("/api/project/{project_id}/requirements/{requirement_id}/lock", status_code=status.HTTP_200_OK)
+@router.post("/api/project/{project_id}/requirements/{requirement_id}/lock", response_model=RequirementLockResponse, status_code=status.HTTP_200_OK)
 async def lock_requirement(
     project_id: str,
     requirement_id: str,
     payload: RequirementLockRequest,
     session: AsyncSession = Depends(get_db)
-):
+) -> RequirementLockResponse:
     """
     Lock a requirement so it cannot be updated, deleted, merged, or modified by AI.
+
+    Args:
+        project_id: Project UUID string.
+        requirement_id: Requirement UUID string.
+        payload: Optional locking identity and reason.
+        session: Active asynchronous database session.
+
+    Returns:
+        RequirementLockResponse: Confirmation with the locked requirement record.
+
+    Raises:
+        HTTPException: 400 if either ID is not a valid UUID; 404 if the
+            requirement does not exist.
     """
     try:
         UUID(project_id)
@@ -99,15 +144,28 @@ async def lock_requirement(
     }
 
 
-@router.post("/api/project/{project_id}/requirements/{requirement_id}/unlock", status_code=status.HTTP_200_OK)
+@router.post("/api/project/{project_id}/requirements/{requirement_id}/unlock", response_model=RequirementLockResponse, status_code=status.HTTP_200_OK)
 async def unlock_requirement(
     project_id: str,
     requirement_id: str,
     payload: RequirementLockRequest,
     session: AsyncSession = Depends(get_db)
-):
+) -> RequirementLockResponse:
     """
     Unlock a requirement so it can be modified again.
+
+    Args:
+        project_id: Project UUID string.
+        requirement_id: Requirement UUID string.
+        payload: Optional unlocking identity.
+        session: Active asynchronous database session.
+
+    Returns:
+        RequirementLockResponse: Confirmation with the unlocked requirement record.
+
+    Raises:
+        HTTPException: 400 if either ID is not a valid UUID; 403 if locked by a
+            different user; 404 if the requirement does not exist.
     """
     try:
         UUID(project_id)
@@ -138,11 +196,23 @@ async def unlock_requirement(
 # AUDIT / CLARIFICATION API
 # ==========================================
 
-@router.post("/api/audit/respond/{question_id}", status_code=status.HTTP_200_OK)
-async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubmit, db: AsyncSession = Depends(get_db)):
+@router.post("/api/audit/respond/{question_id}", response_model=AuditRespondResponse, status_code=status.HTTP_200_OK)
+async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubmit, db: AsyncSession = Depends(get_db)) -> AuditRespondResponse:
     """
     Submits official BA/PO answer to close an active compliance query roadblock.
+
     Persists the resolution answer and marks the clarification question as resolved.
+
+    Args:
+        question_id: Clarification-question UUID.
+        payload: The official stakeholder resolution text.
+        db: Active asynchronous database session.
+
+    Returns:
+        AuditRespondResponse: Confirmation with the resolution timestamp.
+
+    Raises:
+        HTTPException: 404 if the clarification question does not exist.
     """
     from sqlalchemy import select
     from app.models import ClarificationQuestionModel
@@ -171,11 +241,23 @@ async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubm
     }
 
 
-@router.post("/api/clarification/submit", status_code=status.HTTP_200_OK)
-async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSession = Depends(get_db)):
+@router.post("/api/clarification/submit", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
+async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
     """
     Submits answers to clarification questions, runs Auditor compliance check,
     and updates workflow state.
+
+    Args:
+        payload: Dict containing ``project_id`` and a mapping of answers
+            (``answers[`q-<idx>`]``).
+        session: Active asynchronous database session.
+
+    Returns:
+        RequirementStateResponse: The updated requirement state.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 409 if the
+            project is locked; 404 if the project does not exist.
     """
     project_id = payload.get("project_id")
     answers = payload.get("answers", {})
@@ -225,8 +307,16 @@ async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSessi
 # MULTI-AGENT PROCESS REQUIREMENTS API
 # ==========================================
 
-@router.post("/api/process-requirements", status_code=status.HTTP_200_OK)
-async def post_process_requirements(request: ProcessRequirementsRequest, session: AsyncSession = Depends(get_db)):
+@router.post("/api/process-requirements", response_model=ProcessRequirementsResponse, status_code=status.HTTP_200_OK)
+async def post_process_requirements(
+    request: ProcessRequirementsRequest,
+    session: AsyncSession = Depends(get_db),
+    _rate_limit: None = Depends(
+        rate_limit_dependency(
+            "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
+        )
+    ),
+) -> ProcessRequirementsResponse:
     """
     Asynchronously invokes the LangGraph multi-agent workflow (prd_workflow)
     to process raw requirements, audit compliance, or build PRD & architectural diagrams.
@@ -238,10 +328,29 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
     3. If GENERAL_CHAT: generate response with project context, persist, return (no LangGraph)
     4. If REQUIREMENT_REQUEST: proceed to LangGraph workflow
     5. Persist every assistant response
+
+    Args:
+        request: Processing payload (project ID, raw input, target agent,
+            structured requirements, version context).
+        session: Active asynchronous database session.
+
+    Returns:
+        ProcessRequirementsResponse: The workflow outcome, structured
+            requirements, audit result, PRD/diagram content, and pending merge
+            metadata.
+
+    Raises:
+        HTTPException: 413 if the request payload (raw input + structured
+            requirements) exceeds ``MAX_CONTEXT_TOKENS``; 500 if the
+            multi-agent workflow execution fails.
     """
     from datetime import datetime, timedelta
 
     logger.info(f"Triggering on-demand {request.target_agent} agent for project {request.project_id}")
+
+    # Finding #39: enforce MAX_CONTEXT_TOKENS on the incoming processing payload
+    # (raw_input + structured_requirements) before spending any LLM budget.
+    validate_body_budget(request.model_dump(), "Process-requirements request")
 
     # ==========================================
     # STEP 1: Persist every user message before any intent detection or agent routing
@@ -609,22 +718,66 @@ async def post_process_requirements(request: ProcessRequirementsRequest, session
 # WORKFLOW ROUTER / INTENT DETECTOR / MATCHER API
 # ==========================================
 
-@router.post("/api/workflow-router", status_code=status.HTTP_200_OK)
-async def post_workflow_router(payload: WorkflowRouterRequest):
+@router.post("/api/workflow-router", response_model=WorkflowRoutingResult, status_code=status.HTTP_200_OK)
+async def post_workflow_router(
+    payload: WorkflowRouterRequest,
+    _rate_limit: None = Depends(
+        rate_limit_dependency(
+            "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
+        )
+    ),
+) -> WorkflowRoutingResult:
     """
     Direct endpoint for testing and executing the Workflow Router.
+
     Classifies incoming message into CHAT, QUESTION, COMMAND, or REQUIREMENT.
+
+    Args:
+        payload: Contains the user ``message`` to classify.
+        _rate_limit: Injected rate limiter (Finding #39).
+
+    Returns:
+        WorkflowRoutingResult: The classified workflow type with confidence and reason.
+
+    Raises:
+        HTTPException: 413 if ``message`` exceeds ``MAX_CONTEXT_TOKENS``.
     """
     from app.semantic_service import classify_workflow
+
+    # Finding #39: enforce MAX_CONTEXT_TOKENS on the incoming message.
+    validate_text_budget(payload.message, "Workflow-router message")
     return await classify_workflow(payload.message)
 
 
-@router.post("/api/intent-detector", status_code=status.HTTP_200_OK)
-async def post_intent_detector(payload: IntentDetectorRequest, db: AsyncSession = Depends(get_db)):
+@router.post("/api/intent-detector", response_model=RequirementIntentDetectionResult, status_code=status.HTTP_200_OK)
+async def post_intent_detector(
+    payload: IntentDetectorRequest,
+    db: AsyncSession = Depends(get_db),
+    _rate_limit: None = Depends(
+        rate_limit_dependency(
+            "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
+        )
+    ),
+) -> RequirementIntentDetectionResult:
     """
-    Direct endpoint for testing and executing Requirement Intent Detection (GENERAL_CHAT, REQUIREMENT_REQUEST).
+    Direct endpoint for testing and executing Requirement Intent Detection
+    (GENERAL_CHAT, REQUIREMENT_REQUEST).
+
+    Args:
+        payload: Contains the user ``message`` and optional project context.
+        db: Active asynchronous database session.
+        _rate_limit: Injected rate limiter (Finding #39).
+
+    Returns:
+        RequirementIntentDetectionResult: The detected intent with confidence and reason.
+
+    Raises:
+        HTTPException: 413 if ``message`` exceeds ``MAX_CONTEXT_TOKENS``.
     """
     from app.semantic_service import detect_requirement_intent
+
+    # Finding #39: enforce MAX_CONTEXT_TOKENS on the incoming message.
+    validate_text_budget(payload.message, "Intent-detector message")
 
     current_stories = []
     if payload.project_id:
@@ -638,13 +791,39 @@ async def post_intent_detector(payload: IntentDetectorRequest, db: AsyncSession 
     return result
 
 
-@router.post("/api/requirement-matcher", status_code=status.HTTP_200_OK)
-async def post_requirement_matcher(payload: RequirementMatcherRequest, db: AsyncSession = Depends(get_db)):
+@router.post("/api/requirement-matcher", response_model=RequirementMatcherResult, status_code=status.HTTP_200_OK)
+async def post_requirement_matcher(
+    payload: RequirementMatcherRequest,
+    db: AsyncSession = Depends(get_db),
+    _rate_limit: None = Depends(
+        rate_limit_dependency(
+            "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
+        )
+    ),
+) -> RequirementMatcherResult:
     """
     Direct endpoint for testing and executing the Requirement Matcher Agent.
-    Determines which existing requirement(s) the user's message refers to before any modification occurs.
+
+    Determines which existing requirement(s) the user's message refers to
+    before any modification occurs.
+
+    Args:
+        payload: Contains the user ``message``, optional project context and
+            pre-detected intent.
+        db: Active asynchronous database session.
+        _rate_limit: Injected rate limiter (Finding #39).
+
+    Returns:
+        RequirementMatcherResult: The matched requirement, action recommendation
+            and any ambiguous candidates.
+
+    Raises:
+        HTTPException: 413 if ``message`` exceeds ``MAX_CONTEXT_TOKENS``.
     """
     from app.semantic_service import match_requirement, detect_requirement_intent
+
+    # Finding #39: enforce MAX_CONTEXT_TOKENS on the incoming message.
+    validate_text_budget(payload.message, "Requirement-matcher message")
 
     current_stories = []
     if payload.project_id:

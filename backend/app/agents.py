@@ -13,8 +13,10 @@ from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repository import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
-from app.prompt_loader import load_prompt
+from app.prompt_loader import load_prompt, _PromptProxy
 from app.config import settings
+from app.llm_utils import invoke_llm_structured
+from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
 
 
 # Set up logging configuration for the multi-agent framework
@@ -24,16 +26,6 @@ logger = logging.getLogger("app.agents")
 # ==========================================
 # SYSTEM PROMPTS (LOADED DYNAMICALLY VIA PROMPT LOADER)
 # ==========================================
-class _PromptProxy:
-    def __init__(self, name: str):
-        self.name = name
-    def __str__(self) -> str:
-        return load_prompt(self.name)
-    def __add__(self, other: str) -> str:
-        return load_prompt(self.name) + str(other)
-    def __radd__(self, other: str) -> str:
-        return str(other) + load_prompt(self.name)
-
 GATHERER_PROMPT = _PromptProxy("gatherer")
 AUDITOR_PROMPT = _PromptProxy("auditor")
 ARCHITECT_PROMPT = _PromptProxy("architect")
@@ -135,15 +127,33 @@ async def get_or_init_requirement_state(project_id: str, session: Optional[Async
 # GRAPH NODES (THE AGENTS)
 # ==========================================
 
+def _llm_content_length(raw) -> int:
+    """Return the character length of a likely LLM payload without rendering it."""
+    if isinstance(raw, str):
+        return len(raw)
+    if raw is None:
+        return 0
+    try:
+        return len(list(raw))
+    except TypeError:
+        return 0
+
+
 def extract_content_from_response(response) -> str:
-    """Robustly extracts content from ChatOpenAI response."""
-    # 1. Log everything
-    logger.info(f"LLM Response Object Type: {type(response)}")
-    # Log representation, limiting length to avoid excessive logging
-    logger.info(f"LLM Response Object Repr: {repr(response)[:1000]}")
-    logger.info(f"LLM Response Content: {response.content}")
-    logger.info(f"LLM Response Additional Kwargs: {response.additional_kwargs}")
-    logger.info(f"LLM Response Metadata: {response.response_metadata}")
+    """Robustly extracts content from ChatOpenAI response.
+
+    Logging is intentionally conservative here: the full response object
+    (repr, content, additional_kwargs and response_metadata) is never written
+    to the logs because it is noisy and may leak sensitive data such as PII or
+    project details embedded in LLM output. Only a short, non-sensitive summary
+    is emitted, and only at DEBUG level.
+    """
+    # 1. Log a concise, redacted summary of the response (no payload data).
+    logger.debug(
+        "Received LLM response of type '%s' (top-level content: %d chars).",
+        type(response).__name__,
+        _llm_content_length(getattr(response, "content", None)),
+    )
 
     # 2. Extract content
     content = ""
@@ -154,206 +164,17 @@ def extract_content_from_response(response) -> str:
             content = response.additional_kwargs["content"]
         # Handle reasoning models (if reasoning_content is present, look for the final answer)
         if "reasoning_content" in response.additional_kwargs:
-            logger.info("Reasoning mode detected.")
+            logger.debug("Reasoning mode detected.")
             # If main content is empty, check if final answer is in another field or mixed in
             if not content:
                 content = response.additional_kwargs.get("final_answer", "")
     elif hasattr(response, "response_metadata") and "content" in response.response_metadata:
          content = response.response_metadata["content"]
-         
-    logger.info(f"Extracted content: {content[:500] if content else 'EMPTY'}")
+
+    # Log only the length of the extracted content, never the content itself.
+    logger.debug("Extracted LLM content of %d chars.", _llm_content_length(content))
     return content
 
-def normalize_ticket_code(code: Optional[str]) -> str:
-    if not code:
-        return ""
-    code = str(code).strip().upper()
-    if code.startswith("US-"):
-        num_part = code[3:]
-        if num_part.isdigit():
-            return f"US-{int(num_part):03d}"
-    return code
-
-def normalize_title(title: Optional[str]) -> str:
-    if not title:
-        return ""
-    return " ".join(str(title).lower().strip().split())
-
-def generate_next_ticket_code(stories: List[Dict[str, Any]]) -> str:
-    max_num = 0
-    for s in stories:
-        tc = s.get("ticket_code", "")
-        if tc and str(tc).strip().upper().startswith("US-"):
-            num_part = str(tc).strip().upper()[3:]
-            if num_part.isdigit():
-                max_num = max(max_num, int(num_part))
-    return f"US-{max_num + 1:03d}"
-
-def merge_user_stories(
-    existing_stories: List[Dict[str, Any]],
-    new_incoming_stories: List[Dict[str, Any]],
-    semantic_recs: Optional[List[Dict[str, Any]]] = None
-) -> List[Dict[str, Any]]:
-    """
-    Merges newly generated user stories with existing user stories.
-    Requirements:
-    - Load all existing User Stories.
-    - Merge newly generated User Stories.
-    - Keep unchanged stories (change_type="unchanged", status="active").
-    - Update modified stories (change_type="updated", status="active").
-    - Insert new stories (change_type="created", status="active").
-    - Archive deleted stories (change_type="archived", status="archived").
-    """
-    semantic_recs = semantic_recs or []
-    
-    rec_by_code = {}
-    rec_by_title = {}
-    for rec in semantic_recs:
-        target_id = rec.get("target_requirement_id")
-        action = rec.get("recommended_action")
-        if target_id and action:
-            norm_target = normalize_ticket_code(target_id)
-            if norm_target:
-                rec_by_code[norm_target] = action
-            else:
-                rec_by_title[normalize_title(target_id)] = action
-
-    existing_by_id = {}
-    existing_by_code = {}
-    existing_by_title = {}
-    
-    active_existing = [s for s in existing_stories if s.get("status", "active") == "active"]
-    
-    for s in active_existing:
-        if s.get("id"):
-            existing_by_id[str(s["id"])] = s
-        code = normalize_ticket_code(s.get("ticket_code"))
-        if code and code != "US-000":
-            existing_by_code[code] = s
-        title = normalize_title(s.get("story_title"))
-        if title:
-            existing_by_title[title] = s
-
-    matched_existing_ptrs = set()
-    merged_stories: List[Dict[str, Any]] = []
-
-    # 1. Process incoming stories
-    for inc in new_incoming_stories:
-        inc_id = str(inc["id"]) if inc.get("id") else None
-        inc_code = normalize_ticket_code(inc.get("ticket_code"))
-        inc_title = normalize_title(inc.get("story_title"))
-        
-        matched = None
-        if inc_id and inc_id in existing_by_id:
-            matched = existing_by_id[inc_id]
-        elif inc_code and inc_code in existing_by_code:
-            matched = existing_by_code[inc_code]
-        elif inc_title and inc_title in existing_by_title:
-            matched = existing_by_title[inc_title]
-
-        if matched:
-            matched_existing_ptrs.add(id(matched))
-            
-            rec_act = rec_by_code.get(inc_code) or rec_by_code.get(normalize_ticket_code(matched.get("ticket_code"))) or rec_by_title.get(inc_title)
-            
-            if rec_act == "ARCHIVE" or inc.get("status") == "archived" or inc.get("change_type") == "archived":
-                archived_story = dict(matched)
-                archived_story["status"] = "archived"
-                archived_story["change_type"] = "archived"
-                merged_stories.append(archived_story)
-                continue
-
-            # Compare fields to check if modified
-            m_title = (matched.get("story_title") or "").strip()
-            m_as_a = (matched.get("as_a") or "").strip()
-            m_i_want = (matched.get("i_want_to") or "").strip()
-            m_so_that = (matched.get("so_that") or "").strip()
-            m_ac = matched.get("acceptance_criteria", [])
-
-            i_title = (inc.get("story_title") or m_title).strip()
-            i_as_a = (inc.get("as_a") or m_as_a).strip()
-            i_i_want = (inc.get("i_want_to") or m_i_want).strip()
-            i_so_that = (inc.get("so_that") or m_so_that).strip()
-            i_ac = inc.get("acceptance_criteria") if "acceptance_criteria" in inc else m_ac
-
-            title_diff = (m_title != i_title)
-            as_a_diff = (m_as_a != i_as_a)
-            i_want_diff = (m_i_want != i_i_want)
-            so_that_diff = (m_so_that != i_so_that)
-            ac_diff = (m_ac != i_ac)
-
-            field_changed = title_diff or as_a_diff or i_want_diff or so_that_diff or ac_diff
-
-            if rec_act == "UPDATE":
-                is_modified = True
-            elif rec_act == "NO_CHANGE":
-                is_modified = False
-            else:
-                is_modified = field_changed
-
-            updated_story = dict(matched)
-            updated_story["story_title"] = i_title
-            updated_story["as_a"] = i_as_a
-            updated_story["i_want_to"] = i_i_want
-            updated_story["so_that"] = i_so_that
-            updated_story["acceptance_criteria"] = i_ac
-            updated_story["status"] = "active"
-            updated_story["change_type"] = "updated" if is_modified else "unchanged"
-
-            if inc_code and inc_code != "US-000":
-                updated_story["ticket_code"] = inc_code
-            elif not updated_story.get("ticket_code"):
-                updated_story["ticket_code"] = matched.get("ticket_code") or "US-001"
-
-            merged_stories.append(updated_story)
-
-        else:
-            # Unmatched incoming -> New story insertion
-            rec_act = rec_by_code.get(inc_code) or rec_by_title.get(inc_title)
-            if rec_act == "ARCHIVE" or inc.get("status") == "archived":
-                continue
-
-            ticket_code = inc_code
-            if not ticket_code or ticket_code == "US-000" or ticket_code in existing_by_code:
-                ticket_code = generate_next_ticket_code(active_existing + merged_stories)
-
-            new_story = {
-                "ticket_code": ticket_code,
-                "story_title": inc.get("story_title", "Untitled Story"),
-                "as_a": inc.get("as_a", ""),
-                "i_want_to": inc.get("i_want_to", ""),
-                "so_that": inc.get("so_that", ""),
-                "acceptance_criteria": inc.get("acceptance_criteria", []),
-                "status": "active",
-                "change_type": "created"
-            }
-            if inc.get("id"):
-                new_story["id"] = inc["id"]
-
-            merged_stories.append(new_story)
-
-    # 2. Process existing active stories that were NOT matched by incoming
-    for ex in active_existing:
-        if id(ex) in matched_existing_ptrs:
-            continue
-
-        ex_code = normalize_ticket_code(ex.get("ticket_code"))
-        ex_title = normalize_title(ex.get("story_title"))
-        rec_act = rec_by_code.get(ex_code) or rec_by_title.get(ex_title)
-
-        if rec_act == "ARCHIVE":
-            archived_story = dict(ex)
-            archived_story["status"] = "archived"
-            archived_story["change_type"] = "archived"
-            merged_stories.append(archived_story)
-        else:
-            # KEEP UNCHANGED!
-            unchanged_story = dict(ex)
-            unchanged_story["status"] = "active"
-            unchanged_story["change_type"] = "unchanged"
-            merged_stories.append(unchanged_story)
-
-    return merged_stories
 
 async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     """
@@ -669,54 +490,26 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         # Strategy: Prefer with_structured_output, fallback to raw LLM invocation + JSON parsing
         result = None
         parsing_error = None
-        
-        # Attempt 1: with_structured_output
+
         try:
-            logger.info("Attempting .with_structured_output() in gatherer")
-            chain = prompt_template | llm.with_structured_output(GatheredRequirements)
-            parsed_output = await chain.ainvoke({
-                "raw_input": raw_input,
-                "detected_intent": detected_intent,
-                "current_context": current_context,
-                "recommendations": recs_str,
-                "format_instructions": "Output ONLY raw JSON. No markdown."
-            })
-            result = parsed_output.dict() if hasattr(parsed_output, "dict") else dict(parsed_output)
-            logger.info("Successfully obtained structured output.")
-        except Exception as e:
-            logger.warning(f"with_structured_output failed in gatherer: {str(e)}. Retrying with raw invocation.")
-            
-            # Attempt 2: Raw invocation + robust manual parsing
-            try:
-                raw_chain = prompt_template | llm
-                raw_response = await raw_chain.ainvoke({
+            result = await invoke_llm_structured(
+                llm,
+                prompt_template,
+                GatheredRequirements,
+                variables={
                     "raw_input": raw_input,
                     "detected_intent": detected_intent,
                     "current_context": current_context,
                     "recommendations": recs_str,
-                    "format_instructions": format_instructions
-                })
-                
-                raw_content = extract_content_from_response(raw_response)
-                
-                logger.info(f"LLM completion length: {len(raw_content)}. First 500 chars: {raw_content[:500]}")
-                
-                # Resilient cleanup: remove markdown, whitespace, etc.
-                clean_content = raw_content.strip()
-                if clean_content.startswith("```json"): clean_content = clean_content[7:]
-                elif clean_content.startswith("```"): clean_content = clean_content[3:]
-                if clean_content.endswith("```"): clean_content = clean_content[:-3]
-                clean_content = clean_content.strip()
-                
-                try:
-                    result = json.loads(clean_content)
-                except json.JSONDecodeError as jde:
-                    logger.error(f"Manual JSON parsing failed. Raw: {raw_content[:500]}... Error: {str(jde)}")
-                    raise jde
-                    
-            except Exception as e2:
-                parsing_error = f"All parsing attempts failed: {str(e2)}"
-                logger.error(parsing_error)
+                    "format_instructions": "Output ONLY raw JSON. No markdown.",
+                },
+                description="gatherer",
+                format_instructions=format_instructions,
+            )
+            logger.info("Successfully obtained structured output.")
+        except Exception as e2:
+            parsing_error = f"All parsing attempts failed: {str(e2)}"
+            logger.error(parsing_error)
 
     else:
         result = passed_structured or {
@@ -773,7 +566,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
                 semantic_recs=semantic_recs
             )
             
-            active_stories = [s for s in merged_stories if s.get("status", "active") == "active"]
+            active_stories = filter_active_stories(merged_stories)
             
             req_items_output.append({
                 "requirement_code": req_code,
@@ -784,8 +577,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             
             all_merged_stories.extend(merged_stories)
             all_active_stories.extend(active_stories)
-            for story in active_stories:
-                all_ac.extend(story.get("acceptance_criteria", []))
+            all_ac.extend(collect_acceptance_criteria(active_stories))
         
         # Also include any existing stories that were NOT matched by any requirement
         # by checking the merge result - stories from existing requirements not in LLM output
@@ -819,10 +611,8 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             semantic_recs=semantic_recs
         )
         
-        active_stories = [s for s in merged_stories if s.get("status", "active") == "active"]
-        ac_list = []
-        for story in active_stories:
-            ac_list.extend(story.get("acceptance_criteria", []))
+        active_stories = filter_active_stories(merged_stories)
+        ac_list = collect_acceptance_criteria(active_stories)
         
         # Wrap into a single default requirement
         req_state["requirements"] = [{

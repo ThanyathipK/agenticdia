@@ -322,7 +322,7 @@ export const TABLES: TableSchema[] = [
   }
 ];
 
-export interface UserRow {
+export type UserRow = {
   id: string;
   email: string;
   full_name: string;
@@ -330,7 +330,7 @@ export interface UserRow {
   created_at: string;
 }
 
-export interface ProjectRow {
+export type ProjectRow = {
   id: string;
   user_id: string;
   name: string;
@@ -343,7 +343,7 @@ export interface ProjectRow {
   created_at: string;
 }
 
-export interface EpicRow {
+export type EpicRow = {
   id: string;
   project_id: string;
   epic_name: string;
@@ -353,7 +353,7 @@ export interface EpicRow {
   created_at: string;
 }
 
-export interface RequirementRow {
+export type RequirementRow = {
   id: string;
   project_id: string;
   epic_id: string | null;
@@ -370,7 +370,7 @@ export interface RequirementRow {
   created_at: string;
 }
 
-export interface UserStoryRow {
+export type UserStoryRow = {
   id: string;
   project_id: string | null;
   requirement_id: string;
@@ -390,7 +390,7 @@ export interface UserStoryRow {
   created_at: string;
 }
 
-export interface AcceptanceCriterionRow {
+export type AcceptanceCriterionRow = {
   id: string;
   user_story_id: string;
   criteria_text: string;
@@ -405,7 +405,7 @@ export interface AcceptanceCriterionRow {
   created_at: string;
 }
 
-export interface AuditResultRow {
+export type AuditResultRow = {
   id: string;
   requirement_id: string;
   audit_version_reviewed: number;
@@ -415,7 +415,7 @@ export interface AuditResultRow {
   created_at: string;
 }
 
-export interface ClarificationQuestionRow {
+export type ClarificationQuestionRow = {
   id: string;
   audit_result_id: string;
   checklist_category: string;
@@ -430,7 +430,7 @@ export interface ClarificationQuestionRow {
   created_at: string;
 }
 
-export interface PrdDocumentRow {
+export type PrdDocumentRow = {
   id: string;
   project_id: string;
   version: number;
@@ -443,7 +443,7 @@ export interface PrdDocumentRow {
   created_at: string;
 }
 
-export interface VersionHistoryRow {
+export type VersionHistoryRow = {
   id: string;
   project_id: string;
   requirement_id: string;
@@ -454,7 +454,7 @@ export interface VersionHistoryRow {
   created_at: string;
 }
 
-export interface PrdVersionRow {
+export type PrdVersionRow = {
   id: string;
   project_id: string;
   version_number: number;
@@ -464,7 +464,7 @@ export interface PrdVersionRow {
   created_at: string;
 }
 
-export interface ConversationMessageRow {
+export type ConversationMessageRow = {
   id: string;
   conversation_id: string | null;
   project_id: string;
@@ -475,7 +475,7 @@ export interface ConversationMessageRow {
   created_at: string;
 }
 
-export interface ArtifactEventLogRow {
+export type ArtifactEventLogRow = {
   event_id: string;
   artifact_type: string;
   artifact_id: string;
@@ -484,6 +484,26 @@ export interface ArtifactEventLogRow {
   new_value: string | null; // JSON string
   performed_by: string;
   timestamp: string;
+}
+
+/**
+ * Generic shape used by the Schema Explorer's simulated datagrid.
+ *
+ * The grid renders rows across many heterogeneous tables and reads arbitrary
+ * columns dynamically (`row[col.name]`), so an index signature is included.
+ * The explicit optional fields cover the columns shared across several tables
+ * that the grid accesses directly. Note that not every table has an `id`
+ * (e.g. `ArtifactEventLogRow` uses `event_id`), hence `id` is optional.
+ *
+ * Every concrete row type (`UserRow`, `ProjectRow`, ...) is structurally
+ * assignable to this shape, which lets the datagrid drop the previous `any`
+ * typing while keeping the code type-safe.
+ */
+export interface GridRow {
+  id?: string;
+  epic_id?: string | null;
+  is_locked?: boolean;
+  [key: string]: unknown;
 }
 
 export const INITIAL_USERS: UserRow[] = [

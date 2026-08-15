@@ -36,11 +36,23 @@ class Settings(BaseSettings):
     # Local LLM / LM Studio Orchestration Settings
     LM_STUDIO_URL: str = "http://localhost:1234/v1"
     LM_STUDIO_API_KEY: str = "lm-studio"
-    LM_STUDIO_MODEL_FALLBACK: str = "qwen2.5-7b-instruct"
+    # Default model id used for inference. Override via LM_STUDIO_MODEL_FALLBACK in
+    # backend/.env to match whatever model is loaded in LM Studio (no longer a
+    # hard-coded reference — see Finding #40). backend/.env.example ships qwen3.5.
+    LM_STUDIO_MODEL_FALLBACK: str = "qwen3.5-9b-instruct"
 
     # Context & Memory Safety Constraints (optimised for MacBook Air M4 with 16GB RAM)
     MAX_CONTEXT_TOKENS: int = 8192
     TEMPERATURE: float = 0.0
+
+    # Rate limiting (in-process sliding window; see app/rate_limit.py).
+    # Finding #39: LLM-facing endpoints accept arbitrary input, so inbound
+    # requests are throttled per client IP per scope.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_CHAT_LIMIT: int = 30
+    RATE_LIMIT_CHAT_WINDOW: int = 60
+    RATE_LIMIT_WORKFLOW_LIMIT: int = 20
+    RATE_LIMIT_WORKFLOW_WINDOW: int = 60
 
     # Application details
     APP_NAME: str = "Enterprise Requirements Architecture Core"

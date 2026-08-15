@@ -34,3 +34,18 @@ def load_prompt(prompt_name: str) -> str:
     except Exception as e:
         logger.error(f"Failed to read prompt file {filepath}: {str(e)}")
         raise e
+
+
+class _PromptProxy:
+    """
+    Lazily resolves a prompt template when it is used in string context.
+    Shared by agents.py and semantic_service.py to avoid duplicate definitions.
+    """
+    def __init__(self, name: str):
+        self.name = name
+    def __str__(self) -> str:
+        return load_prompt(self.name)
+    def __add__(self, other: str) -> str:
+        return load_prompt(self.name) + str(other)
+    def __radd__(self, other: str) -> str:
+        return str(other) + load_prompt(self.name)

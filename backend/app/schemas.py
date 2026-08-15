@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime
@@ -183,3 +183,251 @@ class RequirementMatcherRequest(BaseModel):
     message: str
     project_id: Optional[str] = None
     detected_intent: Optional[str] = "UPDATE"
+# ==========================================
+# 9. RESPONSE MODELS (OPENAPI / DOCS)
+# ==========================================
+
+class HealthResponse(BaseModel):
+    """Liveness + LM Studio readiness payload returned by ``GET /api/health``.
+
+    Finding #40: the liveness probe now runs a real ``GET /models`` round-trip
+    against the local LM Studio gateway so callers (uptime checks, the React UI)
+    can detect an offline LLM and degrade gracefully instead of assuming it runs.
+    ``status`` is always ``"online"`` when the app itself is reachable; the LM
+    Studio connectivity is reported separately via ``lm_studio_online``.
+    """
+    status: str = Field(..., description="Liveness status, always 'online' when the app is reachable.")
+    app_name: str = Field(..., description="Application name as configured.")
+    local_inference_gateway: str = Field(..., description="Local (LM Studio) inference endpoint URL.")
+    macbook_context_window_budget: str = Field(..., description="Configured maximum context-window budget, e.g. '8000 tokens'.")
+    lm_studio_online: bool = Field(False, description="True when the local LM Studio server responded to the /models probe.")
+    lm_studio_model: Optional[str] = Field(None, description="Configured LM_STUDIO_MODEL_FALLBACK id.")
+    lm_studio_model_loaded: bool = Field(False, description="True when the configured model is currently loaded in LM Studio.")
+    lm_studio_loaded_models: List[str] = Field(default_factory=list, description="Model ids currently served by the local gateway.")
+    lm_studio_latency_ms: Optional[float] = Field(None, description="Probe round-trip latency in milliseconds (None when offline).")
+    lm_studio_error: Optional[str] = Field(None, description="Human-readable failure reason when the probe could not reach LM Studio.")
+    lm_studio_last_checked: Optional[str] = Field(None, description="ISO-8601 UTC timestamp of the last successful probe result.")
+
+
+class ChatResponse(BaseModel):
+    """Assistant reply returned by ``POST /api/chat``."""
+    message: str = Field(..., description="The assistant's generated reply text.")
+
+
+class ProjectSummary(BaseModel):
+    """Project summary record returned by project list/detail endpoints."""
+    id: str = Field(..., description="Project UUID string.")
+    name: str = Field(..., description="Human-readable project name.")
+    description: Optional[str] = Field(None, description="Optional functional-scope description.")
+    industry_standard: str = Field(..., description="Target compliance guideline standard.")
+
+
+class ProjectCreated(BaseModel):
+    """Payload confirming a successfully created project."""
+    id: str = Field(..., description="Newly created project UUID string.")
+    name: str = Field(..., description="Created project name.")
+
+
+class ProjectDeleteResponse(BaseModel):
+    """Payload confirming a project was deleted."""
+    status: str = Field(..., description="Always 'deleted' on success.")
+    project_id: str = Field(..., description="UUID string of the deleted project.")
+
+
+class RequirementStateResponse(BaseModel):
+    """
+    Flattened requirement-state payload shared by project/requirement routes.
+
+    Because workflow agents may attach additional domain fields (e.g. ``epic_name``,
+    ``semantic_recommendations``), unknown keys are preserved via ``extra='allow'``
+    rather than being dropped during response serialization.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    project_id: str = Field(..., description="Project UUID string.")
+    project_name: Optional[str] = Field(None, description="Human-readable project name.")
+    requirements: List[Any] = Field(default_factory=list, description="Requirement entries, each carrying its own user_stories.")
+    business_goals: List[Any] = Field(default_factory=list, description="Parsed business-goal statements.")
+    actors: List[Any] = Field(default_factory=list, description="System actor definitions.")
+    user_stories: List[Any] = Field(default_factory=list, description="Flattened list of active user stories.")
+    acceptance_criteria: List[Any] = Field(default_factory=list, description="Flattened list of acceptance criteria.")
+    clarification_questions: List[Any] = Field(default_factory=list, description="Open/resolved clarification questions.")
+    validation_status: str = Field("pending", description="Compliance validation status: 'pending', 'valid' or 'invalid'.")
+    generated_prd: str = Field("", description="Markdown PRD content.")
+    generated_diagrams: str = Field("", description="Mermaid diagram source.")
+    current_workflow_state: str = Field("gatherer_node", description="Current multi-agent workflow node.")
+    version_number: int = Field(1, description="Current requirement-document revision.")
+    updated_at: Optional[str] = Field(None, description="ISO8601 timestamp of the last update.")
+    conversation_history: List[Any] = Field(default_factory=list, description="Persisted conversation messages for the project.")
+
+
+class ConversationMessageResponse(BaseModel):
+    """A single persisted conversation message."""
+    id: str = Field(..., description="Message UUID string.")
+    conversation_id: str = Field(..., description="Conversation/thread UUID string.")
+    project_id: str = Field(..., description="Project UUID string the message belongs to.")
+    role: str = Field(..., description="Message role: 'user' or 'assistant'.")
+    message: str = Field(..., description="Raw message text.")
+    content: str = Field(..., description="Alias of the raw message text.")
+    workflow_state: str = Field("", description="Workflow state captured at persistence time.")
+    intent: str = Field("", description="Detected intent captured at persistence time.")
+    created_at: str = Field("", description="ISO8601 timestamp of the message.")
+
+
+class RequirementDetail(BaseModel):
+    """Requirement record including lock metadata."""
+    id: str = Field(..., description="Requirement UUID string.")
+    project_id: str = Field(..., description="Owning project UUID string.")
+    epic_id: Optional[str] = Field(None, description="Owning epic UUID string, if any.")
+    requirement_code: str = Field(..., description="Requirement code (e.g. REQ-001).")
+    title: str = Field(..., description="Requirement title.")
+    description: Optional[str] = Field(None, description="Requirement description.")
+    priority: Optional[str] = Field(None, description="Priority level.")
+    status: str = Field(..., description="Status: 'active' or 'deleted'.")
+    is_locked: bool = Field(False, description="Whether the requirement is locked against edits.")
+    locked_by: Optional[str] = Field(None, description="Identifier of the locking user/agent.")
+    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Reason supplied when locking.")
+
+
+class RequirementLockResponse(BaseModel):
+    """Payload returned when locking/unlocking a requirement."""
+    status: str = Field(..., description="'locked' or 'unlocked'.")
+    requirement: RequirementDetail = Field(..., description="The affected requirement record.")
+class PRDVersionResponse(BaseModel):
+    """Immutable PRD version record."""
+    version_id: str = Field(..., description="PRD version UUID string.")
+    project_id: str = Field(..., description="Project UUID string.")
+    version_number: int = Field(..., description="Monotonic version number.")
+    generated_prd: str = Field("", description="Markdown PRD content for this version.")
+    generated_diagram: str = Field("", description="Mermaid diagram source for this version.")
+    generated_by: str = Field("automated_agent", description="Actor that produced the version.")
+    created_at: str = Field("", description="ISO8601 creation timestamp.")
+
+
+class PRDExportResponse(BaseModel):
+    """Payload returned by the PRD export endpoint."""
+    project_id: UUID = Field(..., description="Project UUID.")
+    version: int = Field(..., description="Persisted PRD version number.")
+    version_id: Optional[str] = Field(None, description="PRD version UUID string, null if persistence failed.")
+    prd_markdown: str = Field(..., description="Generated PRD markdown.")
+    mermaid_diagram: str = Field(..., description="Generated Mermaid diagram source.")
+
+
+class ArtifactLockResponse(BaseModel):
+    """Payload returned when locking/unlocking/reading a generic artifact."""
+    status: str = Field(..., description="Operation status: 'locked', 'unlocked' or 'lock_status'.")
+    artifact: Dict[str, Any] = Field(..., description="Lock metadata for the artifact.")
+
+
+class LockStatusResponse(BaseModel):
+    """Lock metadata returned by the artifact lock-status endpoint."""
+    artifact_type: str = Field(..., description="Type of artifact queried.")
+    artifact_id: str = Field(..., description="UUID string of the artifact.")
+    is_locked: bool = Field(False, description="Whether the artifact is currently locked.")
+    locked_by: Optional[str] = Field(None, description="Identifier of the current locking user/agent.")
+    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp, if locked.")
+    lock_reason: Optional[str] = Field(None, description="Reason supplied when locking, if any.")
+
+
+class PendingActionResponse(BaseModel):
+    """A human-in-the-loop pending (merge) action awaiting confirmation."""
+    id: str = Field(..., description="Pending-action UUID string.")
+    project_id: str = Field(..., description="Project UUID string.")
+    action_type: str = Field(..., description="Action type (e.g. MERGE).")
+    target_requirement_id: Optional[str] = Field(None, description="Target requirement code/id, if any.")
+    original_user_message: str = Field(..., description="Original message that triggered the action.")
+    proposed_changes: Dict[str, Any] = Field(default_factory=dict, description="Proposed merged requirement state.")
+    affected_user_story_ids: List[str] = Field(default_factory=list, description="Affected user-story IDs.")
+    affected_acceptance_criteria_ids: List[str] = Field(default_factory=list, description="Affected acceptance-criteria IDs.")
+    workflow_stage: str = Field(..., description="Workflow stage captured when the action was created.")
+    status: str = Field(..., description="Action status (e.g. WAITING_CONFIRMATION).")
+    expires_at: str = Field(..., description="ISO8601 expiry timestamp.")
+
+
+class ConfirmActionResponse(BaseModel):
+    """Payload returned after a pending action is confirmed and persisted."""
+    status: str = Field(..., description="Always 'confirmed' on success.")
+    requirement_state: RequirementStateResponse = Field(..., description="The merged requirement state that was persisted.")
+
+
+class ActionStatusResponse(BaseModel):
+    """Generic single-status payload (e.g. cancel-action response)."""
+    status: str = Field(..., description="Result status string.")
+
+
+class AuditRespondResponse(BaseModel):
+    """Payload returned after answering an audit clarification question."""
+    status: str = Field(..., description="Always 'success' on completion.")
+    message: str = Field(..., description="Human-readable confirmation message.")
+    resolved_at: str = Field(..., description="ISO8601 timestamp of the resolution.")
+    is_resolved: bool = Field(..., description="True once the question is resolved.")
+class EventLogEntry(BaseModel):
+    """A single append-only artifact event-log record."""
+    event_id: str = Field(..., description="Event UUID string.")
+    artifact_type: str = Field(..., description="Type of artifact (requirement, user_story, etc.).")
+    artifact_id: str = Field(..., description="UUID string of the affected artifact.")
+    action: str = Field(..., description="Action: CREATE, UPDATE, DELETE, ARCHIVE, LOCK or UNLOCK.")
+    old_value: Optional[Dict[str, Any]] = Field(None, description="Snapshot of the artifact before the change.")
+    new_value: Optional[Dict[str, Any]] = Field(None, description="Snapshot of the artifact after the change.")
+    performed_by: str = Field(..., description="Identifier of the actor that performed the action.")
+    timestamp: str = Field("", description="ISO8601 event timestamp.")
+
+
+class EventListResponse(BaseModel):
+    """Events across all artifacts, with pagination metadata."""
+    events: List[EventLogEntry] = Field(default_factory=list, description="Newest-first event records.")
+    total: int = Field(..., description="Number of events returned in this page.")
+    limit: int = Field(..., description="Maximum entries returned.")
+    offset: int = Field(..., description="Pagination offset.")
+
+
+class ArtifactEventListResponse(BaseModel):
+    """Events for a single artifact, with pagination metadata."""
+    artifact_type: str = Field(..., description="Type of artifact queried.")
+    artifact_id: str = Field(..., description="UUID string of the artifact queried.")
+    events: List[EventLogEntry] = Field(default_factory=list, description="Newest-first event records.")
+    total: int = Field(..., description="Number of events returned in this page.")
+    limit: int = Field(..., description="Maximum entries returned.")
+    offset: int = Field(..., description="Pagination offset.")
+
+
+class ActionEventListResponse(BaseModel):
+    """Events filtered by action type, with pagination metadata."""
+    action: str = Field(..., description="Normalized action name (uppercased).")
+    events: List[EventLogEntry] = Field(default_factory=list, description="Newest-first event records.")
+    total: int = Field(..., description="Number of events returned in this page.")
+    limit: int = Field(..., description="Maximum entries returned.")
+    offset: int = Field(..., description="Pagination offset.")
+
+
+class ProjectEventListResponse(BaseModel):
+    """Events for a single project, with optional filters and pagination metadata."""
+    project_id: str = Field(..., description="Project UUID string.")
+    artifact_type: Optional[str] = Field(None, description="Optional artifact-type filter applied.")
+    action: Optional[str] = Field(None, description="Optional action filter applied.")
+    events: List[EventLogEntry] = Field(default_factory=list, description="Newest-first event records.")
+    total: int = Field(..., description="Number of events returned in this page.")
+    limit: int = Field(..., description="Maximum entries returned.")
+    offset: int = Field(..., description="Pagination offset.")
+
+
+class ProcessRequirementsResponse(BaseModel):
+    """
+    Payload returned by the multi-agent requirements processing endpoint.
+
+    Unknown fields are preserved via ``extra='allow'`` to keep compatibility
+    with both the GENERAL_CHAT and the LangGraph workflow response shapes.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    status: str = Field(..., description="Outcome status: 'completed', 'audit_pending' or 'general_chat'.")
+    detected_intent: Optional[str] = Field(None, description="Detected intent (e.g. GENERAL_CHAT, UPDATE_REQUIREMENT).")
+    workflow_routing: Optional[Dict[str, Any]] = Field(None, description="Workflow-classification result.")
+    structured_requirements: Optional[Dict[str, Any]] = Field(None, description="Structured requirements payload.")
+    audit_result: Optional[Dict[str, Any]] = Field(None, description="Compliance audit result.")
+    prd_markdown: Optional[str] = Field(None, description="Generated PRD markdown, if produced.")
+    mermaid_diagram: Optional[str] = Field(None, description="Generated Mermaid diagram source, if produced.")
+    message: Optional[str] = Field(None, description="Assistant/agent message text.")
+    pending_merge: Optional[bool] = Field(None, description="True when a pending merge action awaits confirmation.")
+    pending_action_id: Optional[str] = Field(None, description="Pending-action UUID string awaiting confirmation.")
