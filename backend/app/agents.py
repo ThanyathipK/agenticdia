@@ -11,7 +11,7 @@ except ImportError:
     OutputFixingParser = None
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.repository import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
+from app.repositories import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
 from app.prompt_loader import load_prompt, _PromptProxy
 from app.config import settings

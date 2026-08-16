@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.repository import PendingActionRepository, RequirementStateRepository
+from app.repositories import PendingActionRepository, RequirementStateRepository
 from app.schemas import (
     ArtifactLockRequest,
     ArtifactLockResponse,

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.event_manager import event_manager
-from app.repository import ArtifactEventLogRepository
+from app.repositories import ArtifactEventLogRepository
 from app.schemas import (
     EventListResponse,
     ArtifactEventListResponse,

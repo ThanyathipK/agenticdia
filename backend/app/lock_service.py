@@ -268,7 +268,7 @@ class LockService:
 
         # Log the LOCK event
         try:
-            from app.repository import ArtifactEventLogRepository
+            from app.repositories import ArtifactEventLogRepository
             await ArtifactEventLogRepository.log_event(
                 artifact_type=artifact_type,
                 artifact_id=str(artifact_id),
@@ -372,7 +372,7 @@ class LockService:
 
         # Log the UNLOCK event
         try:
-            from app.repository import ArtifactEventLogRepository
+            from app.repositories import ArtifactEventLogRepository
             await ArtifactEventLogRepository.log_event(
                 artifact_type=artifact_type,
                 artifact_id=str(artifact_id),

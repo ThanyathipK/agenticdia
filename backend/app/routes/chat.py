@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.config import settings
-from app.repository import ConversationMessageRepository
+from app.repositories import ConversationMessageRepository
 from app.schemas import ChatSessionRequest, ChatResponse, HealthResponse
 from app.llm_client import call_lm_studio, check_lm_studio_health
 from app.event_manager import event_manager

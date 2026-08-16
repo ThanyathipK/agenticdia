@@ -1,0 +1,210 @@
+"""
+Requirement repository operations.
+"""
+import logging
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.lock_service import LockService
+from app.models import (
+    AcceptanceCriteriaModel,
+    RequirementModel,
+    UserStoryModel,
+)
+from app.repositories.base import as_uuid, serialize_requirement
+from app.repositories.event_log import ArtifactEventLogRepository
+
+logger = logging.getLogger(__name__)
+
+
+class RequirementRepository:
+    """Handles atomic requirements of the project."""
+
+    @staticmethod
+    def _serialize(req: RequirementModel) -> Dict[str, Any]:
+        """Serialize a RequirementModel to a dict including lock fields."""
+        return serialize_requirement(req)
+
+    @staticmethod
+    async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
+        pid = as_uuid(project_id)
+        req = RequirementModel(
+            project_id=pid,
+            epic_id=uuid.UUID(data["epic_id"]) if data.get("epic_id") else None,
+            requirement_code=data.get("requirement_code", "REQ-000"),
+            title=data.get("title", "Untitled Requirement"),
+            description=data.get("description"),
+            priority=data.get("priority"),
+            status=data.get("status", "active"),
+            is_locked=False,
+            locked_by=None,
+            locked_at=None
+        )
+        session.add(req)
+        await session.flush()
+        await session.refresh(req)
+        return RequirementRepository._serialize(req)
+
+    @staticmethod
+    async def get_by_id(id_val: str, project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        rid = as_uuid(id_val)
+        pid = as_uuid(project_id)
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            return RequirementRepository._serialize(req)
+        return None
+
+    @staticmethod
+    async def get_by_project(project_id: str, session: AsyncSession) -> List[Dict[str, Any]]:
+        pid = as_uuid(project_id)
+        stmt = select(RequirementModel).where(RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        reqs = result.scalars().all()
+        return [RequirementRepository._serialize(r) for r in reqs]
+
+    @staticmethod
+    async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
+        rid = as_uuid(id_val)
+        pid = as_uuid(project_id)
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            # LOCK ENFORCEMENT: Cannot update a locked requirement
+            if req.is_locked:
+                raise PermissionError(
+                    f"Requirement {req.requirement_code} is locked by {req.locked_by or 'unknown'} "
+                    f"at {req.locked_at.isoformat() if req.locked_at else 'unknown time'}. "
+                    f"Unlock it before modifying."
+                )
+            if "title" in updates: req.title = updates["title"]
+            if "description" in updates: req.description = updates["description"]
+            if "priority" in updates: req.priority = updates["priority"]
+            if "status" in updates: req.status = updates["status"]
+            await session.flush()
+            await session.refresh(req)
+            return RequirementRepository._serialize(req)
+        return None
+
+    @staticmethod
+    async def delete(id_val: str, project_id: str, session: AsyncSession) -> bool:
+        rid = as_uuid(id_val)
+        pid = as_uuid(project_id)
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            # LOCK ENFORCEMENT: Cannot delete a locked requirement
+            if req.is_locked:
+                raise PermissionError(
+                    f"Requirement {req.requirement_code} is locked by {req.locked_by or 'unknown'} "
+                    f"at {req.locked_at.isoformat() if req.locked_at else 'unknown time'}. "
+                    f"Unlock it before deleting."
+                )
+            req.status = "deleted"
+            # Archive User Stories and Acceptance Criteria related to that Requirement
+            stmt_stories = select(UserStoryModel).where(UserStoryModel.requirement_id == rid)
+            res_stories = await session.execute(stmt_stories)
+            stories = res_stories.scalars().all()
+            for story in stories:
+                story.status = "archived"
+                story.change_type = "archived"
+                story.version = story.version + 1
+
+                stmt_ac = select(AcceptanceCriteriaModel).where(AcceptanceCriteriaModel.user_story_id == story.id)
+                res_ac = await session.execute(stmt_ac)
+                ac_list = res_ac.scalars().all()
+                for ac in ac_list:
+                    ac.status = "archived"
+                    ac.change_type = "archived"
+                    ac.version = ac.version + 1
+
+            await session.flush()
+            return True
+        return False
+
+    @staticmethod
+    async def lock(id_val: str, project_id: str, session: AsyncSession, locked_by: str = "user") -> Optional[Dict[str, Any]]:
+        rid = as_uuid(id_val)
+        pid = as_uuid(project_id)
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            if req.is_locked:
+                return RequirementRepository._serialize(req)
+            req.is_locked = True
+            req.locked_by = locked_by
+            req.locked_at = datetime.utcnow()
+            await session.flush()
+            await session.refresh(req)
+            # Log LOCK event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="requirement",
+                    artifact_id=str(req.id),
+                    action="LOCK",
+                    session=session,
+                    old_value={"is_locked": False},
+                    new_value={"is_locked": True, "locked_by": locked_by},
+                    performed_by=locked_by
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log requirement lock: {log_err}")
+            return RequirementRepository._serialize(req)
+        return None
+
+    @staticmethod
+    async def unlock(id_val: str, project_id: str, session: AsyncSession, unlocked_by: str = "user") -> Optional[Dict[str, Any]]:
+        """
+        Unlock a requirement so it can be modified again.
+
+        Raises:
+            PermissionError: If the requirement is locked by a different user
+                than the one attempting to unlock it
+        """
+        rid = as_uuid(id_val)
+        pid = as_uuid(project_id)
+        stmt = select(RequirementModel).where(RequirementModel.id == rid, RequirementModel.project_id == pid)
+        result = await session.execute(stmt)
+        req = result.scalar_one_or_none()
+        if req:
+            if not req.is_locked:
+                return RequirementRepository._serialize(req)
+            # Authorization check: only the lock owner can unlock the requirement
+            if req.locked_by != unlocked_by:
+                logger.warning(
+                    f"[UNLOCK] Denied unlock of requirement {req.id}: "
+                    f"locked by {req.locked_by}, attempted by {unlocked_by}"
+                )
+                raise PermissionError(
+                    f"Requirement is locked by {req.locked_by}. "
+                    f"Cannot be unlocked by {unlocked_by}."
+                )
+            old_locked_by = req.locked_by
+            req.is_locked = False
+            req.locked_by = None
+            req.locked_at = None
+            await session.flush()
+            await session.refresh(req)
+            # Log UNLOCK event
+            try:
+                await ArtifactEventLogRepository.log_event(
+                    artifact_type="requirement",
+                    artifact_id=str(req.id),
+                    action="UNLOCK",
+                    session=session,
+                    old_value={"is_locked": True, "locked_by": old_locked_by},
+                    new_value={"is_locked": False},
+                    performed_by=unlocked_by
+                )
+            except Exception as log_err:
+                logger.warning(f"[EVENT LOG] Failed to log requirement unlock: {log_err}")
+            return RequirementRepository._serialize(req)
+        return None

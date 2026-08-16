@@ -1,0 +1,267 @@
+"""
+Shared helpers and serializers for the repository layer.
+
+These functions centralize the hand-written ``model -> dict`` serializers
+that used to be duplicated across every repository class in the old
+``app.repository`` monolith. Keeping them in one place means the dict
+shapes stay consistent and any future column additions only need to be
+updated here.
+"""
+import uuid
+from datetime import datetime
+from typing import Any, Dict, Optional, Union
+
+from app.models import (
+    AcceptanceCriteriaModel,
+    ArtifactEventLogModel,
+    AuditResultModel,
+    ClarificationQuestionModel,
+    ConversationMessageModel,
+    EpicModel,
+    PendingActionModel,
+    PRDDocumentModel,
+    PRDVersionModel,
+    ProjectModel,
+    RequirementModel,
+    UserStoryModel,
+    VersionHistoryModel,
+)
+
+
+def as_uuid(value: Union[str, uuid.UUID]) -> uuid.UUID:
+    """Coerce a string or UUID into a UUID, passing UUIDs through untouched."""
+    return uuid.UUID(value) if isinstance(value, str) else value
+
+
+def uid(value) -> Optional[str]:
+    """Render a value as a string, passing None through untouched."""
+    return str(value) if value is not None else None
+
+
+def dt_iso(value: Optional[datetime]) -> str:
+    """Render a datetime as an ISO string, or ``""`` when missing/None."""
+    return value.isoformat() if value else ""
+
+
+def dt_iso_or_none(value: Optional[datetime]) -> Optional[str]:
+    """Render a datetime as an ISO string, or None when missing."""
+    return value.isoformat() if value else None
+
+
+def serialize_project(p: ProjectModel) -> Dict[str, Any]:
+    """Serialize a ProjectModel into its public dict representation."""
+    return {
+        "id": str(p.id),
+        "name": p.name,
+        "description": p.description,
+        "industry_standard": p.industry_standard,
+    }
+
+
+def serialize_epic(epic: EpicModel, *, with_status: bool = False) -> Dict[str, Any]:
+    """Serialize an EpicModel into its public dict representation."""
+    data = {
+        "id": str(epic.id),
+        "project_id": str(epic.project_id),
+        "epic_name": epic.epic_name,
+        "version": epic.version,
+    }
+    if with_status:
+        data["status"] = epic.status
+    return data
+
+
+def serialize_requirement(req: RequirementModel) -> Dict[str, Any]:
+    """Serialize a RequirementModel to a dict including lock fields."""
+    return {
+        "id": str(req.id),
+        "project_id": str(req.project_id),
+        "epic_id": uid(req.epic_id),
+        "requirement_code": req.requirement_code,
+        "title": req.title,
+        "description": req.description,
+        "priority": req.priority,
+        "status": req.status,
+        "is_locked": bool(req.is_locked) if req.is_locked is not None else False,
+        "locked_by": req.locked_by,
+        "locked_at": dt_iso_or_none(req.locked_at),
+        "lock_reason": req.lock_reason,
+    }
+
+
+def serialize_user_story(
+    story: UserStoryModel,
+    project_id,
+    *,
+    with_lock_fields: bool = False,
+) -> Dict[str, Any]:
+    """Serialize a UserStoryModel into its public dict representation.
+
+    ``project_id`` is accepted explicitly (instead of deriving it from the
+    model) because the legacy callers thread the stringified project UUID
+    through the whole call stack.
+    """
+    data = {
+        "id": str(story.id),
+        "project_id": str(project_id),
+        "ticket_code": story.ticket_code,
+        "story_title": story.story_title,
+        "as_a": story.as_a,
+        "i_want_to": story.i_want_to,
+        "so_that": story.so_that,
+        "status": story.status,
+        "version": story.version,
+        "last_modified_by": story.last_modified_by,
+        "change_type": story.change_type,
+    }
+    if with_lock_fields:
+        data.update({
+            "is_locked": story.is_locked,
+            "locked_by": story.locked_by,
+            "locked_at": dt_iso_or_none(story.locked_at),
+            "lock_reason": story.lock_reason,
+        })
+    return data
+
+
+def serialize_acceptance_criteria(
+    ac: AcceptanceCriteriaModel,
+    project_id,
+    ticket_code,
+) -> Dict[str, Any]:
+    """Serialize an AcceptanceCriteriaModel into its public dict repr."""
+    return {
+        "id": str(ac.id),
+        "project_id": str(project_id),
+        "ticket_code": ticket_code,
+        "user_story_id": uid(ac.user_story_id),
+        "criteria_text": ac.criteria_text,
+        "status": ac.status,
+        "version": ac.version,
+        "last_modified_by": ac.last_modified_by,
+        "change_type": ac.change_type,
+    }
+
+
+def serialize_clarification_question(
+    cq: ClarificationQuestionModel,
+    project_id,
+    target_story_id,
+) -> Dict[str, Any]:
+    """Serialize a ClarificationQuestionModel into its public dict repr.
+
+    ``target_story_id`` is the *ticket code* of the linked user story (the
+    legacy API surfaces the ticket code instead of the raw UUID).
+    """
+    return {
+        "id": str(cq.id),
+        "project_id": str(project_id),
+        "checklist_category": cq.checklist_category,
+        "target_user_story_id": target_story_id,
+        "question_text": cq.question_text,
+        "user_answer": cq.user_answer,
+        "is_resolved": cq.is_resolved,
+    }
+
+
+def serialize_audit_result(ar: AuditResultModel, project_id) -> Dict[str, Any]:
+    """Serialize an AuditResultModel into its public dict representation."""
+    return {
+        "id": str(ar.id),
+        "project_id": str(project_id),
+        "is_valid": ar.is_valid,
+        "audit_version_reviewed": ar.audit_version_reviewed,
+        "passed_checks": ar.passed_checks,
+        "failed_checks": ar.failed_checks,
+    }
+
+
+def serialize_prd_document(prd: PRDDocumentModel) -> Dict[str, Any]:
+    """Serialize a PRDDocumentModel into its public dict representation."""
+    return {
+        "id": str(prd.id),
+        "project_id": str(prd.project_id),
+        "version": prd.version,
+        "prd_markdown": prd.prd_markdown,
+        "mermaid_diagram": prd.mermaid_diagram,
+    }
+
+
+def serialize_prd_version(v: PRDVersionModel) -> Dict[str, Any]:
+    """Serialize a PRDVersionModel into its public dict representation."""
+    return {
+        "version_id": str(v.id),
+        "project_id": str(v.project_id),
+        "version_number": v.version_number,
+        "generated_prd": v.generated_prd,
+        "generated_diagram": v.generated_diagram,
+        "generated_by": v.generated_by,
+        "created_at": dt_iso(v.created_at),
+    }
+
+
+def serialize_version_history(vh: VersionHistoryModel) -> Dict[str, Any]:
+    """Serialize a VersionHistoryModel into its public dict representation."""
+    return {
+        "id": str(vh.id),
+        "project_id": str(vh.project_id),
+        "version": vh.version,
+        "timestamp": vh.timestamp,
+        "author": vh.author,
+        "description": vh.description,
+        "requirements_snapshot": vh.requirements_snapshot,
+    }
+
+
+def serialize_conversation_message(m: ConversationMessageModel) -> Dict[str, Any]:
+    """Serialize a ConversationMessageModel into its public dict repr."""
+    return {
+        "id": str(m.id),
+        "conversation_id": str(m.conversation_id),
+        "project_id": str(m.project_id),
+        "role": m.role,
+        "message": m.message,
+        "content": m.message,
+        "workflow_state": m.workflow_state,
+        "intent": m.intent,
+        "created_at": dt_iso(m.created_at),
+    }
+
+
+def serialize_pending_action(a: PendingActionModel, *, full: bool = False) -> Dict[str, Any]:
+    """Serialize a PendingActionModel into its public dict representation."""
+    if full:
+        return {
+            "id": str(a.id),
+            "project_id": str(a.project_id),
+            "action_type": a.action_type,
+            "target_requirement_id": a.target_requirement_id,
+            "original_user_message": a.original_user_message,
+            "proposed_changes": a.proposed_changes,
+            "affected_user_story_ids": a.affected_user_story_ids,
+            "affected_acceptance_criteria_ids": a.affected_acceptance_criteria_ids,
+            "workflow_stage": a.workflow_stage,
+            "status": a.status,
+            "expires_at": dt_iso(a.expires_at),
+        }
+    return {
+        "id": str(a.id),
+        "project_id": str(a.project_id),
+        "action_type": a.action_type,
+        "target_requirement_id": a.target_requirement_id,
+        "status": a.status,
+    }
+
+
+def serialize_event_log(e: ArtifactEventLogModel) -> Dict[str, Any]:
+    """Serialize an ArtifactEventLogModel into its public dict repr."""
+    return {
+        "event_id": str(e.event_id),
+        "artifact_type": e.artifact_type,
+        "artifact_id": e.artifact_id,
+        "action": e.action,
+        "old_value": e.old_value,
+        "new_value": e.new_value,
+        "performed_by": e.performed_by,
+        "timestamp": dt_iso(e.timestamp),
+    }

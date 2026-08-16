@@ -9,7 +9,7 @@ from app.config import settings
 from app.database import get_db
 from app.rate_limit import rate_limit_dependency
 from app.input_validation import validate_text_budget, validate_body_budget
-from app.repository import (
+from app.repositories import (
     RequirementRepository,
     RequirementStateRepository,
     ConversationMessageRepository,
