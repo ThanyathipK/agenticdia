@@ -55,6 +55,7 @@ def serialize_project(p: ProjectModel) -> Dict[str, Any]:
         "name": p.name,
         "description": p.description,
         "industry_standard": p.industry_standard,
+        "is_pinned": bool(p.is_pinned) if p.is_pinned is not None else False,
     }
 
 

@@ -47,6 +47,8 @@ export const api = {
     put<ProjectSummary>(`/api/projects/${projectId}`, { name: name.trim() }),
   deleteProject: (projectId: string) =>
     del<ProjectDeleteResponse>(`/api/projects/${projectId}`),
+  toggleProjectPin: (projectId: string, isPinned: boolean) =>
+    put<ProjectSummary>(`/api/projects/${projectId}/pin`, { is_pinned: isPinned }),
 
   // ---- Requirement state --------------------------------------------------
   getProjectState: (projectId: string) =>

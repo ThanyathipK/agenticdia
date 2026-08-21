@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_CHAT_LIMIT: int = 30
     RATE_LIMIT_CHAT_WINDOW: int = 60
-    RATE_LIMIT_WORKFLOW_LIMIT: int = 20
+    RATE_LIMIT_WORKFLOW_LIMIT: int = 60
     RATE_LIMIT_WORKFLOW_WINDOW: int = 60
 
     # Store backing the limiter. Only "in-process" is implemented today; the
@@ -70,6 +70,21 @@ class Settings(BaseSettings):
     # trusted, so a client can never widen its own bucket by spoofing them.
     TRUST_PROXY_HEADERS: bool = False
     TRUSTED_PROXY_IPS: str = ""
+
+    # SSE pub/sub reliability (see app/event_manager.py).
+    # The event bus is in-process (process-local subscriber queues + replay
+    # buffer) and, like the rate limiter, is safe only for a single uvicorn
+    # worker. The startup guard (verify_single_worker_guarantee) refuses to boot
+    # when multiple workers are detected, so live updates can never silently
+    # split across workers. A bounded per-project ring buffer
+    # (SSE_HISTORY_BUFFER_SIZE) lets a reconnecting client replay events it
+    # missed while disconnected (SSE Last-Event-ID); history is process-local so
+    # a full restart loses it (forward progress resumes on the next publish).
+    SSE_HISTORY_BUFFER_SIZE: int = 1000
+    # Explicit opt-out: run N workers with the in-process SSE bus (broken event
+    # delivery by construction). The app logs a loud warning at startup instead
+    # of refusing to boot. Not recommended.
+    SSE_ALLOW_MULTI_PROCESS_IN_PROCESS: bool = False
 
     # Application details
     APP_NAME: str = "Enterprise Requirements Architecture Core"

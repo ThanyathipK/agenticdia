@@ -55,6 +55,7 @@ export interface ProjectState {
   handleRenameProject: (projectId: string, newName: string) => Promise<void>;
   handleDeleteProject: (projIdToDelete: string) => Promise<void>;
   handleCreateProject: () => Promise<void>;
+  handleTogglePin: (projectId: string) => Promise<void>;
 
   // Chat / split layout
   messages: ChatMessage[];
@@ -203,6 +204,7 @@ export function useProjectState(): ProjectState {
     handleRenameProject: projectsApi.handleRenameProject,
     handleDeleteProject: projectsApi.handleDeleteProject,
     handleCreateProject: projectsApi.handleCreateProject,
+    handleTogglePin: projectsApi.handleTogglePin,
     structuredRequirements: store.structuredRequirements,
     auditResult: store.auditResult,
     prdMarkdown: store.prdMarkdown,

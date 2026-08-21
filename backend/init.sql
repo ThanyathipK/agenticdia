@@ -46,6 +46,7 @@ CREATE TABLE projects (
     name VARCHAR(255) NOT NULL,
     description TEXT,
     industry_standard VARCHAR(100) NOT NULL, -- e.g., 'Krungsri Nimble', 'ISO-20022', 'PCI-DSS'
+    is_pinned BOOLEAN NOT NULL DEFAULT FALSE, -- Pinned chats/projects float to the top of the sidebar
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,

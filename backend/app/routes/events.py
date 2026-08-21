@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +24,10 @@ router = APIRouter()
 
 
 @router.get("/api/project/{project_id}/sse", status_code=status.HTTP_200_OK)
-async def stream_project_events(project_id: str):
+async def stream_project_events(
+    project_id: str,
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+):
     """
     Server-Sent Events (SSE) stream for a project.
 
@@ -35,27 +38,39 @@ async def stream_project_events(project_id: str):
 
     Each frame is an unnamed `data:` event carrying JSON of the form:
         {"event": "<event_type>", "data": {...}}
-    Heartbeat comments (`: ping`) keep the connection alive through proxies.
+    Each frame also carries an SSE `id:` field (a project-monotonic sequence
+    number) so a reconnecting browser `EventSource` automatically returns with a
+    `Last-Event-ID` header; the bus then replays any buffered events the client
+    missed while it was disconnected before resuming live delivery. Heartbeat
+    comments (`: ping`) keep the connection alive through proxies.
     """
     try:
         UUID(project_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # A browser EventSource re-sends the last `id:` it observed on every
+    # reconnect. Use it to seed the queue so events written while the client was
+    # away are replayed before live delivery resumes (SSE replay).
+    last_seq: Optional[int] = None
+    if isinstance(last_event_id, str) and last_event_id.strip().lstrip("-").isdigit():
+        last_seq = int(last_event_id.strip())
+
     async def event_generator():
-        queue = event_manager.subscribe(project_id)
+        queue = event_manager.subscribe(project_id, last_event_id=last_seq)
         try:
             # Initial handshake so the client knows the stream is open.
             yield f"data: {json.dumps({'event': 'connected', 'data': {'project_id': project_id}})}\n\n"
 
             while True:
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    seq, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
                     message = json.loads(payload)
                     event_type = message.get("event", "message")
                     event_data = message.get("data", {})
                     framed = json.dumps({"event": event_type, "data": event_data})
-                    yield f"data: {framed}\n\n"
+                    # `id:` makes reconnects recover missed events via Last-Event-ID.
+                    yield f"id: {seq}\ndata: {framed}\n\n"
                 except asyncio.TimeoutError:
                     # Heartbeat comment keeps the connection alive through proxies/load balancers.
                     yield ": ping\n\n"

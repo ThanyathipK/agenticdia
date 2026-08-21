@@ -220,6 +220,7 @@ class ProjectSummary(BaseModel):
     name: str = Field(..., description="Human-readable project name.")
     description: Optional[str] = Field(None, description="Optional functional-scope description.")
     industry_standard: str = Field(..., description="Target compliance guideline standard.")
+    is_pinned: bool = Field(False, description="True when the project/chat is pinned to the top of the sidebar.")
 
 
 class ProjectCreated(BaseModel):
@@ -232,6 +233,11 @@ class ProjectDeleteResponse(BaseModel):
     """Payload confirming a project was deleted."""
     status: str = Field(..., description="Always 'deleted' on success.")
     project_id: str = Field(..., description="UUID string of the deleted project.")
+
+
+class ProjectPinRequest(BaseModel):
+    """Request body for pinning/unpinning a project (chat)."""
+    is_pinned: bool = Field(..., description="True pins the project to the top of the sidebar; False unpins it.")
 
 
 # --------------------------------------------------------------------------

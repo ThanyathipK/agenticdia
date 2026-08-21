@@ -18,6 +18,7 @@ from app.schemas import (
     ProjectSummary,
     ProjectCreated,
     ProjectDeleteResponse,
+    ProjectPinRequest,
     RequirementStateResponse,
     ConversationMessageResponse,
     PRDVersionResponse,
@@ -128,6 +129,36 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)) ->
         raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_deleted", {"project_id": project_id})
     return {"status": "deleted", "project_id": project_id}
+
+
+@router.put("/api/projects/{project_id}/pin", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
+async def pin_project(project_id: str, payload: ProjectPinRequest, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+    """Pin or unpin a project (chat) so it floats to the top of the sidebar.
+
+    Args:
+        project_id: Project UUID string.
+        payload: Desired pinned state.
+        db: Active asynchronous database session.
+
+    Returns:
+        ProjectSummary: The updated project record.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if not found.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    updated = await ProjectRepository.toggle_pinned(project_id, payload.is_pinned, db)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await event_manager.publish(project_id, "project_updated", {
+        "project_id": project_id,
+        "is_pinned": payload.is_pinned,
+    })
+    return updated
 
 
 @router.get("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)

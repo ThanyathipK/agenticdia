@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.migrations import run_migrations, seed_default_user
+from app.event_manager import verify_single_worker_guarantee as verify_sse_single_worker_guarantee
 from app.rate_limit import verify_single_worker_guarantee
 from app.routes import chat, projects, requirements, lock, events
 from app.llm_client import check_lm_studio_health
@@ -33,6 +34,14 @@ async def lifespan(app: FastAPI):
     # with multiple uvicorn workers (each worker would keep its own counter),
     # unless the operator explicitly opts into that weaker posture.
     verify_single_worker_guarantee()
+
+    # SSE event-bus hardening — same single-process contract as the rate limiter.
+    # The in-process subscriber queues + replay buffer are process-local; with
+    # multiple workers events published on one worker would never reach SSE
+    # clients connected to another (missing/duplicate streams). This guard is
+    # active even when rate limiting is disabled, so the SSE single-process
+    # assumption is never silently violated.
+    verify_sse_single_worker_guarantee()
 
     await run_migrations()
     await seed_default_user()

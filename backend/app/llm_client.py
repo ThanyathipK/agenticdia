@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -33,6 +34,24 @@ class LMStudioOutputParsingError(LMStudioError):
     """LM Studio returned a payload that could not be parsed as JSON."""
 
 
+#: Max attempts (initial + retries) for a single LM Studio inference call.
+LM_INFERENCE_RETRY_ATTEMPTS = 2
+#: Base back-off (seconds) between retries; multiplied by the attempt index.
+LM_INFERENCE_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _retry_backoff(attempt: int, retry_after: Optional[str] = None) -> float:
+    """Return the wait before retrying, preferring the server's ``Retry-After``."""
+    if retry_after:
+        try:
+            seconds = int(retry_after)
+            if seconds > 0:
+                return float(seconds)
+        except (TypeError, ValueError):
+            pass
+    return LM_INFERENCE_RETRY_BACKOFF_SECONDS * attempt
+
+
 async def call_lm_studio(prompt_messages: List[Dict[str, str]], response_format_schema: Any = None) -> Dict[str, Any]:
     """
     Direct low-latency route utility to LM Studio.
@@ -64,37 +83,78 @@ async def call_lm_studio(prompt_messages: List[Dict[str, str]], response_format_
             "schema": response_format_schema.model_json_schema()
         }
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            logger.info(f"Dispatching inference task to local LM Studio at {settings.LM_STUDIO_URL}")
-            response = await client.post(
-                f"{settings.LM_STUDIO_URL}/chat/completions",
-                headers=headers,
-                json=payload
-            )
-            response.raise_for_status()
-            result = response.json()
+    # --- Retry transient failures (network blips, 5xx, 429) ---------------------
+    # A transient LM Studio failure can otherwise surface as a spurious 502/503
+    # to the UI and trigger the frontend fallback. Retry a couple of times with a
+    # short back-off so transient issues self-heal; real outages still raise the
+    # domain exceptions below.
+    for attempt in range(1, LM_INFERENCE_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                logger.info(
+                    f"Dispatching inference task to local LM Studio at "
+                    f"{settings.LM_STUDIO_URL} (attempt {attempt}/{LM_INFERENCE_RETRY_ATTEMPTS})"
+                )
+                response = await client.post(
+                    f"{settings.LM_STUDIO_URL}/chat/completions",
+                    headers=headers,
+                    json=payload
+                )
+                # Transient gateway/rate-limit responses are worth a retry.
+                if response.status_code in (429,) or response.status_code >= 500:
+                    if attempt < LM_INFERENCE_RETRY_ATTEMPTS:
+                        headers_map = getattr(response, "headers", None)
+                        retry_after = (
+                            headers_map.get("retry-after")
+                            if isinstance(headers_map, dict)
+                            else None
+                        )
+                        await asyncio.sleep(_retry_backoff(attempt, retry_after))
+                        continue
+                response.raise_for_status()
+                result = response.json()
 
             # Access response text safely
             content_text = result["choices"][0]["message"]["content"]
             logger.info("Successfully fetched response from local LLM.")
             return json.loads(content_text) if response_format_schema else {"text": content_text}
 
-    except httpx.HTTPStatusError as http_err:
-        logger.error(f"LM Studio server returned status error: {http_err.response.status_code} - {http_err.response.text}")
-        raise LMStudioGatewayError(
-            f"Inference gateway error: {str(http_err)}"
-        ) from http_err
-    except httpx.RequestError as req_err:
-        logger.error(f"Failed to connect to local LM Studio instance: {str(req_err)}")
-        raise LMStudioUnavailableError(
-            "LM Studio is offline or unavailable. Ensure it runs on localhost:1234 with API keys."
-        ) from req_err
-    except json.JSONDecodeError as json_err:
-        logger.error(f"Failed to parse LLM structured output block: {str(json_err)}")
-        raise LMStudioOutputParsingError(
-            "Local LLM output failed to resolve as a valid compliance schema."
-        ) from json_err
+        except httpx.HTTPStatusError as http_err:
+            if (
+                http_err.response.status_code in (429,)
+                or http_err.response.status_code >= 500
+            ) and attempt < LM_INFERENCE_RETRY_ATTEMPTS:
+                logger.warning(
+                    "LM Studio transient HTTP %s; retrying (%s/%s).",
+                    http_err.response.status_code,
+                    attempt,
+                    LM_INFERENCE_RETRY_ATTEMPTS,
+                )
+                await asyncio.sleep(_retry_backoff(attempt))
+                continue
+            logger.error(f"LM Studio server returned status error: {http_err.response.status_code} - {http_err.response.text}")
+            raise LMStudioGatewayError(
+                f"Inference gateway error: {str(http_err)}"
+            ) from http_err
+        except httpx.RequestError as req_err:
+            if attempt < LM_INFERENCE_RETRY_ATTEMPTS:
+                logger.warning(
+                    "LM Studio network error (%s); retrying (%s/%s).",
+                    req_err,
+                    attempt,
+                    LM_INFERENCE_RETRY_ATTEMPTS,
+                )
+                await asyncio.sleep(_retry_backoff(attempt))
+                continue
+            logger.error(f"Failed to connect to local LM Studio instance: {str(req_err)}")
+            raise LMStudioUnavailableError(
+                "LM Studio is offline or unavailable. Ensure it runs on localhost:1234 with API keys."
+            ) from req_err
+        except json.JSONDecodeError as json_err:
+            logger.error(f"Failed to parse LLM structured output block: {str(json_err)}")
+            raise LMStudioOutputParsingError(
+                "Local LLM output failed to resolve as a valid compliance schema."
+            ) from json_err
 
 
 # ==========================================

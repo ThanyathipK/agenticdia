@@ -17,6 +17,7 @@ export interface ProjectSummary {
   name: string;
   description: string | null;
   industry_standard: string;
+  is_pinned?: boolean;
 }
 
 export interface ProjectCreated {

@@ -54,6 +54,7 @@ class ProjectModel(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     industry_standard = Column(String(100), nullable=False)
+    is_pinned = Column(Boolean, nullable=False, default=False)
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)

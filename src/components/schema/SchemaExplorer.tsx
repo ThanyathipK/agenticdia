@@ -210,6 +210,7 @@ export default function SchemaExplorer({
         locked_by: null,
         locked_at: null,
         lock_reason: null,
+        is_pinned: false,
         created_at: nowTimestamp
       };
       setProjects([newRow, ...projects]);

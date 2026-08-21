@@ -80,6 +80,41 @@ async def main():
     await it2.aclose()
     assert PROJECT_ID not in event_manager._subscribers
 
+    print("\n=== Test 4: reconnect replay via Last-Event-ID ===")
+    # A distinct project so ids/history stay independent of the earlier tests.
+    REPLAY_ID = "44444444-4444-4444-4444-444444444444"
+    r = await stream_project_events(REPLAY_ID)
+    it = r.body_iterator.__aiter__()
+    await asyncio.wait_for(it.__anext__(), timeout=5)  # handshake (no id)
+
+    # Deliver one live event; the frame must carry its SSE id.
+    await event_manager.publish(REPLAY_ID, "replay_evt", {"i": 1})
+    frame1 = await asyncio.wait_for(it.__anext__(), timeout=5)
+    assert frame1.startswith("id: 1\n"), frame1
+    # Client "disconnects" without acknowledging seq 2/3.
+    await it.aclose()
+
+    # Two events land while the client is away → it would miss them otherwise.
+    await event_manager.publish(REPLAY_ID, "replay_evt", {"i": 2})
+    await event_manager.publish(REPLAY_ID, "replay_evt", {"i": 3})
+
+    # Reconnect. The browser would send Last-Event-ID: 1; the bus must replay
+    # buffered seq 2 and seq 3 (in order) before resuming live delivery.
+    r2 = await stream_project_events(REPLAY_ID, last_event_id="1")
+    it2 = r2.body_iterator.__aiter__()
+    await asyncio.wait_for(it2.__anext__(), timeout=5)  # handshake
+
+    g1 = await asyncio.wait_for(it2.__anext__(), timeout=5)
+    g2 = await asyncio.wait_for(it2.__anext__(), timeout=5)
+    assert g1.startswith("id: 2\n") and g2.startswith("id: 3\n"), (g1, g2)
+    _i1 = json.loads(g1.split("\ndata: ", 1)[1].rstrip())["data"]["i"]
+    _i2 = json.loads(g2.split("\ndata: ", 1)[1].rstrip())["data"]["i"]
+    assert (_i1, _i2) == (2, 3), (_i1, _i2)
+
+    await it2.aclose()
+    assert REPLAY_ID not in event_manager._subscribers
+    print("reconnect replay OK → missed seq 2/3 recovered after Last-Event-ID=1")
+
     print("\nALL SSE TESTS PASSED ✅")
 
 

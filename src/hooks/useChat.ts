@@ -12,13 +12,8 @@ import {
   toGatheredRequirementsPayload,
   toStructuredRequirementsFromGathered,
 } from '../api/transforms';
-import type {
-  AuditResult,
-  StructuredRequirements,
-  UserStory,
-  VersionHistory,
-} from '../components/types';
-import { handleError, handleWarning } from '../components/Toast';
+import type { VersionHistory } from '../components/types';
+import { handleError } from '../components/Toast';
 import type { RequirementStore } from './useRequirementStore';
 import type { WorkspaceTab } from './useWorkspaceUi';
 
@@ -50,6 +45,36 @@ export interface UseChatResult {
 }
 
 const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+// --- Rate-limit (HTTP 429) awareness ---------------------------------------
+// A 429 from the backend is a transient "slow down" signal (Finding #39), NOT a
+// backend outage. These helpers let callers distinguish the two so they surface
+// a "please wait" notice instead of the automatic local-sandbox fallback.
+
+const isRateLimitError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  return (err as { response?: { status?: number } }).response?.status === 429;
+};
+
+const extractRetryAfter = (err: unknown): number | null => {
+  if (!err || typeof err !== 'object') return null;
+  const headers = (err as { response?: { headers?: Record<string, unknown> & { get?: (k: string) => unknown } } }).response?.headers;
+  const raw =
+    headers?.['retry-after'] ??
+    headers?.['Retry-After'] ??
+    (typeof headers?.get === 'function' ? headers.get('retry-after') : undefined);
+  if (raw === undefined || raw === null) return null;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null;
+};
+
+const rateLimitedContent = (err: unknown): string => {
+  const wait = extractRetryAfter(err);
+  const suffix = wait === null
+    ? 'A short time window will restore access.'
+    : `Please wait about **${wait} second(s)** before continuing.`;
+  return `⏳ **Rate Limit Reached:** Too many requests in a short window. ${suffix}`;
+};
 
 export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult {
   const [rawInput, setRawInput] = useState<string>('');
@@ -169,16 +194,25 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         }
       }
     } catch (err) {
-      handleWarning('Backend workflow fallback was triggered. Working in local mode.', err);
-      const errorContent = `⚠️ **Local Sandbox Fallback Enabled:**\nCould not reach the FastAPI requirement engine. Under enterprise compliance rules, compiling requirement parameters locally.\n\n*Connection log: ${(err as Error)?.message || err}*`;
+      if (isRateLimitError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `rate-limited-${Date.now()}`,
+          role: 'assistant',
+          content: rateLimitedContent(err),
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Rate limited — please wait before continuing.');
+        return;
+      }
+      handleError('The requirement engine could not complete your request.', err);
+      const errorContent = `⚠️ **Request Failed — Nothing Was Saved.**\n\nThe requirement engine could not complete your message (${(err as Error)?.message || err}).\n\nYour input was **not** recorded as a user story, and no requirement state was changed.`;
       store.setMessages(prev => [...prev, {
         id: `api-error-${Date.now()}`,
         role: 'assistant',
         content: errorContent,
         timestamp: nowTime(),
       }]);
-      // Trigger automatic local compilation simulation to update document and prevent dead-ends
-      simulateAgentWorkflowFallback(inputMsg);
+      store.setSyncStatus('Request failed. Nothing was saved.');
     } finally {
       store.setIsLoading(false);
       store.setIsProcessing(false);
@@ -258,32 +292,24 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setClarificationAnswers(initialAnswers);
       }
     } catch (err) {
-      handleWarning('Audit Agent fallback was triggered. Working in local mode.', err);
-      // Fallback behavior
-      const nextVer = deps.currentVersion;
-      const newAuditResult: AuditResult = {
-        is_valid: true,
-        audit_version_reviewed: nextVer,
-        passed_checks: [
-          'Financial Regulatory Compliance',
-          'Security & Data Masking',
-          'Idempotency & De-duplication',
-          'Network Timeouts & Retry Strategies',
-          'Database Consistency & Rollback',
-          'Edge-Case Failure Handling',
-          'Audit Logging & Traceability',
-        ],
-        failed_checks: [],
-        clarification_questions: [],
-      };
-      store.setAuditResult(newAuditResult);
+      if (isRateLimitError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `rate-limited-${Date.now()}`,
+          role: 'assistant',
+          content: rateLimitedContent(err),
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Rate limited — please wait before continuing.');
+        return;
+      }
+      handleError('Compliance audit did not complete.', err);
       store.setMessages(prev => [...prev, {
-        id: `audit-passed-fallback-${Date.now()}`,
+        id: `audit-error-${Date.now()}`,
         role: 'assistant',
-        content: `✅ **Compliance Audit Passed (Local Fallback)!**\nRequirements are clean. Ready for PRD generation.`,
+        content: `⚠️ **Audit Failed — No Validation Was Saved.**\n\nThe audit could not complete against the requirement engine (${(err as Error)?.message || err}).\n\nNo validation verdict was applied and no requirements were changed.`,
         timestamp: nowTime(),
       }]);
-      store.setSyncStatus('Completed. Zero compliance violations.');
+      store.setSyncStatus('Audit failed. No changes were saved.');
     } finally {
       store.setIsLoading(false);
       store.setIsProcessing(false);
@@ -326,13 +352,24 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setSyncStatus('PRD and sequence diagram updated.');
       deps.setActiveTab('prd'); // switch tab automatically to PRD
     } catch (err) {
-      handleWarning('Architect Agent fallback was triggered. Working in local mode.', err);
+      if (isRateLimitError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `rate-limited-${Date.now()}`,
+          role: 'assistant',
+          content: rateLimitedContent(err),
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Rate limited — please wait before continuing.');
+        return;
+      }
+      handleError('PRD generation did not complete.', err);
       store.setMessages(prev => [...prev, {
-        id: `prd-failed-fallback-${Date.now()}`,
+        id: `prd-error-${Date.now()}`,
         role: 'assistant',
-        content: '⚠️ **PRD Compiled (Local Fallback):**\nUpdated specifications successfully recorded in the preview panel.',
+        content: `⚠️ **PRD Generation Failed — No Document Saved.**\n\nThe document could not be generated (${(err as Error)?.message || err}).\n\nNo PRD or diagram was produced.`,
         timestamp: nowTime(),
       }]);
+      store.setSyncStatus('PRD generation failed. No document saved.');
     } finally {
       store.setIsLoading(false);
       store.setIsProcessing(false);
@@ -340,76 +377,10 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     }
   };
 
-  // Intelligent Simulated Backup Workflow: parses specifications and updates the
-  // PRD instantly without loop restrictions
-  const simulateAgentWorkflowFallback = (inputMsg: string) => {
-    setTimeout(() => {
-      store.setCurrentAgentNode('gatherer_node');
-      store.setSyncStatus('Analyzing and gathering specifications...');
-
-      setTimeout(() => {
-        const nextVer = deps.currentVersion + 1;
-        const cleanInput = inputMsg.trim();
-
-        // Extract a concise title from the user input
-        const storyTitle = cleanInput.length > 60 ? cleanInput.substring(0, 60) + '...' : cleanInput;
-        const ticketCode = `US-PP-0${nextVer}`;
-
-        // Create a new structured User Story
-        const newUserStory: UserStory = {
-          ticket_code: ticketCode,
-          story_title: storyTitle,
-          as_a: 'Corporate Merchant Retailer',
-          i_want_to: cleanInput,
-          so_that: 'the transaction or payment specification is safely persisted and reconciliation is automated',
-          acceptance_criteria: [
-            `Verify that system implements: "${cleanInput}"`,
-            'Ensure proper auditing, security logging and response validation checks are executed.',
-          ],
-        };
-
-        const updatedStories = [...store.structuredRequirements.user_stories, newUserStory];
-        const newReqs: StructuredRequirements = {
-          epic_name: 'PromptPay Real-Time Merchant Settlement Engine',
-          version: nextVer,
-          user_stories: updatedStories,
-        };
-
-        const agentReplyText = `📥 **Requirements Gathered (Local Fallback)!**
-
-I have successfully structured your input into the Agile Requirements board:
-- **Story Code**: \`${ticketCode}\`
-- **Specification**: *"${cleanInput}"*
-
-To run compliance checks on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.`;
-
-        // Update Version History
-        const newHist: VersionHistory = {
-          version: nextVer,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-          author: 'Thanyathip (Product Owner)',
-          description: cleanInput.substring(0, 70) + (cleanInput.length > 70 ? '...' : ''),
-          requirementsSnapshot: newReqs,
-        };
-
-        store.setVersionHistory(prev => [newHist, ...prev]);
-        store.setStructuredRequirements(newReqs);
-        store.setCurrentVersion(nextVer);
-
-        store.setMessages(prev => [...prev, {
-          id: `agent-fallback-${Date.now()}`,
-          role: 'assistant',
-          content: agentReplyText,
-          timestamp: nowTime(),
-          isPendingClarifications: false,
-        }]);
-
-        store.setSyncStatus(`State updated to Version ${nextVer}.0`);
-        store.setIsProcessing(false);
-        store.setCurrentAgentNode(null);
-      }, 1000);
-    }, 600);
-  };
+  // (Removed) The former `simulateAgentWorkflowFallback` fabricated a fake user
+  // story + version bump locally whenever any backend call failed. It silently
+  // "saved" data the backend never saw and drove the misleading "(Local
+  // Fallback)" messages. All failure paths now surface a truthful error instead.
 
   // Submit Answer to Clarifications Form
   const handleSubmitClarifications = async (e: React.FormEvent) => {

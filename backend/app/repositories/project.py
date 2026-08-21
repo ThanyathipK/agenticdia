@@ -25,7 +25,10 @@ class ProjectRepository:
     async def list_all(session: AsyncSession) -> List[Dict[str, Any]]:
         stmt = select(ProjectModel)
         result = await session.execute(stmt)
-        projects = result.scalars().all()
+        projects = list(result.scalars().all())
+        # Pinned chats/projects float to the top of the sidebar, then order by
+        # most recently updated first.
+        projects.sort(key=lambda p: (not (p.is_pinned or False), -(p.updated_at or p.created_at).timestamp() if (p.updated_at or p.created_at) else 0))
         return [serialize_project(p) for p in projects]
 
     @staticmethod
@@ -87,10 +90,36 @@ class ProjectRepository:
                 p.description = updates["description"]
             if "industry_standard" in updates:
                 p.industry_standard = updates["industry_standard"]
+            if "is_pinned" in updates:
+                p.is_pinned = bool(updates["is_pinned"])
             await session.flush()
             await session.refresh(p)
             return serialize_project(p)
         return None
+
+    @staticmethod
+    async def toggle_pinned(project_id: str, is_pinned: bool, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        """Pin or unpin a project (chat) so it floats to the top of the sidebar.
+
+        Args:
+            project_id: Project UUID string.
+            is_pinned: New pinned state to apply.
+            session: Active asynchronous database session.
+
+        Returns:
+            Optional[Dict[str, Any]]: The updated project record, or None if the
+                project does not exist.
+        """
+        pid = as_uuid(project_id)
+        stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        result = await session.execute(stmt)
+        p = result.scalar_one_or_none()
+        if not p:
+            return None
+        p.is_pinned = bool(is_pinned)
+        await session.flush()
+        await session.refresh(p)
+        return serialize_project(p)
 
     @staticmethod
     async def delete(project_id: str, session: AsyncSession) -> bool:

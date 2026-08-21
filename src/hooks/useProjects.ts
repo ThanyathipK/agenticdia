@@ -30,6 +30,7 @@ export interface UseProjectsResult {
   handleRenameProject: (projectId: string, newName: string) => Promise<void>;
   handleDeleteProject: (projIdToDelete: string) => Promise<void>;
   handleCreateProject: () => Promise<void>;
+  handleTogglePin: (projectId: string) => Promise<void>;
 }
 
 export function useProjects(): UseProjectsResult {
@@ -121,6 +122,26 @@ export function useProjects(): UseProjectsResult {
     }
   };
 
+  // Handle project pin/unpin — pins the chat to the top of the sidebar.
+  const handleTogglePin = async (projectIdToPin: string) => {
+    const target = projects.find(p => p.id === projectIdToPin);
+    const nextPinned = !(target && target.is_pinned);
+    // Optimistic update for snappy UI, then reconcile with the server.
+    setProjects(prev =>
+      prev.map(p => (p.id === projectIdToPin ? { ...p, is_pinned: nextPinned } : p))
+    );
+    try {
+      const updated = await api.toggleProjectPin(projectIdToPin, nextPinned);
+      setProjects(prev => prev.map(p => (p.id === projectIdToPin ? { ...p, is_pinned: updated.is_pinned } : p)));
+    } catch (err) {
+      setProjects(prev =>
+        prev.map(p => (p.id === projectIdToPin ? { ...p, is_pinned: !nextPinned } : p))
+      );
+      handleError('Failed to update the pin.', err);
+    }
+    setProjectContextMenu(null);
+  };
+
   return {
     projectId,
     setProjectId,
@@ -137,5 +158,6 @@ export function useProjects(): UseProjectsResult {
     handleRenameProject,
     handleDeleteProject,
     handleCreateProject,
+    handleTogglePin,
   };
 }

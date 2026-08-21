@@ -47,6 +47,7 @@ export type ProjectRow = {
   locked_by: string | null;
   locked_at: string | null;
   lock_reason: string | null;
+  is_pinned: boolean;
   created_at: string;
 }
 
@@ -230,6 +231,7 @@ export const INITIAL_PROJECTS: ProjectRow[] = [
     locked_by: null,
     locked_at: null,
     lock_reason: null,
+    is_pinned: true,
     created_at: '2026-07-09T10:00:00Z'
   },
   {
@@ -242,6 +244,7 @@ export const INITIAL_PROJECTS: ProjectRow[] = [
     locked_by: 'compliance.auditor@sec.or.th',
     locked_at: '2026-07-09T11:35:00Z',
     lock_reason: 'Pending ISO-20022 certification audit',
+    is_pinned: false,
     created_at: '2026-07-09T11:30:00Z'
   }
 ];

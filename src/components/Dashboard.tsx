@@ -25,6 +25,8 @@ import {
   CheckCircle2,
   Lock,
   Unlock,
+  Pin,
+  PinOff,
 } from 'lucide-react';
 import { useProjectState } from '../hooks/useProjectState';
 import { ChatPanel } from './ChatPanel';
@@ -50,6 +52,7 @@ export default function Dashboard() {
     handleRenameProject,
     handleDeleteProject,
     handleCreateProject,
+    handleTogglePin,
     pendingActions,
     setPendingActions,
     loadProjectState,
@@ -123,7 +126,9 @@ export default function Dashboard() {
           {projects.length === 0 && !historyCollapsed && (
             <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">ยังไม่มีโปรเจกต์</div>
           )}
-          {projects.map(p => {
+          {[...projects]
+            .sort((a, b) => Number(!!b.is_pinned) - Number(!!a.is_pinned))
+            .map(p => {
             const isActive = projectId === p.id;
             return (
               <div key={p.id} className="relative group">
@@ -179,6 +184,18 @@ export default function Dashboard() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
+                              handleTogglePin(p.id);
+                            }}
+                            className={`p-1 rounded-lg transition-colors ${p.is_pinned ? 'text-primary hover:bg-primary/10' : 'text-slate-400 hover:text-primary hover:bg-primary/10'}`}
+                            title={p.is_pinned ? 'Unpin' : 'Pin'}
+                          >
+                            {p.is_pinned
+                              ? <Pin className="w-3 h-3" />
+                              : <PinOff className="w-3 h-3" />}
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
                               setRenameProjectId(p.id);
                               setRenameProjectName(p.name);
                             }}
@@ -213,6 +230,27 @@ export default function Dashboard() {
             className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-xl py-1 min-w-[160px]"
             style={{ left: projectContextMenu.x, top: projectContextMenu.y }}
           >
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
+              onClick={() => {
+                handleTogglePin(projectContextMenu.projectId);
+              }}
+            >
+              {(() => {
+                const p = projects.find((pr: any) => pr.id === projectContextMenu.projectId);
+                return p && p.is_pinned ? (
+                  <>
+                    <Pin className="w-3.5 h-3.5 text-primary" />
+                    <span>Unpin</span>
+                  </>
+                ) : (
+                  <>
+                    <PinOff className="w-3.5 h-3.5" />
+                    <span>Pin</span>
+                  </>
+                );
+              })()}
+            </button>
             <button
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
               onClick={() => {
