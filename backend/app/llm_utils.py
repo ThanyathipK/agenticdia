@@ -49,8 +49,8 @@ def strip_markdown_fences(text: str) -> str:
 
 def normalize_output(parsed_output: Any) -> Dict[str, Any]:
     """Convert a Pydantic model or mapping into a plain dict."""
-    if hasattr(parsed_output, "dict"):
-        return parsed_output.dict()
+    if hasattr(parsed_output, "model_dump"):
+        return parsed_output.model_dump()
     if isinstance(parsed_output, dict):
         return parsed_output
     return dict(parsed_output)

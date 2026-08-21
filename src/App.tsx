@@ -1,6 +1,4 @@
 import { useState } from 'react';
-import { Check, AlertCircle } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
 import Dashboard from './components/Dashboard';
 import SchemaExplorer from './components/schema/SchemaExplorer';
 import { ToastHost } from './components/Toast';
@@ -52,47 +50,13 @@ export default function App() {
   const [conversationMessages, setConversationMessages] = useState<ConversationMessageRow[]>(INITIAL_CONVERSATION_MESSAGES);
   const [artifactEventLogs, setArtifactEventLogs] = useState<ArtifactEventLogRow[]>(INITIAL_ARTIFACT_EVENT_LOGS);
 
-  // General Notification Alert Toast
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [toastType, setToastType] = useState<'success' | 'info'>('success');
-
-  const showToast = (message: string, type: 'success' | 'info' = 'success') => {
-    setToastMessage(message);
-    setToastType(type);
-    setTimeout(() => {
-      setToastMessage(null);
-    }, 4000);
-  };
-
   return (
     <div id="app-container" className="w-full h-screen bg-slate-100 flex flex-col font-sans text-slate-800 antialiased overflow-hidden">
       
       {/* Centralized error/warning/system toasts (covers Dashboard & ConfirmationPanel) */}
       <ToastHost />
       
-      {/* Dynamic Alert Banner/Toast */}
-      <AnimatePresence>
-        {toastMessage && (
-          <motion.div 
-            initial={{ opacity: 0, y: -50 }}
-            animate={{ opacity: 1, y: 16 }}
-            exit={{ opacity: 0, y: -50 }}
-            className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 flex items-center gap-3 px-5 py-3 rounded-xl shadow-xl border bg-slate-900 border-slate-700 text-white max-w-md"
-          >
-            {toastType === 'success' ? (
-              <div className="w-5 h-5 bg-emerald-500 rounded-full flex items-center justify-center text-slate-900">
-                <Check className="w-3.5 h-3.5 stroke-[3]" />
-              </div>
-            ) : (
-              <div className="w-5 h-5 bg-navy-500 rounded-full flex items-center justify-center text-slate-900">
-                <AlertCircle className="w-3.5 h-3.5 stroke-[3]" />
-              </div>
-            )}
-            <span className="text-sm font-medium">{toastMessage}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-{/* GLOBAL TOP NAVBAR (Matching Stitch Header precisely) */}
+      {/* GLOBAL TOP NAVBAR (Matching Stitch Header precisely) */}
       <header className="h-16 w-full shrink-0 flex items-center justify-between px-6 bg-white border-b border-black/5 z-50">
         {/* Left: Branding & Project Title */}
         <div className="flex items-center gap-4 min-w-[280px]">
@@ -135,7 +99,6 @@ export default function App() {
             setCriteria={setCriteria}
             setQuestions={setQuestions}
             setVersions={setVersions}
-            showToast={showToast}
           />
         )}
       </div>

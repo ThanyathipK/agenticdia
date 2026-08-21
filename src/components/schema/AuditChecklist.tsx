@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { ShieldCheck, Activity, Check, HelpCircle, Send } from 'lucide-react';
 import { ClarificationQuestionRow } from '../../data';
+import { notify } from '../Toast';
 
 interface AuditChecklistProps {
   questions: ClarificationQuestionRow[];
   setQuestions: React.Dispatch<React.SetStateAction<ClarificationQuestionRow[]>>;
-  showToast: (message: string, type?: 'success' | 'info') => void;
 }
 
 /**
@@ -13,7 +13,7 @@ interface AuditChecklistProps {
  * Renders the DDL rigor / index coverage compliance cards plus the interactive
  * stakeholder clarification resolver backed by the clarification_questions table.
  */
-export default function AuditChecklist({ questions, setQuestions, showToast }: AuditChecklistProps) {
+export default function AuditChecklist({ questions, setQuestions }: AuditChecklistProps) {
   // Inline Question answer helper
   const [resolvingQuestionId, setResolvingQuestionId] = useState<string | null>(null);
   const [answerInput, setAnswerInput] = useState<string>('');
@@ -26,7 +26,7 @@ export default function AuditChecklist({ questions, setQuestions, showToast }: A
     setQuestions(prev => prev.map(q => q.id === questionId ? { ...q, user_answer: answerInput.trim(), is_resolved: true } : q));
     setResolvingQuestionId(null);
     setAnswerInput('');
-    showToast("Audit Clarification answer logged! Metric state updated.", "success");
+    notify("Audit Clarification answer logged! Metric state updated.", 'success');
   };
 
   return (

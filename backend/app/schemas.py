@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from uuid import UUID
 from datetime import datetime
 
@@ -234,6 +234,116 @@ class ProjectDeleteResponse(BaseModel):
     project_id: str = Field(..., description="UUID string of the deleted project.")
 
 
+# --------------------------------------------------------------------------
+# Typed nested detail models for the flattened requirement-state payload.
+#
+# The legacy repository serializers emit denormalized, lock-augmented shapes
+# (e.g. user stories enriched with ``acceptance_criteria``, requirements that
+# omit ``project_id``/``status``). Every model keeps ``extra='allow'`` and all
+# non-identifying fields optional so both the flattened state payload and the
+# standalone per-entity responses serialize without loss or validation errors.
+# --------------------------------------------------------------------------
+
+
+class UserStoryDetail(BaseModel):
+    """A single user story as emitted by ``serialize_user_story`` (optionally lock-augmented)."""
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[str] = Field(None, description="Story UUID string.")
+    project_id: Optional[str] = Field(None, description="Owning project UUID string.")
+    ticket_code: Optional[str] = Field(None, description="Ticket code (e.g. US-001).")
+    story_title: Optional[str] = Field(None, description="Human-readable story title.")
+    title: Optional[str] = Field(None, description="Legacy alias of the story title.")
+    as_a: Optional[str] = Field(None, description="User role or persona.")
+    i_want_to: Optional[str] = Field(None, description="Requested action/task.")
+    so_that: Optional[str] = Field(None, description="Business benefit/outcome.")
+    acceptance_criteria: Optional[List[str]] = Field(default_factory=list, description="Given/When/Then criteria.")
+    status: Optional[str] = Field("active", description="Current story status.")
+    version: Optional[int] = Field(None, description="Story revision.")
+    last_modified_by: Optional[str] = Field(None, description="Actor that last modified.")
+    change_type: Optional[str] = Field(None, description="Change classification.")
+    is_locked: Optional[bool] = Field(False, description="Whether the story is locked.")
+    locked_by: Optional[str] = Field(None, description="Locking actor.")
+    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Lock reason.")
+
+
+class BusinessGoalItem(BaseModel):
+    """A parsed business-goal entry (may appear as a plain string in legacy payloads)."""
+    model_config = ConfigDict(extra="allow")
+
+    description: Optional[str] = Field(None, description="Business-goal statement.")
+
+
+class ActorItem(BaseModel):
+    """A system-actor definition (may appear as a plain string in legacy payloads)."""
+    model_config = ConfigDict(extra="allow")
+
+    name: Optional[str] = Field(None, description="Actor name.")
+
+
+class AcceptanceCriterionItem(BaseModel):
+    """An acceptance criterion (may appear as a plain string in legacy payloads)."""
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[str] = Field(None, description="Criterion UUID string.")
+    project_id: Optional[str] = Field(None, description="Owning project UUID string.")
+    ticket_code: Optional[str] = Field(None, description="Linked user-story ticket code.")
+    user_story_id: Optional[str] = Field(None, description="Linked user-story UUID string.")
+    criteria_text: Optional[str] = Field(None, description="Criterion body.")
+    status: Optional[str] = Field(None, description="Criterion status.")
+    version: Optional[int] = Field(None, description="Criterion version.")
+    last_modified_by: Optional[str] = Field(None, description="Actor that last modified.")
+    change_type: Optional[str] = Field(None, description="Change classification.")
+
+
+class ClarificationQuestionDetail(BaseModel):
+    """A clarification question on the compliance audit."""
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[str] = Field(None, description="Question UUID string.")
+    project_id: Optional[str] = Field(None, description="Owning project UUID string.")
+    checklist_category: Optional[str] = Field(None, description="Compliance checklist category.")
+    target_user_story_id: Optional[str] = Field(None, description="Target story ticket code or UUID.")
+    question_text: Optional[str] = Field(None, description="Human-readable question.")
+    user_answer: Optional[str] = Field(None, description="Stakeholder resolution text, if answered.")
+    is_resolved: Optional[bool] = Field(None, description="Whether the question has been resolved.")
+
+
+class RequirementDetail(BaseModel):
+    """Requirement record carrying lock metadata and optional nested user stories."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Requirement UUID string.")
+    project_id: Optional[str] = Field(None, description="Owning project UUID string.")
+    epic_id: Optional[str] = Field(None, description="Owning epic UUID string, if any.")
+    requirement_code: str = Field(..., description="Requirement code (e.g. REQ-001).")
+    title: str = Field(..., description="Requirement title.")
+    description: Optional[str] = Field(None, description="Requirement description.")
+    priority: Optional[str] = Field(None, description="Priority level.")
+    status: Optional[str] = Field("active", description="Status: 'active' or 'deleted'.")
+    is_locked: Optional[bool] = Field(False, description="Whether locked against edits.")
+    locked_by: Optional[str] = Field(None, description="Locking actor.")
+    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Lock reason.")
+    user_stories: Optional[List[UserStoryDetail]] = Field(default_factory=list, description="User stories under this requirement.")
+
+
+class ConversationMessageResponse(BaseModel):
+    """A single persisted conversation message."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Message UUID string.")
+    conversation_id: str = Field(..., description="Conversation/thread UUID string.")
+    project_id: str = Field(..., description="Project UUID string the message belongs to.")
+    role: str = Field(..., description="Message role: 'user' or 'assistant'.")
+    message: str = Field(..., description="Raw message text.")
+    content: str = Field(..., description="Alias of the raw message text.")
+    workflow_state: str = Field("", description="Workflow state captured at persistence time.")
+    intent: str = Field("", description="Detected intent captured at persistence time.")
+    created_at: str = Field("", description="ISO8601 timestamp of the message.")
+
+
 class RequirementStateResponse(BaseModel):
     """
     Flattened requirement-state payload shared by project/requirement routes.
@@ -246,48 +356,19 @@ class RequirementStateResponse(BaseModel):
 
     project_id: str = Field(..., description="Project UUID string.")
     project_name: Optional[str] = Field(None, description="Human-readable project name.")
-    requirements: List[Any] = Field(default_factory=list, description="Requirement entries, each carrying its own user_stories.")
-    business_goals: List[Any] = Field(default_factory=list, description="Parsed business-goal statements.")
-    actors: List[Any] = Field(default_factory=list, description="System actor definitions.")
-    user_stories: List[Any] = Field(default_factory=list, description="Flattened list of active user stories.")
-    acceptance_criteria: List[Any] = Field(default_factory=list, description="Flattened list of acceptance criteria.")
-    clarification_questions: List[Any] = Field(default_factory=list, description="Open/resolved clarification questions.")
+    requirements: List[RequirementDetail] = Field(default_factory=list, description="Requirement entries, each carrying its own user_stories.")
+    business_goals: List[Union[str, BusinessGoalItem]] = Field(default_factory=list, description="Parsed business-goal statements.")
+    actors: List[Union[str, ActorItem]] = Field(default_factory=list, description="System actor definitions.")
+    user_stories: List[UserStoryDetail] = Field(default_factory=list, description="Flattened list of active user stories.")
+    acceptance_criteria: List[Union[str, AcceptanceCriterionItem]] = Field(default_factory=list, description="Flattened list of acceptance criteria.")
+    clarification_questions: List[ClarificationQuestionDetail] = Field(default_factory=list, description="Open/resolved clarification questions.")
     validation_status: str = Field("pending", description="Compliance validation status: 'pending', 'valid' or 'invalid'.")
     generated_prd: str = Field("", description="Markdown PRD content.")
     generated_diagrams: str = Field("", description="Mermaid diagram source.")
     current_workflow_state: str = Field("gatherer_node", description="Current multi-agent workflow node.")
     version_number: int = Field(1, description="Current requirement-document revision.")
     updated_at: Optional[str] = Field(None, description="ISO8601 timestamp of the last update.")
-    conversation_history: List[Any] = Field(default_factory=list, description="Persisted conversation messages for the project.")
-
-
-class ConversationMessageResponse(BaseModel):
-    """A single persisted conversation message."""
-    id: str = Field(..., description="Message UUID string.")
-    conversation_id: str = Field(..., description="Conversation/thread UUID string.")
-    project_id: str = Field(..., description="Project UUID string the message belongs to.")
-    role: str = Field(..., description="Message role: 'user' or 'assistant'.")
-    message: str = Field(..., description="Raw message text.")
-    content: str = Field(..., description="Alias of the raw message text.")
-    workflow_state: str = Field("", description="Workflow state captured at persistence time.")
-    intent: str = Field("", description="Detected intent captured at persistence time.")
-    created_at: str = Field("", description="ISO8601 timestamp of the message.")
-
-
-class RequirementDetail(BaseModel):
-    """Requirement record including lock metadata."""
-    id: str = Field(..., description="Requirement UUID string.")
-    project_id: str = Field(..., description="Owning project UUID string.")
-    epic_id: Optional[str] = Field(None, description="Owning epic UUID string, if any.")
-    requirement_code: str = Field(..., description="Requirement code (e.g. REQ-001).")
-    title: str = Field(..., description="Requirement title.")
-    description: Optional[str] = Field(None, description="Requirement description.")
-    priority: Optional[str] = Field(None, description="Priority level.")
-    status: str = Field(..., description="Status: 'active' or 'deleted'.")
-    is_locked: bool = Field(False, description="Whether the requirement is locked against edits.")
-    locked_by: Optional[str] = Field(None, description="Identifier of the locking user/agent.")
-    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
-    lock_reason: Optional[str] = Field(None, description="Reason supplied when locking.")
+    conversation_history: List[ConversationMessageResponse] = Field(default_factory=list, description="Persisted conversation messages for the project.")
 
 
 class RequirementLockResponse(BaseModel):
@@ -412,6 +493,34 @@ class ProjectEventListResponse(BaseModel):
     offset: int = Field(..., description="Pagination offset.")
 
 
+class StructuredRequirementsDetail(BaseModel):
+    """Typed ``structured_requirements`` block returned by the multi-agent workflow.
+
+    The field may be sparse depending on which agent produced it (Gatherer emits
+    ``requirements`` + ``user_stories``; earlier stages emit ``epic_name`` only),
+    so every field is optional and unknown agent keys are preserved.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    epic_name: Optional[str] = Field(None, description="Unified theme of extracted stories.")
+    version: Optional[int] = Field(None, description="Structured-requirements revision.")
+    user_stories: List[UserStoryDetail] = Field(default_factory=list, description="Parsed user stories.")
+    requirements: Optional[List[RequirementDetail]] = Field(default_factory=list, description="Requirement entries with nested stories.")
+
+
+class AuditResultDetail(BaseModel):
+    """Typed ``audit_result`` block returned by the compliance auditor node."""
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[str] = Field(None, description="Audit-result UUID string.")
+    project_id: Optional[str] = Field(None, description="Owning project UUID string.")
+    is_valid: Optional[bool] = Field(None, description="Whether the audited requirements passed.")
+    audit_version_reviewed: Optional[int] = Field(None, description="Version reviewed by the auditor.")
+    passed_checks: List[str] = Field(default_factory=list, description="Passed compliance checks.")
+    failed_checks: List[str] = Field(default_factory=list, description="Failed compliance checks.")
+    clarification_questions: List[ClarificationQuestionDetail] = Field(default_factory=list, description="Questions surfaced by the audit.")
+
+
 class ProcessRequirementsResponse(BaseModel):
     """
     Payload returned by the multi-agent requirements processing endpoint.
@@ -424,8 +533,8 @@ class ProcessRequirementsResponse(BaseModel):
     status: str = Field(..., description="Outcome status: 'completed', 'audit_pending' or 'general_chat'.")
     detected_intent: Optional[str] = Field(None, description="Detected intent (e.g. GENERAL_CHAT, UPDATE_REQUIREMENT).")
     workflow_routing: Optional[Dict[str, Any]] = Field(None, description="Workflow-classification result.")
-    structured_requirements: Optional[Dict[str, Any]] = Field(None, description="Structured requirements payload.")
-    audit_result: Optional[Dict[str, Any]] = Field(None, description="Compliance audit result.")
+    structured_requirements: Optional[StructuredRequirementsDetail] = Field(None, description="Structured requirements payload.")
+    audit_result: Optional[AuditResultDetail] = Field(None, description="Compliance audit result.")
     prd_markdown: Optional[str] = Field(None, description="Generated PRD markdown, if produced.")
     mermaid_diagram: Optional[str] = Field(None, description="Generated Mermaid diagram source, if produced.")
     message: Optional[str] = Field(None, description="Assistant/agent message text.")

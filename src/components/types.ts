@@ -19,8 +19,8 @@ export interface RequirementItem {
   description?: string;
   user_stories: UserStory[];
   is_locked?: boolean;
-  locked_by?: string;
-  locked_at?: string;
+  locked_by?: string | null;
+  locked_at?: string | null;
 }
 
 export interface StructuredRequirements {
@@ -32,9 +32,9 @@ export interface StructuredRequirements {
 
 export interface ClarificationQuestion {
   checklist_category: string;
-  target_user_story_id: string;
+  target_user_story_id?: string | null;
   question_text: string;
-  user_answer?: string;
+  user_answer?: string | null;
   is_resolved?: boolean;
 }
 
@@ -68,4 +68,20 @@ export interface PRDSection {
   id: string;
   title: string;
   content: string;
+}
+
+// Optimistic lock state tracked in the UI for generic artifacts.
+export interface ArtifactLockState {
+  is_locked: boolean;
+  locked_by?: string | null;
+  locked_at?: string | null;
+  lock_reason?: string | null;
+}
+
+// Optimistic lock state tracked in the UI keyed by requirement code.
+export interface RequirementLockState {
+  is_locked: boolean;
+  locked_by?: string | null;
+  locked_at?: string | null;
+  artifact_id?: string;
 }

@@ -197,6 +197,18 @@ This single command starts **both** processes:
 
 Vite proxies `/api/*` → `http://127.0.0.1:8000`, so the SPA never needs a hardcoded API URL.
 
+> [!IMPORTANT]
+> **The backend is single-process by design today.** The rate limiter
+> (`RATE_LIMIT_STORE=in-process`), the SSE pub/sub event bus, and the in-memory
+> queues are all process-local. Run **one** uvicorn worker — uvicorn's default —
+> and do **not** pass `--workers N` or `--reload`. To make a misconfiguration
+> impossible to miss, the app **refuses to boot** when an in-process rate limiter
+> is combined with multiple workers, unless you set
+> `RATE_LIMIT_ALLOW_MULTI_PROCESS_IN_PROCESS=true` (weaker posture: the 429 budget
+> then scales by worker count). Before deploying behind a reverse proxy or load
+> balancer, set `TRUST_PROXY_HEADERS=true` + `TRUSTED_PROXY_IPS` so every client
+> keeps its own rate-limit bucket.
+
 ### 6. Verify it is healthy
 
 ```bash
@@ -237,6 +249,9 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `RATE_LIMIT_ENABLED` | `true` | Master switch for in-process sliding-window rate limiting on LLM-facing endpoints |
 | `RATE_LIMIT_CHAT_LIMIT` / `RATE_LIMIT_CHAT_WINDOW` | `30` / `60` | Max `/api/chat` requests per client IP per window (seconds) |
 | `RATE_LIMIT_WORKFLOW_LIMIT` / `RATE_LIMIT_WORKFLOW_WINDOW` | `20` / `60` | Max workflow-endpoint requests (`process-requirements`, `workflow-router`, `intent-detector`, `requirement-matcher`) per client IP per window (seconds) |
+| `RATE_LIMIT_STORE` | `in-process` | Limiter backend. Only `in-process` exists today, and it **requires a single uvicorn worker** — the app refuses to boot with `--workers N` so the 429 budget can never silently scale by worker count |
+| `RATE_LIMIT_ALLOW_MULTI_PROCESS_IN_PROCESS` | `false` | Explicit opt-out: run N workers with the in-process store (each worker gets an independent budget — weaker posture; the app warns loudly at startup) |
+| `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_IPS` | `false` / *(empty)* | Behind a reverse proxy, trust `X-Forwarded-For`/`Forwarded` client IPs **only from your own proxy IPs**, so every caller keeps its own rate-limit bucket |
 | `DEBUG` | `false` | Enables uvicorn `--reload` and SQL echo |
 | `APP_NAME` | `Enterprise Requirements Architecture Core` | Display name used in health/docs |
 ---
@@ -403,6 +418,37 @@ curl -X POST "http://localhost:3000/api/confirm-action/<action-id>?project_id=00
 ## 🗄️ Database Schema
 
 Tables are provisioned by **Alembic migrations that run automatically at backend startup** (see [`backend/app/migrations.py`](backend/app/migrations.py)). The full PostgreSQL reference DDL lives in [`backend/init.sql`](backend/init.sql) and drives the in-app Schema Explorer.
+
+### Single source of truth & drift checking
+
+`backend/init.sql` is the **canonical schema** for the Schema Explorer. The
+frontend no longer keeps a hand-maintained copy of the tables/columns/indexes:
+`src/data.ts` derives `TABLES` from `init.sql` at build time (Vite `?raw`
+import) via the parser in `src/schema/parseDdl.ts`, then merges the
+human-authored descriptions / banking context from `src/schema/annotations.ts`.
+This guarantees the explorer can never display a schema that drifted from the
+deployed DDL.
+
+Run the drift harness to verify there is exactly one source of truth:
+
+```bash
+npm run schema:drift   # python backend/check_schema_drift.py
+npm run schema:parse   # tsx scripts/parse_check.ts  (inspect the parsed DDL)
+```
+
+The harness compares `init.sql` against `backend/app/models.py` (SQLAlchemy
+metadata) and against the `INITIAL_*` / `*Row` seed data in `src/data.ts`,
+reporting — and exiting non-zero on — any table or column that exists on only
+one side. `requirement_states` and `pending_actions` are intentionally
+provisioned by Alembic migrations and are allowlisted.
+
+> ⚠️ **Known pre-existing backend drift.** The harness currently flags that
+> `models.py` names some columns differently than `init.sql`: `audit_results`
+> (`version_reviewed` vs `audit_version_reviewed`) and `prd_documents`
+> (`markdown_content`/`mermaid_graph` vs `prd_markdown`/`mermaid_diagram`).
+> The frontend follows `init.sql`. Reconcile `models.py` (plus its repositories
+> / serializers) with `init.sql` to clear the drift.
+
 
 | Table | Purpose |
 |-------|---------|

@@ -1,11 +1,14 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.migrations import run_migrations, seed_default_user
+from app.rate_limit import verify_single_worker_guarantee
 from app.routes import chat, projects, requirements, lock, events
 from app.llm_client import check_lm_studio_health
 
@@ -24,6 +27,13 @@ async def lifespan(app: FastAPI):
     and the UI (which surfaces the same signal via ``GET /api/health``) can react.
     """
     logger.info("Application startup: running migrations and seeding data...")
+
+    # Finding #39 hardening — fail loud instead of letting 429 protection
+    # silently disappear. Refuses to boot when the in-process limiter is paired
+    # with multiple uvicorn workers (each worker would keep its own counter),
+    # unless the operator explicitly opts into that weaker posture.
+    verify_single_worker_guarantee()
+
     await run_migrations()
     await seed_default_user()
 
@@ -137,6 +147,57 @@ app.include_router(projects.router, tags=["Projects"])
 app.include_router(requirements.router, tags=["Requirements & Workflow"])
 app.include_router(lock.router, tags=["Locking & Pending Actions"])
 app.include_router(events.router, tags=["Events & SSE"])
+
+
+# ==========================================
+# CENTRALIZED ERROR HANDLERS
+# ==========================================
+# Standardize how client errors (405 Method Not Allowed, 415 Unsupported Media Type,
+# 429 Too Many Requests, 404, etc.) and body-validation failures are surfaced. Every
+# handler returns a consistent JSON ``{"detail": ...}`` body and, critically, logs the
+# failure loudly instead of swallowing it — so transient/outage errors remain visible
+# to operators via the application logs rather than being silently masked.
+# (Review finding: "silent error swallowing".)
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Log server errors loudly, then return a structured JSON error body.
+
+    All ``HTTPException``-derived errors (including 404, 405, 415 and the 429 raised
+    by the rate limiter) flow through here. ``status_code``/``detail``/``headers`` are
+    preserved so, for example, the rate limiter's ``Retry-After`` header and message
+    are not lost.
+    """
+    if exc.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+        logger.error(
+            "Unhandled HTTP error on %s %s (status=%s)",
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc_info=True,
+        )
+    elif exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        logger.warning("Rate limited on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return a structured 422 for malformed bodies / unsupported content types."""
+    logger.warning(
+        "Request validation failed on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc.errors(),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors()},
+    )
 
 
 if __name__ == "__main__":

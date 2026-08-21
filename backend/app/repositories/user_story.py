@@ -166,6 +166,30 @@ class UserStoryRepository:
         return [serialize_user_story(s, pid, with_lock_fields=True) for s in stories]
 
     @staticmethod
+    async def get_by_requirement_ids(
+        requirement_ids: List[uuid.UUID],
+        session: AsyncSession,
+    ) -> Dict[uuid.UUID, List[Dict[str, Any]]]:
+        """
+        Batch-load user stories for many requirements in a single query.
+
+        Returns stories grouped by ``requirement_id``. This replaces per-requirement
+        ``get_by_project(session, requirement_id=...)`` calls that caused an N+1
+        round-trip cascade when assembling a project's full RequirementState.
+        """
+        grouped: Dict[uuid.UUID, List[Dict[str, Any]]] = {}
+        if not requirement_ids:
+            return grouped
+
+        stmt = select(UserStoryModel).where(UserStoryModel.requirement_id.in_(requirement_ids))
+        result = await session.execute(stmt)
+        for story in result.scalars().all():
+            grouped.setdefault(story.requirement_id, []).append(
+                serialize_user_story(story, story.project_id, with_lock_fields=True)
+            )
+        return grouped
+
+    @staticmethod
     async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
         sid = as_uuid(id_val)
         pid = as_uuid(project_id)

@@ -40,6 +40,7 @@ import {
   ArtifactEventLogRow,
   GridRow,
 } from '../../data';
+import { notify } from '../Toast';
 
 // Single source of truth for the displayed PostgreSQL DDL. Loaded at build time
 // from backend/init.sql (via Vite `?raw`) so the Schema Explorer always reflects
@@ -68,7 +69,6 @@ interface SchemaExplorerProps {
   setCriteria: React.Dispatch<React.SetStateAction<AcceptanceCriterionRow[]>>;
   setQuestions: React.Dispatch<React.SetStateAction<ClarificationQuestionRow[]>>;
   setVersions: React.Dispatch<React.SetStateAction<VersionHistoryRow[]>>;
-  showToast: (message: string, type?: 'success' | 'info') => void;
 }
 
 /**
@@ -99,7 +99,6 @@ export default function SchemaExplorer({
   setCriteria,
   setQuestions,
   setVersions,
-  showToast,
 }: SchemaExplorerProps) {
   // Navigation Tabs: 'ddl' | 'explorer' | 'ledger' | 'checklist'
   const [activeTab, setActiveTab] = useState<'ddl' | 'explorer' | 'ledger' | 'checklist'>('explorer');
@@ -169,7 +168,7 @@ export default function SchemaExplorer({
   const copySqlToClipboard = () => {
     navigator.clipboard.writeText(fullSqlText);
     setCopiedSql(true);
-    showToast("PostgreSQL DDL script copied to clipboard!");
+    notify("PostgreSQL DDL script copied to clipboard!", 'success');
     setTimeout(() => setCopiedSql(false), 2000);
   };
 // Insert Simulated Database Record handler
@@ -182,7 +181,7 @@ export default function SchemaExplorer({
 
     if (selectedTableName === 'users') {
       if (!userForm.email || !userForm.fullName) {
-        showToast("Error: Missing required fields email or full_name", "info");
+        notify("Error: Missing required fields email or full_name", 'info');
         return;
       }
       const newRow: UserRow = {
@@ -198,7 +197,7 @@ export default function SchemaExplorer({
 
     } else if (selectedTableName === 'projects') {
       if (!projectForm.name) {
-        showToast("Error: Missing project name", "info");
+        notify("Error: Missing project name", 'info');
         return;
       }
       const newRow: ProjectRow = {
@@ -219,7 +218,7 @@ export default function SchemaExplorer({
 
     } else if (selectedTableName === 'epics') {
       if (!reqForm.epicName) {
-        showToast("Error: Epic name required", "info");
+        notify("Error: Epic name required", 'info');
         return;
       }
       const newRow: EpicRow = {
@@ -237,7 +236,7 @@ export default function SchemaExplorer({
 
     } else if (selectedTableName === 'requirements') {
       if (!reqForm.epicName) {
-        showToast("Error: Requirement title required", "info");
+        notify("Error: Requirement title required", 'info');
         return;
       }
       const newRow: RequirementRow = {
@@ -261,12 +260,12 @@ export default function SchemaExplorer({
       setReqForm(prev => ({ ...prev, epicName: '' }));
 } else if (selectedTableName === 'user_stories') {
       if (!storyForm.storyTitle || !storyForm.asA || !storyForm.iWantTo || !storyForm.soThat) {
-        showToast("Error: Complete story parts (As a, I want to, So that)", "info");
+        notify("Error: Complete story parts (As a, I want to, So that)", 'info');
         return;
       }
       // Check unique code
       if (userStories.some(s => s.ticket_code === storyForm.ticketCode)) {
-        showToast(`Error: Ticket code ${storyForm.ticketCode} is already registered.`, "info");
+        notify(`Error: Ticket code ${storyForm.ticketCode} is already registered.`, 'info');
         return;
       }
 
@@ -328,7 +327,7 @@ export default function SchemaExplorer({
       });
     }
 
-    showToast(`Successfully Simulated! Record inserted into local state.`, "success");
+    notify(`Successfully Simulated! Record inserted into local state.`, 'success');
     // Log virtual SQL to show enterprise transparency
     console.log("SIMULATED SQL INGRESS:\n", simulatedSql);
   };
@@ -338,16 +337,16 @@ export default function SchemaExplorer({
   const toggleEpicLock = (epicId: string) => {
     const epic = epics.find(e => e.id === epicId);
     if (!epic) {
-      showToast("Epic not found.", "info");
+      notify("Epic not found.", 'info');
       return;
     }
     const nextLocked = !epic.is_locked;
     setEpics(prev => prev.map(e => e.id === epicId ? { ...e, is_locked: nextLocked } : e));
-    showToast(
+    notify(
       nextLocked
         ? `Epic "${epic.epic_name}" locked.`
         : `Epic "${epic.epic_name}" unlocked.`,
-      "success"
+      'success'
     );
   };
 
@@ -547,7 +546,7 @@ export default function SchemaExplorer({
             <button 
               onClick={() => {
                 setIsSchemaLocked(!isSchemaLocked);
-                showToast(isSchemaLocked ? "Schema unlocked. Sandbox mutations allowed." : "Schema safely locked. Snapshot immutability enforced.", "info");
+                notify(isSchemaLocked ? "Schema unlocked. Sandbox mutations allowed." : "Schema safely locked. Snapshot immutability enforced.", 'info');
               }}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl transition-all border shadow-sm ${
                 isSchemaLocked 
@@ -561,7 +560,7 @@ export default function SchemaExplorer({
 
             <button 
               onClick={() => {
-                showToast("Initializing schema check... all constraints resolved in 0.2ms. Supabase sync OK.", "success");
+                notify("Initializing schema check... all constraints resolved in 0.2ms. Supabase sync OK.", 'success');
               }}
               className="flex items-center gap-1.5 px-4.5 py-1.5 text-xs font-semibold text-white bg-navy-600 rounded-xl hover:bg-navy-700 shadow-md shadow-navy-500/20 active:translate-y-0.5 transition-all"
             >
@@ -1075,7 +1074,6 @@ filteredGridData.map((row: GridRow, rIdx) => {
                   versions={versions}
                   setRequirements={setRequirements}
                   setVersions={setVersions}
-                  showToast={showToast}
                   getRequirementTitle={getRequirementTitle}
                   getProjectName={getProjectName}
                   getUserName={getUserName}
@@ -1089,7 +1087,6 @@ filteredGridData.map((row: GridRow, rIdx) => {
                 <AuditChecklist
                   questions={questions}
                   setQuestions={setQuestions}
-                  showToast={showToast}
                 />
               )}
 
@@ -1184,7 +1181,7 @@ filteredGridData.map((row: GridRow, rIdx) => {
                   <button 
                     onClick={() => {
                       setActiveTab('ledger');
-                      showToast("Navigate to Snapshot Ledger Workspace.", "info");
+                      notify("Navigate to Snapshot Ledger Workspace.", 'info');
                     }}
                     className="text-[10px] font-bold text-navy-600 uppercase tracking-tight hover:underline flex items-center justify-center gap-1 w-full"
                   >

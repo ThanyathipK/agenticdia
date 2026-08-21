@@ -5,7 +5,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from app.config import settings
-from app.agents import llm
+from app.llm_factory import llm
 from app.schemas import RequirementIntentDetectionResult, WorkflowRoutingResult, RequirementMatcherResult
 from app.prompt_loader import load_prompt, _PromptProxy
 from app.llm_utils import invoke_llm_structured
@@ -68,24 +68,17 @@ async def detect_semantic_changes(raw_input: str, current_stories: List[Dict[str
         )
         logger.info("Successfully obtained structured output for semantic changes.")
     except Exception as e2:
-        logger.error(f"Semantic change detection parsing failed completely: {str(e2)}")
-        # Fallback to a safe default NEW_REQUIREMENT if LLM fails
-        result = {
-            "changes": [
-                {
-                    "change_type": "NEW_REQUIREMENT",
-                    "target_requirement_id": None,
-                    "confidence": 1.0,
-                    "reason": f"Fallback due to analysis failure: {str(e2)}",
-                    "recommended_action": "INSERT"
-                }
-            ]
-        }
+        logger.error(f"Semantic change detection parsing failed completely: {str(e2)}", exc_info=True)
+        # FAIL LOUDLY instead of silently defaulting to a NEW_REQUIREMENT "INSERT"
+        # recommendation. A parse/LLM failure would otherwise be masked as a
+        # legitimate new requirement and drive a wrong workflow decision, so we
+        # propagate the error to the caller (which surfaces it as HTTP 500).
+        raise RuntimeError(f"Semantic change detection failed: {str(e2)}") from e2
 
     # Format into a clean list of changes
     changes = result.get("changes", [])
     logger.info(f"Detected {len(changes)} semantic changes.")
-    return [c if isinstance(c, dict) else c.dict() for c in changes]
+    return [c if isinstance(c, dict) else c.model_dump() for c in changes]
 
 
 async def detect_requirement_intent(raw_input: str, current_stories: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -267,7 +260,7 @@ async def generate_general_chat_response(
     system_prompt = load_prompt("general_chat")
     
     try:
-        from app.agents import llm
+        from app.llm_factory import llm
         from langchain_core.messages import SystemMessage, HumanMessage
         
         messages = [

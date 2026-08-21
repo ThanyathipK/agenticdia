@@ -5,7 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.config import settings
 from app.repositories import ConversationMessageRepository
 from app.schemas import ChatSessionRequest, ChatResponse, HealthResponse
-from app.llm_client import call_lm_studio, check_lm_studio_health
+from app.llm_client import (
+    call_lm_studio,
+    check_lm_studio_health,
+    LMStudioGatewayError,
+    LMStudioOutputParsingError,
+    LMStudioUnavailableError,
+)
 from app.event_manager import event_manager
 from app.rate_limit import rate_limit_dependency
 from app.input_validation import validate_messages_budget
@@ -100,7 +106,14 @@ async def post_chat_query(
             )
 
     logger.info("Initiating conversational analyst run.")
-    response = await call_lm_studio(formatted_messages)
+    try:
+        response = await call_lm_studio(formatted_messages)
+    except LMStudioOutputParsingError as err:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(err))
+    except LMStudioUnavailableError as err:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(err))
+    except LMStudioGatewayError as err:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(err))
     reply_text = response.get("text", "")
 
     if request.project_id and reply_text:

@@ -93,6 +93,40 @@ class AcceptanceCriteriaRepository:
         ]
 
     @staticmethod
+    async def get_by_requirement_ids(
+        requirement_ids: List[uuid.UUID],
+        project_id: str,
+        session: AsyncSession,
+    ) -> Dict[uuid.UUID, List[Dict[str, Any]]]:
+        """
+        Batch-load acceptance criteria (with their user-story ticket codes) for
+        many requirements in a single query.
+
+        Returns criteria grouped by ``requirement_id``. This avoids the
+        per-requirement ``get_by_project(session, requirement_id=...)`` calls
+        that caused an N+1 round-trip cascade when building a RequirementState.
+        """
+        grouped: Dict[uuid.UUID, List[Dict[str, Any]]] = {}
+        pid = as_uuid(project_id)
+        if not requirement_ids:
+            return grouped
+
+        stmt = select(
+            AcceptanceCriteriaModel,
+            UserStoryModel.ticket_code,
+            UserStoryModel.requirement_id,
+        ).join(
+            UserStoryModel, AcceptanceCriteriaModel.user_story_id == UserStoryModel.id
+        ).where(UserStoryModel.requirement_id.in_(requirement_ids))
+
+        result = await session.execute(stmt)
+        for ac, ticket_code, requirement_id in result.all():
+            grouped.setdefault(requirement_id, []).append(
+                serialize_acceptance_criteria(ac, pid, ticket_code)
+            )
+        return grouped
+
+    @staticmethod
     async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
         acid = as_uuid(id_val)
         pid = as_uuid(project_id)

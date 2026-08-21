@@ -10,6 +10,7 @@ import {
   INITIAL_USERS,
   INITIAL_REQUIREMENTS,
 } from '../../data';
+import { notify } from '../Toast';
 
 interface SnapshotLedgerProps {
   requirements: RequirementRow[];
@@ -20,7 +21,6 @@ interface SnapshotLedgerProps {
   versions: VersionHistoryRow[];
   setRequirements: React.Dispatch<React.SetStateAction<RequirementRow[]>>;
   setVersions: React.Dispatch<React.SetStateAction<VersionHistoryRow[]>>;
-  showToast: (message: string, type?: 'success' | 'info') => void;
   getRequirementTitle: (id: string) => string;
   getProjectName: (id: string) => string;
   getUserName: (id: string) => string;
@@ -42,7 +42,6 @@ export default function SnapshotLedger({
   versions,
   setRequirements,
   setVersions,
-  showToast,
   getRequirementTitle,
   getProjectName,
   getUserName,
@@ -99,7 +98,7 @@ export default function SnapshotLedger({
     // Append to version ledger
     setVersions([newVersionLog, ...versions]);
 
-    showToast(`Snapshot Captured! Mapped ${linkedStories.length} stories into immutable JSONB Ledger.`, "success");
+    notify(`Snapshot Captured! Mapped ${linkedStories.length} stories into immutable JSONB Ledger.`, 'success');
   };
 
   return (

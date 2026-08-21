@@ -7,7 +7,7 @@
 // and whenever the tab regains focus so an LLM that comes back online is detected
 // promptly.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import axios from 'axios';
+import { api } from '../api/client';
 
 export interface LmStudioHealthState {
   /** Whether the FastAPI backend itself responded to the health poll (null = first check pending). */
@@ -55,7 +55,7 @@ export function useLmStudioHealth(): LmStudioHealth {
     inFlightRef.current = true;
     setState(prev => ({ ...prev, checkingLmStudio: true }));
     try {
-      const { data } = await axios.get('/api/health');
+      const data = await api.fetchHealth();
       setState({
         backendOnline: true,
         lmStudioOnline: Boolean(data.lm_studio_online),

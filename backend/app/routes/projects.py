@@ -23,7 +23,12 @@ from app.schemas import (
     PRDVersionResponse,
     PRDExportResponse,
 )
-from app.llm_client import call_lm_studio
+from app.llm_client import (
+    call_lm_studio,
+    LMStudioGatewayError,
+    LMStudioOutputParsingError,
+    LMStudioUnavailableError,
+)
 from app.event_manager import event_manager
 
 logger = logging.getLogger("app.routes.projects")
@@ -57,7 +62,7 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
     Returns:
         ProjectCreated: The new project's UUID string and name.
     """
-    project_data = payload.dict()
+    project_data = payload.model_dump()
     project_data["id"] = str(uuid.uuid4())
     # Use system user UUID as default until proper auth is implemented
     project_data["user_id"] = "00000000-0000-0000-0000-000000000000"
@@ -87,7 +92,7 @@ async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSessi
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
-    updates = payload.dict()
+    updates = payload.model_dump()
     updated = await ProjectRepository.update(project_id, updates, db)
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -385,7 +390,14 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
         }
     ]
 
-    prd_response = await call_lm_studio(prompt)
+    try:
+        prd_response = await call_lm_studio(prompt)
+    except LMStudioOutputParsingError as err:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(err))
+    except LMStudioUnavailableError as err:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(err))
+    except LMStudioGatewayError as err:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(err))
     markdown_content = prd_response.get("text", "# PRD\n\nFailed to synthesize PRD.")
 
     # Persist the newly generated PRD as an immutable version record
@@ -398,7 +410,14 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
         }, db)
         logger.info(f"[PRD EXPORT] Created PRD version {version_record['version_number']} for project {project_id}.")
     except Exception as version_err:
-        logger.error(f"[PRD EXPORT] Failed to create PRD version: {str(version_err)}")
+        # FAIL LOUDLY: a failed PRD version persistence must not be masked as a
+        # successful export (the caller would otherwise receive a version_number that
+        # was never actually persisted to the DB).
+        logger.error(f"[PRD EXPORT] Failed to create PRD version: {str(version_err)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"PRD generated but failed to persist version record: {str(version_err)}",
+        ) from version_err
 
     await event_manager.publish(str(project_id), "prd_exported", {
         "project_id": str(project_id),

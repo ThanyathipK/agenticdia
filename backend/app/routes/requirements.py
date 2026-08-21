@@ -397,13 +397,19 @@ async def post_process_requirements(
     if detected_intent == "GENERAL_CHAT" and request.target_agent not in on_demand_agents:
         logger.info("[GENERAL_CHAT] Handling as general chat. Generating conversational response with project context.")
 
-        # Load conversation history for context (with error handling for DB failures)
+        # Load conversation history for context. This is a DB read that feeds the
+        # chat's context — we fail loudly (HTTP 500) rather than silently degrade to
+        # "no conversation history", which would mask a DB outage from the workflow.
         conv_history = []
         if request.project_id:
             try:
                 conv_history = await ConversationMessageRepository.get_conversation_history(request.project_id)
             except Exception as db_err:
-                logger.warning(f"[GENERAL_CHAT] Failed to load conversation history from DB: {str(db_err)}. Proceeding without history.")
+                logger.exception(f"[GENERAL_CHAT] Failed to load conversation history from DB")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to load conversation history from database: {str(db_err)}",
+                ) from db_err
 
         # Generate response with full project context
         try:
@@ -413,7 +419,10 @@ async def post_process_requirements(
                 conversation_history=conv_history
             )
         except Exception as llm_err:
-            logger.error(f"[GENERAL_CHAT] Failed to generate LLM response: {str(llm_err)}")
+            # Intentional graceful degradation: when the LLM call fails we log the
+            # error (with traceback) and return a canned user-facing fallback instead
+            # of a 500. This does not corrupt state or alter the caller's data.
+            logger.error(f"[GENERAL_CHAT] Failed to generate LLM response: {str(llm_err)}", exc_info=True)
             response_text = "I understand your question, but I'm currently experiencing some technical difficulties. Please try again in a moment."
 
         # Persist assistant response (with error handling for DB failures)
@@ -427,7 +436,13 @@ async def post_process_requirements(
                     intent="GENERAL_CHAT"
                 )
             except Exception as db_err:
-                logger.warning(f"[GENERAL_CHAT] Failed to save assistant response to DB: {str(db_err)}. Response generated but not persisted.")
+                # The response is already computed and returned to the user, so a
+                # persistence failure here cannot be undone. Keep the response flowing
+                # but log the failed write loudly so the DB problem is not masked.
+                logger.error(
+                    f"[GENERAL_CHAT] Failed to save assistant response to DB (response delivered but not persisted): {str(db_err)}",
+                    exc_info=True,
+                )
             else:
                 # Notify SSE subscribers so other connected clients refresh their conversation view.
                 await event_manager.publish(str(request.project_id), "chat_reply", {
@@ -718,6 +733,24 @@ async def post_process_requirements(
 # WORKFLOW ROUTER / INTENT DETECTOR / MATCHER API
 # ==========================================
 
+async def _load_current_stories(project_id: str, db: AsyncSession) -> List[Dict[str, Any]]:
+    """Load a project's current user stories, or fail loudly if the DB is unreachable.
+
+    Deliberately does NOT swallow DB errors. Silently degrading to an empty story list
+    here would hide a real DB outage and let downstream intent-detection /
+    requirement-matching run without any project context, producing misleading output.
+    A failure is surfaced as HTTP 500 instead.
+    """
+    try:
+        req_state = await RequirementStateRepository.get_by_project_id(project_id, db)
+    except Exception as e:
+        logger.exception(f"Failed to load requirement state for project {project_id} from DB")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load project context from database: {str(e)}",
+        ) from e
+    return req_state.get("user_stories", []) if req_state else []
+
 @router.post("/api/workflow-router", response_model=WorkflowRoutingResult, status_code=status.HTTP_200_OK)
 async def post_workflow_router(
     payload: WorkflowRouterRequest,
@@ -781,11 +814,7 @@ async def post_intent_detector(
 
     current_stories = []
     if payload.project_id:
-        try:
-            req_state = await RequirementStateRepository.get_by_project_id(payload.project_id, db)
-            current_stories = req_state.get("user_stories", []) if req_state else []
-        except Exception:
-            pass
+        current_stories = await _load_current_stories(payload.project_id, db)
 
     result = await detect_requirement_intent(payload.message, current_stories)
     return result
@@ -827,11 +856,7 @@ async def post_requirement_matcher(
 
     current_stories = []
     if payload.project_id:
-        try:
-            req_state = await RequirementStateRepository.get_by_project_id(payload.project_id, db)
-            current_stories = req_state.get("user_stories", []) if req_state else []
-        except Exception:
-            pass
+        current_stories = await _load_current_stories(payload.project_id, db)
 
     intent = payload.detected_intent
     if not intent:

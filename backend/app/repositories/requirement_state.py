@@ -62,8 +62,29 @@ class RequirementStateRepository:
         ).order_by(RequirementModel.created_at.asc())
         res_req = await session.execute(stmt_req)
         reqs = res_req.scalars().all()
+        req_ids = [r.id for r in reqs]
 
         version_num = model.version_number
+
+        # If no project-level active epic was found, resolve the epic name in a
+        # single batched IN query over the distinct requirement epics instead of
+        # querying per-requirement (previous behavior did N separate lookups).
+        if not epic_name:
+            epic_ids = {r.epic_id for r in reqs if r.epic_id}
+            if epic_ids:
+                stmt_epics = select(EpicModel).where(EpicModel.id.in_(epic_ids))
+                res_epics = await session.execute(stmt_epics)
+                epics_by_id = {e.id: e for e in res_epics.scalars().all()}
+                for req in reqs:
+                    if req.epic_id in epics_by_id:
+                        epic_name = epics_by_id[req.epic_id].epic_name
+                        break
+
+        # Batch-load ALL user stories + acceptance criteria for every active
+        # requirement in one round-trip each. This removes the previous N+1
+        # cascade (per requirement it issued a story + criteria query).
+        stories_by_req = await UserStoryRepository.get_by_requirement_ids(req_ids, session)
+        acceptance_by_req = await AcceptanceCriteriaRepository.get_by_requirement_ids(req_ids, str(project_id), session)
 
         # Build the requirements list with their user stories
         all_user_stories = []
@@ -72,16 +93,9 @@ class RequirementStateRepository:
 
         for req in reqs:
             req_id = req.id
-            if not epic_name and req.epic_id:
-                stmt_epic = select(EpicModel).where(EpicModel.id == req.epic_id)
-                res_epic = await session.execute(stmt_epic)
-                epic = res_epic.scalar_one_or_none()
-                if epic:
-                    epic_name = epic.epic_name
 
-            # Load user stories for this specific requirement
-            stories = await UserStoryRepository.get_by_project(str(project_id), session, requirement_id=req_id)
-            ac_list = await AcceptanceCriteriaRepository.get_by_project(str(project_id), session, requirement_id=req_id)
+            stories = stories_by_req.get(req_id, [])
+            ac_list = acceptance_by_req.get(req_id, [])
 
             active_stories = [s for s in stories if s.get("status", "active") == "active"]
             active_ac_list = [ac for ac in ac_list if ac.get("status", "active") == "active"]

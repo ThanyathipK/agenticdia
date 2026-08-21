@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     MAX_CONTEXT_TOKENS: int = 8192
     TEMPERATURE: float = 0.0
 
-    # Rate limiting (in-process sliding window; see app/rate_limit.py).
+    # Rate limiting (per-client sliding window; see app/rate_limit.py).
     # Finding #39: LLM-facing endpoints accept arbitrary input, so inbound
     # requests are throttled per client IP per scope.
     RATE_LIMIT_ENABLED: bool = True
@@ -53,6 +53,23 @@ class Settings(BaseSettings):
     RATE_LIMIT_CHAT_WINDOW: int = 60
     RATE_LIMIT_WORKFLOW_LIMIT: int = 20
     RATE_LIMIT_WORKFLOW_WINDOW: int = 60
+
+    # Store backing the limiter. Only "in-process" is implemented today; the
+    # startup guard (verify_single_worker_guarantee) then REQUIRES a single
+    # uvicorn worker and refuses to boot otherwise, so 429 protection can never
+    # silently disappear under a multi-process deployment. Set this to a
+    # distributed store's name only once such a backend exists.
+    RATE_LIMIT_STORE: str = "in-process"
+    # Explicit opt-out: keep the in-process store across N workers (each worker
+    # then gets its own independent budget). This is a *weaker* posture; the
+    # app still logs a loud warning at startup when workers > 1.
+    RATE_LIMIT_ALLOW_MULTI_PROCESS_IN_PROCESS: bool = False
+    # Proxy-aware keying: when the immediate socket peer is one of
+    # TRUSTED_PROXY_IPS, the real client IP is read from the rightmost
+    # X-Forwarded-For / Forwarded entry. Headers are ignored unless the peer is
+    # trusted, so a client can never widen its own bucket by spoofing them.
+    TRUST_PROXY_HEADERS: bool = False
+    TRUSTED_PROXY_IPS: str = ""
 
     # Application details
     APP_NAME: str = "Enterprise Requirements Architecture Core"
@@ -66,6 +83,11 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> List[str]:
         """Parse the comma-separated CORS_ORIGINS string into a list."""
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @property
+    def trusted_proxy_ip_list(self) -> List[str]:
+        """Parse the comma-separated TRUSTED_PROXY_IPS string into a list."""
+        return [ip.strip() for ip in self.TRUSTED_PROXY_IPS.split(",") if ip.strip()]
 
     # Force configurations from .env file if available
     model_config = SettingsConfigDict(

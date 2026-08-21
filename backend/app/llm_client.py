@@ -5,17 +5,43 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 import httpx
-from fastapi import HTTPException, status
 
 from app.config import settings
 
 logger = logging.getLogger("app.llm_client")
 
 
+class LMStudioError(Exception):
+    """Base class for LM Studio inference failures (service/domain layer).
+
+    Raised by :func:`call_lm_studio` instead of framework-specific web errors so
+    the client service stays decoupled from the HTTP framework and can be consumed
+    by route and non-route callers alike. HTTP routes are responsible for mapping
+    these exceptions onto the appropriate ``HTTPException`` status codes.
+    """
+
+
+class LMStudioGatewayError(LMStudioError):
+    """LM Studio responded with an error HTTP status (e.g. 4xx/5xx)."""
+
+
+class LMStudioUnavailableError(LMStudioError):
+    """LM Studio is unreachable (offline, DNS/connection error or timeout)."""
+
+
+class LMStudioOutputParsingError(LMStudioError):
+    """LM Studio returned a payload that could not be parsed as JSON."""
+
+
 async def call_lm_studio(prompt_messages: List[Dict[str, str]], response_format_schema: Any = None) -> Dict[str, Any]:
     """
     Direct low-latency route utility to LM Studio.
     Forces strict JSON outputs using custom parameters, staying within MacBook memory parameters.
+
+    Raises:
+        LMStudioGatewayError: LM Studio returned a non-2xx HTTP response.
+        LMStudioUnavailableError: LM Studio could not be reached (offline/timeout).
+        LMStudioOutputParsingError: LM Studio returned content that was not valid JSON.
     """
     headers = {
         "Authorization": f"Bearer {settings.LM_STUDIO_API_KEY}",
@@ -56,22 +82,19 @@ async def call_lm_studio(prompt_messages: List[Dict[str, str]], response_format_
 
     except httpx.HTTPStatusError as http_err:
         logger.error(f"LM Studio server returned status error: {http_err.response.status_code} - {http_err.response.text}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Inference gateway error: {str(http_err)}"
-        )
+        raise LMStudioGatewayError(
+            f"Inference gateway error: {str(http_err)}"
+        ) from http_err
     except httpx.RequestError as req_err:
         logger.error(f"Failed to connect to local LM Studio instance: {str(req_err)}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="LM Studio is offline or unavailable. Ensure it runs on localhost:1234 with API keys."
-        )
+        raise LMStudioUnavailableError(
+            "LM Studio is offline or unavailable. Ensure it runs on localhost:1234 with API keys."
+        ) from req_err
     except json.JSONDecodeError as json_err:
         logger.error(f"Failed to parse LLM structured output block: {str(json_err)}")
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Local LLM output failed to resolve as a valid compliance schema."
-        )
+        raise LMStudioOutputParsingError(
+            "Local LLM output failed to resolve as a valid compliance schema."
+        ) from json_err
 
 
 # ==========================================

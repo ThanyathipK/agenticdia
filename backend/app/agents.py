@@ -1,10 +1,9 @@
 import logging
 import json
 from typing import TypedDict, Dict, Any, List, Optional
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 try:
     from langchain.output_parsers import OutputFixingParser
 except ImportError:
@@ -14,9 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
 from app.prompt_loader import load_prompt, _PromptProxy
-from app.config import settings
+from app.llm_factory import llm, parser
 from app.llm_utils import invoke_llm_structured
 from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
+from app.semantic_service import (
+    classify_workflow,
+    detect_requirement_intent,
+    detect_semantic_changes,
+    match_requirement,
+)
 
 
 # Set up logging configuration for the multi-agent framework
@@ -72,22 +77,6 @@ class AgentState(TypedDict, total=False):
     detected_intent: Optional[str]
     workflow_routing: Optional[dict]
     agent_message: Optional[str]
-
-# ==========================================
-# LOCAL LLM ORCHESTRATION CLIENT
-# ==========================================
-# Safe context limit mapping designed for MacBook Air/Pro M4 16GB execution bounds
-llm = ChatOpenAI(
-    base_url=settings.LM_STUDIO_URL,
-    api_key=settings.LM_STUDIO_API_KEY,
-    model=settings.LM_STUDIO_MODEL_FALLBACK,
-    temperature=settings.TEMPERATURE,
-    max_tokens=3000,  # Optimized for structured output
-    seed=42  # Deterministic sampling; declared as a first-class param (avoids model_kwargs warning)
-)
-
-# Json Output Parser for strict structured JSON outputs
-parser = JsonOutputParser()
 
 async def get_or_init_requirement_state(project_id: str, session: Optional[AsyncSession] = None, current_version: int = 1) -> RequirementState:
     """
@@ -186,9 +175,8 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     - COMMAND
     - REQUIREMENT
     """
-    from app.semantic_service import classify_workflow
-
     raw_input = state.get("raw_input", "")
+
     target_agent = state.get("target_agent", "gatherer")
 
     logger.info(f"[WORKFLOW ROUTER] Intercepted raw_input: '{raw_input[:100]}'")
@@ -211,7 +199,11 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
             resp = await llm.ainvoke([SystemMessage(content=chat_sys), HumanMessage(content=raw_input)])
             msg_content = resp.content if hasattr(resp, "content") else str(resp)
         except Exception as e:
-            logger.warning(f"Failed LLM chat invocation: {str(e)}")
+            # Intentional graceful degradation: when the LLM is unreachable during a
+            # plain CHAT turn we return a canned greeting instead of raising. The
+            # failure is logged as an error with traceback so it is not masked, and
+            # no state is corrupted by this fallback.
+            logger.error(f"Failed LLM chat invocation: {str(e)}", exc_info=True)
             msg_content = "Hello! How can I assist you with your core banking requirements today?"
 
         return {
@@ -270,9 +262,8 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
     Runs between Intent Detection and Gatherer Agent.
     Determines which existing requirement(s) the user's message refers to before any modification occurs.
     """
-    from app.semantic_service import detect_requirement_intent, match_requirement
-
     raw_input = state.get("raw_input", "")
+
     project_id = state.get("project_id", "PROJ-UNKNOWN")
     
     # Use session from state if available, otherwise let function create one
@@ -379,9 +370,6 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
 
     result = None
     parsing_error = None
-    
-    # Import inside function to prevent circular imports
-    from app.semantic_service import detect_semantic_changes, detect_requirement_intent
 
     # Detect user intent before running the Gatherer
     detected_intent = state.get("detected_intent")
