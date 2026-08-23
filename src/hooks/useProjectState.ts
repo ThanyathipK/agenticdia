@@ -27,8 +27,11 @@ import type {
 } from '../components/types';
 import type { PendingActionPayload, ProjectSummary } from '../api/types';
 import { downloadDocx, printPDF } from '../utils/docx';
+import type { UseDocumentsResult } from './useDocuments';
+import type { WorkspaceTab } from './useWorkspaceUi';
 import { useArtifactLocks } from './useArtifactLocks';
 import { useChat } from './useChat';
+import { useDocuments } from './useDocuments';
 import { useLmStudioHealth } from './useLmStudioHealth';
 import { useProjectSync } from './useProjectSync';
 import { useProjects } from './useProjects';
@@ -53,9 +56,20 @@ export interface ProjectState {
   renameProjectName: string;
   setRenameProjectName: Dispatch<SetStateAction<string>>;
   handleRenameProject: (projectId: string, newName: string) => Promise<void>;
-  handleDeleteProject: (projIdToDelete: string) => Promise<void>;
-  handleCreateProject: () => Promise<void>;
+  /** Deletes a project; resolves to true on success. */
+  handleDeleteProject: (projIdToDelete: string) => Promise<boolean>;
+  /** Creates a project with the given name; resolves to true on success. */
+  handleCreateProject: (name: string) => Promise<boolean>;
   handleTogglePin: (projectId: string) => Promise<void>;
+  /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
+  isCreateModalOpen: boolean;
+  setIsCreateModalOpen: Dispatch<SetStateAction<boolean>>;
+  /** Project awaiting delete confirmation in the styled ConfirmModal (replaces native confirm()). */
+  projectPendingDelete: string | null;
+  setProjectPendingDelete: Dispatch<SetStateAction<string | null>>;
+  /** Sidebar search filter — case-insensitively filters visible projects by name. */
+  projectSearchQuery: string;
+  setProjectSearchQuery: Dispatch<SetStateAction<string>>;
 
   // Chat / split layout
   messages: ChatMessage[];
@@ -88,9 +102,19 @@ export interface ProjectState {
   handleSendMessage: (textToSend?: string) => Promise<void>;
   handleValidateRequirements: () => Promise<void>;
   handleGeneratePRD: () => Promise<void>;
+  /**
+   * Gate shared by the agent action buttons (Validate Requirements / Generate
+   * PRD): true only when the active project exists AND holds real content —
+   * at least one uploaded knowledge document, user story, or requirement item.
+   */
+  canRunAgentActions: boolean;
+  /** Aborts the in-flight agent request (Stop button). No-op when idle. */
+  handleStopGeneration: () => void;
   handleDownloadDocx: () => Promise<void>;
   handlePrintPDF: () => void;
   loadProjectState: (projId: string, retries?: number, delay?: number) => Promise<void>;
+  // Uploaded-document knowledge base + DRAFT-only extraction handlers
+  documents: UseDocumentsResult;
 
   // PRD / requirements state
   structuredRequirements: StructuredRequirements;
@@ -106,9 +130,9 @@ export interface ProjectState {
   handleLockRequirement: (requirementCode: string) => Promise<void>;
   handleUnlockRequirement: (requirementCode: string) => Promise<void>;
 
-  // Tabs / flows / history
-  activeTab: 'prd' | 'flows' | 'history';
-  setActiveTab: (tab: 'prd' | 'flows' | 'history') => void;
+  // Tabs / flows / history (document library lives inside the history tab)
+  activeTab: WorkspaceTab;
+  setActiveTab: (tab: WorkspaceTab) => void;
   mermaidDiagram: string;
   versionHistory: VersionHistory[];
   selectedHistVersion: number;
@@ -138,6 +162,27 @@ export function useProjectState(): ProjectState {
     projectsApi.setPendingActions,
     ui.setActiveTab,
   );
+  const lm = useLmStudioHealth();
+  // Documents must be composed BEFORE useChat so the agent-action gate below
+  // can consider the knowledge base when it is injected into the chat deps.
+  const documents = useDocuments({
+    projectId: projectsApi.projectId,
+    pendingActions: projectsApi.pendingActions,
+    setPendingActions: projectsApi.setPendingActions,
+  });
+
+  // Agent-action gating (Validate Requirements / Generate PRD): a brand-new
+  // project with NO knowledge documents and NO gathered requirements has
+  // nothing for the Auditor/Architect agents to work with, so those actions
+  // stay blocked until real content exists (uploaded docs, user stories, or
+  // requirement items).
+  const hasRequirementContent =
+    (store.structuredRequirements.user_stories?.length ?? 0) > 0 ||
+    (store.structuredRequirements.requirements?.length ?? 0) > 0;
+  const hasKnowledgeContent = documents.documents.length > 0;
+  const canRunAgentActions =
+    Boolean(projectsApi.projectId) && (hasRequirementContent || hasKnowledgeContent);
+
   const chat = useChat(store, {
     projectId: projectsApi.projectId,
     projects: projectsApi.projects,
@@ -145,8 +190,9 @@ export function useProjectState(): ProjectState {
     setPendingActions: projectsApi.setPendingActions,
     setActiveTab: ui.setActiveTab,
     loadProjectState,
+    canRunAgentActions,
   });
-  const lm = useLmStudioHealth();
+
 
   const handleDownloadDocx = async () => {
     await downloadDocx({
@@ -205,6 +251,12 @@ export function useProjectState(): ProjectState {
     handleDeleteProject: projectsApi.handleDeleteProject,
     handleCreateProject: projectsApi.handleCreateProject,
     handleTogglePin: projectsApi.handleTogglePin,
+    isCreateModalOpen: projectsApi.isCreateModalOpen,
+    setIsCreateModalOpen: projectsApi.setIsCreateModalOpen,
+    projectPendingDelete: projectsApi.projectPendingDelete,
+    setProjectPendingDelete: projectsApi.setProjectPendingDelete,
+    projectSearchQuery: projectsApi.projectSearchQuery,
+    setProjectSearchQuery: projectsApi.setProjectSearchQuery,
     structuredRequirements: store.structuredRequirements,
     auditResult: store.auditResult,
     prdMarkdown: store.prdMarkdown,
@@ -242,9 +294,12 @@ export function useProjectState(): ProjectState {
     handleSendMessage: chat.handleSendMessage,
     handleValidateRequirements: chat.handleValidateRequirements,
     handleGeneratePRD: chat.handleGeneratePRD,
+    canRunAgentActions,
+    handleStopGeneration: chat.handleStopGeneration,
     handleDownloadDocx,
     handlePrintPDF,
     loadProjectState,
+    documents,
     // Finding #40: LM Studio connectivity health
     backendOnline: lm.backendOnline,
     lmStudioOnline: lm.lmStudioOnline,

@@ -2,7 +2,7 @@
 // useProjectState god-hook. Owns the project collection, the active project
 // selection, pending merge actions, and the sidebar rename/delete/create
 // interactions. All backend calls go through the typed `api` client.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { api } from '../api/client';
 import type { PendingActionPayload, ProjectSummary } from '../api/types';
@@ -28,9 +28,20 @@ export interface UseProjectsResult {
   renameProjectName: string;
   setRenameProjectName: Dispatch<SetStateAction<string>>;
   handleRenameProject: (projectId: string, newName: string) => Promise<void>;
-  handleDeleteProject: (projIdToDelete: string) => Promise<void>;
-  handleCreateProject: () => Promise<void>;
+  /** Deletes a project; resolves to true on success. */
+  handleDeleteProject: (projIdToDelete: string) => Promise<boolean>;
+  /** Creates a project with the given name; resolves to true on success. */
+  handleCreateProject: (name: string) => Promise<boolean>;
   handleTogglePin: (projectId: string) => Promise<void>;
+  /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
+  isCreateModalOpen: boolean;
+  setIsCreateModalOpen: Dispatch<SetStateAction<boolean>>;
+  /** Project awaiting delete confirmation in the styled ConfirmModal (replaces native confirm()). */
+  projectPendingDelete: string | null;
+  setProjectPendingDelete: Dispatch<SetStateAction<string | null>>;
+  /** Sidebar search — matches projects by name OR by their conversation message content. */
+  projectSearchQuery: string;
+  setProjectSearchQuery: Dispatch<SetStateAction<string>>;
 }
 
 export function useProjects(): UseProjectsResult {
@@ -63,10 +74,60 @@ export function useProjects(): UseProjectsResult {
     return () => { isMounted = false; };
   }, []);
 
+  // "New Project" modal visibility (the styled replacement for prompt()).
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
+
+  // Project awaiting delete confirmation in the styled ConfirmModal
+  // (the styled replacement for confirm()). Holds the target project id.
+  const [projectPendingDelete, setProjectPendingDelete] = useState<string | null>(null);
+
   // Context menu state for project rename/delete
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
   const [renameProjectId, setRenameProjectId] = useState<string | null>(null);
   const [renameProjectName, setRenameProjectName] = useState<string>('');
+
+  // Sidebar project search. The query drives a debounced server search below;
+  // matching happens against project names AND conversation message content.
+  const [projectSearchQuery, setProjectSearchQuery] = useState<string>('');
+
+  // Debounced server search: matches project names AND persisted conversation
+  // message content (GET /api/projects/search). Clearing the query restores
+  // the full list. A monotonic sequence guard drops stale responses so a slow
+  // earlier request can never overwrite fresher results.
+  const searchStateRef = useRef<{ searching: boolean; seq: number }>({ searching: false, seq: 0 });
+
+  useEffect(() => {
+    const query = projectSearchQuery.trim();
+
+    // Query emptied -> restore the unfiltered list, but only after a search
+    // actually replaced it (keeps the mount-time load untouched).
+    if (!query) {
+      if (!searchStateRef.current.searching) return;
+      searchStateRef.current.searching = false;
+      const seq = ++searchStateRef.current.seq;
+      api.listProjects()
+        .then((projs) => {
+          if (searchStateRef.current.seq === seq) setProjects(projs);
+        })
+        .catch(() => {
+          // Keep showing whatever is loaded; the next keystroke retries.
+        });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const seq = ++searchStateRef.current.seq;
+      searchStateRef.current.searching = true;
+      api.searchProjects(query)
+        .then((results) => {
+          if (searchStateRef.current.seq === seq) setProjects(results);
+        })
+        .catch((err) => {
+          handleError('Failed to search projects.', err);
+        });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [projectSearchQuery]);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -90,9 +151,10 @@ export function useProjects(): UseProjectsResult {
     }
   };
 
-  // Handle project delete
-  const handleDeleteProject = async (projIdToDelete: string) => {
-    if (!confirm('Are you sure you want to delete this project? This action cannot be undone.')) return;
+  // Handle project delete (submit from the styled ConfirmModal). Resolves to
+  // true on success so the modal knows whether to close; failures are
+  // surfaced through the toast handler.
+  const handleDeleteProject = async (projIdToDelete: string): Promise<boolean> => {
     try {
       await api.deleteProject(projIdToDelete);
       setProjects(prev => prev.filter(p => p.id !== projIdToDelete));
@@ -104,21 +166,26 @@ export function useProjects(): UseProjectsResult {
         setProjectId(null);
       }
       setProjectContextMenu(null);
+      return true;
     } catch (err) {
       handleError('Failed to delete the project.', err);
+      return false;
     }
   };
 
-  // Handle project create (used by the sidebar "new project" button)
-  const handleCreateProject = async () => {
-    const name = prompt('Enter project name:');
-    if (name) {
-      try {
-        await api.createProject(name);
-        setProjects(await api.listProjects());
-      } catch (err) {
-        handleError('Failed to create the project.', err);
-      }
+  // Handle project create (submit from the sidebar's New Project modal).
+  // Resolves to true on success so the modal knows whether to close; failures
+  // are surfaced through the toast handler.
+  const handleCreateProject = async (name: string): Promise<boolean> => {
+    const trimmed = name.trim();
+    if (!trimmed) return false;
+    try {
+      await api.createProject(trimmed);
+      setProjects(await api.listProjects());
+      return true;
+    } catch (err) {
+      handleError('Failed to create the project.', err);
+      return false;
     }
   };
 
@@ -159,5 +226,11 @@ export function useProjects(): UseProjectsResult {
     handleDeleteProject,
     handleCreateProject,
     handleTogglePin,
+    isCreateModalOpen,
+    setIsCreateModalOpen,
+    projectPendingDelete,
+    setProjectPendingDelete,
+    projectSearchQuery,
+    setProjectSearchQuery,
   };
 }

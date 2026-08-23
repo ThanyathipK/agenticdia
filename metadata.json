@@ -1,5 +1,5 @@
 {
-  "name": "AgenticDIA",
+  "name": "Agentic AI",
   "description": "Agentic, banking-grade requirements engineering — all inference runs 100% locally through LM Studio (OpenAI-compatible). No Gemini, no cloud LLM API keys.",
   "requestFramePermissions": [],
   "majorCapabilities": []

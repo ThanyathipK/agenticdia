@@ -1,4 +1,4 @@
-"""Alembic environment configuration for AgenticDIA.
+"""Alembic environment configuration for Agentic AI.
 
 Supports both async (asyncpg) and sync (SQLite) database drivers.
 Migrations are executed using the application's async engine via run_sync.

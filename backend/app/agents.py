@@ -96,7 +96,10 @@ async def get_or_init_requirement_state(project_id: str, session: Optional[Async
     if not db_state:
         db_state = {
             "project_id": project_id,
-            "project_name": "PromptPay Settlement Engine",
+            # The authoritative project name lives in the projects table /
+            # frontend; leave this denormalized copy blank instead of seeding a
+            # fabricated demo label ("PromptPay Settlement Engine").
+            "project_name": "",
             "requirements": [],
             "business_goals": [],
             "actors": [],
@@ -331,6 +334,26 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
         "requirement_match": match_result
     }
 
+def _default_requirement_code(index: int = 0) -> str:
+    """Deterministic fallback requirement code (REQ-001, REQ-002, ...)."""
+    return f"REQ-{index + 1:03d}"
+
+
+def _previous_requirement_identity(req_state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return the first previously persisted requirement dict (possibly empty).
+
+    Preserving the stored ``requirement_code`` / ``title`` / ``description``
+    keeps database identity stable across synthetic rebuilds instead of
+    hardcoding a fixed code such as ``REQ-001`` onto every project.
+    """
+    previous_reqs = req_state.get("requirements", []) or []
+    for r in previous_reqs:
+        if isinstance(r, dict):
+            return r
+    return {}
+
+
 async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     """
     Standardizes messy Product Owner input into high-quality Agile structures.
@@ -358,14 +381,32 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
 
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
-        req_state["requirements"] = [
-            {
-                "requirement_code": "REQ-001",
-                "title": passed_structured.get("epic_name", ""),
-                "description": "",
-                "user_stories": passed_structured.get("user_stories", [])
-            }
-        ]
+        incoming_reqs = passed_structured.get("requirements")
+        if isinstance(incoming_reqs, list) and incoming_reqs:
+            # Multi-requirement payload: keep every incoming entry's own
+            # code/title; only synthesize codes for entries missing one.
+            req_state["requirements"] = [
+                {
+                    **inc,
+                    "requirement_code": inc.get("requirement_code") or _default_requirement_code(idx),
+                }
+                for idx, inc in enumerate(incoming_reqs)
+                if isinstance(inc, dict)
+            ]
+        else:
+            # Legacy epic-only payload: preserve the persisted requirement
+            # identity (code/title/description) instead of resetting every
+            # project to a hardcoded ``REQ-001``.
+            prev_req = _previous_requirement_identity(req_state)
+            req_state["requirements"] = [
+                {
+                    **prev_req,
+                    "requirement_code": prev_req.get("requirement_code") or _default_requirement_code(0),
+                    "title": passed_structured.get("epic_name") or prev_req.get("title", ""),
+                    "description": prev_req.get("description", ""),
+                    "user_stories": passed_structured.get("user_stories", []),
+                }
+            ]
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
 
     result = None
@@ -985,14 +1026,51 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             us for us in passed_structured.get("user_stories", [])
             if not (us.get("is_locked", False))
         ]
-        req_state["requirements"] = [
-            {
-                "requirement_code": "REQ-001",
-                "title": passed_structured.get("epic_name", ""),
-                "description": "",
-                "user_stories": passed_stories
-            }
-        ]
+        # Preserve database identity from the previous requirement record(s).
+        # The synthetic rebuild below must keep the ``id`` field — it is
+        # REQUIRED by the RequirementDetail response schema; dropping it made
+        # every on-demand PRD generation fail FastAPI response validation with
+        # an opaque HTTP 500 ("PRD Generation Failed — No Document Saved").
+        # The stored requirement_code / title are preserved as well instead of
+        # being reset onto a hardcoded ``REQ-001``.
+        incoming_reqs = passed_structured.get("requirements")
+        if isinstance(incoming_reqs, list) and any(isinstance(r, dict) for r in incoming_reqs):
+            rebuilt_reqs = []
+            for idx, inc in enumerate(incoming_reqs):
+                if not isinstance(inc, dict):
+                    continue
+                inc_stories = [
+                    us for us in (inc.get("user_stories") or [])
+                    if isinstance(us, dict) and not us.get("is_locked", False)
+                ]
+                rebuilt_reqs.append({
+                    **inc,
+                    "requirement_code": inc.get("requirement_code") or _default_requirement_code(idx),
+                    "title": inc.get("title") or passed_structured.get("epic_name", ""),
+                    "user_stories": inc_stories or passed_stories
+                })
+            if rebuilt_reqs:
+                req_state["requirements"] = rebuilt_reqs
+            else:
+                prev_matched = _previous_requirement_identity(req_state)
+                req_state["requirements"] = [{
+                    **prev_matched,
+                    "requirement_code": prev_matched.get("requirement_code") or _default_requirement_code(0),
+                    "title": passed_structured.get("epic_name", ""),
+                    "description": "",
+                    "user_stories": passed_stories
+                }]
+        else:
+            prev_matched = _previous_requirement_identity(req_state)
+            req_state["requirements"] = [
+                {
+                    **prev_matched,
+                    "requirement_code": prev_matched.get("requirement_code") or _default_requirement_code(0),
+                    "title": passed_structured.get("epic_name") or prev_matched.get("title", ""),
+                    "description": prev_matched.get("description", ""),
+                    "user_stories": passed_stories
+                }
+            ]
         req_state["user_stories"] = passed_stories
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
         all_ac = []
@@ -1026,7 +1104,16 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             "prd_markdown": existing_prd,
             "mermaid_diagram": existing_diagrams
         }
-        
+
+    if not unlocked_stories and not existing_prd:
+        # FAIL LOUDLY: invoking the LLM with an empty story set would only
+        # produce a hallucinated PRD. Raise so /api/process-requirements maps
+        # this to HTTP 500 and nothing is persisted.
+        raise ValueError(
+            f"Cannot compile PRD for project {project_id}: no unlocked user stories "
+            "are available. Gather requirements before generating a PRD."
+        )
+
     requirements = req_state.get("requirements", [])
     epic_name = requirements[0].get("title", "") if requirements else ""
     structured_reqs_for_prompt = {
@@ -1064,9 +1151,17 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             "version_history_summaries": version_history_summaries
         })
         
-        # Modify only its own fields in RequirementState in memory
-        req_state["generated_prd"] = result.get("prd_markdown", "# Core Banking PRD\n\nNo description provided.")
-        req_state["generated_diagrams"] = result.get("mermaid_diagram", "graph TD\n  Start --> End")
+        # Modify only its own fields in RequirementState in memory.
+        # FAIL LOUDLY on a missing document: persisting a placeholder like
+        # "# Core Banking PRD ..." (or a dummy "Start --> End" diagram) into an
+        # immutable PRD version record used to masquerade failure as success.
+        generated_prd = (result.get("prd_markdown") or "").strip()
+        if not generated_prd:
+            raise ValueError(
+                "Architect LLM returned an empty 'prd_markdown'; refusing to persist a placeholder PRD."
+            )
+        req_state["generated_prd"] = result.get("prd_markdown")
+        req_state["generated_diagrams"] = (result.get("mermaid_diagram") or "").strip()
         req_state["current_workflow_state"] = "architect_node"
 
         # Create an immutable PRD version record
@@ -1096,16 +1191,15 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             "mermaid_diagram": req_state["generated_diagrams"]
         }
     except Exception as e:
-        logger.error(f"Error parsing structured response in architect_node: {str(e)}")
-        req_state["generated_prd"] = f"# Core Banking PRD\n\nFailed to compile PRD correctly due to a localized LLM parsing error: {str(e)}."
-        req_state["generated_diagrams"] = "graph TD\n  Start --> End"
-        req_state["current_workflow_state"] = "architect_node"
-        
-        return {
-            "requirement_state": req_state,
-            "prd_markdown": req_state["generated_prd"],
-            "mermaid_diagram": req_state["generated_diagrams"]
-        }
+        # FAIL LOUDLY: never fabricate a placeholder document here (the old
+        # "# Core Banking PRD ..." / "graph TD\n Start --> End" fallback wrote
+        # junk into an immutable PRD version record). Re-raise so the route
+        # handler returns HTTP 500 and any previously valid PRD stays intact.
+        logger.error(
+            f"Error compiling PRD in architect_node for project "
+            f"{state.get('project_id', 'PROJ-UNKNOWN')}: {str(e)}"
+        )
+        raise
 
 # ==========================================
 # ON-DEMAND ROUTING ROUTINE

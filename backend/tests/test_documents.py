@@ -1,0 +1,515 @@
+"""
+Unit tests for uploaded documents: token routing, chunking, upload validation,
+and the DRAFT-ONLY extraction contract.
+
+The critical guarantee exercised here: **uploading a document and even running
+extraction writes NOTHING to requirements / user_stories / acceptance_criteria**
+— only a draft ``pending_action`` is created — and confirming that draft applies
+the merge exactly once with a single version bump.
+
+Run from the ``backend`` directory::
+
+    ../venv/bin/python -m pytest tests/test_documents.py -v
+"""
+import io
+from datetime import datetime, timezone
+
+import pytest
+import pytest_asyncio
+from fastapi import status
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.config import settings
+from app.database import get_db as app_get_db
+from app.document_processor import (
+    DRAFT_ACTION_TYPE,
+    accumulate_document_draft,
+    decide_document_mode,
+    document_budget,
+    route_document_tokens,
+    split_markdown_into_chunks,
+    _tail_by_tokens,
+)
+from app.main import app as fastapi_app
+from app.models import (
+    AcceptanceCriteriaModel,
+    ArtifactEventLogModel,
+    DocumentModel,
+    PendingActionModel,
+    ProjectModel,
+    RequirementModel,
+    RequirementStateModel,
+    UserModel,
+    UserStoryModel,
+)
+
+
+# =====================================================================
+# Isolated SQLite database + ASGI client fixtures
+# =====================================================================
+@pytest_asyncio.fixture
+async def db_session(tmp_path):
+    """Fresh SQLite database per test with all app tables created."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test_docs.db")
+    async with engine.begin() as conn:
+        from app.database import Base
+        from app import models  # noqa: F401 - register all models
+
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with SessionLocal() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def seeded_project(db_session):
+    """Seed the default system user + one project; returns the project id."""
+    user = UserModel(
+        email="docs-test@banking.com",
+        full_name="Docs Tester",
+        role="Developer",
+    )
+    db_session.add(user)
+    await db_session.flush()  # materialise user.id before FK use
+    project = ProjectModel(
+        user_id=user.id,
+        name="Document Test Project",
+        industry_standard="Krungsri Nimble Baseline",
+    )
+    db_session.add(project)
+    await db_session.commit()
+    return str(project.id)
+
+
+@pytest_asyncio.fixture
+async def client(db_session):
+    """ASGI client wired to the isolated SQLite session (no lifespan run)."""
+    async def override_get_db():
+        try:
+            yield db_session
+            await db_session.commit()
+        except Exception:
+            await db_session.rollback()
+            raise
+
+    fastapi_app.dependency_overrides[app_get_db] = override_get_db
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    fastapi_app.dependency_overrides.pop(app_get_db, None)
+
+
+# =====================================================================
+# Shared assertion helpers
+# =====================================================================
+async def _count(session: AsyncSession, model) -> int:
+    result = await session.execute(select(func.count()).select_from(model))
+    return int(result.scalar() or 0)
+
+
+def make_gathered(epic_name="Document Epic", stories=None):
+    """Build a GatheredRequirements-shaped dict like the real gatherer emits."""
+    return {
+        "epic_name": epic_name,
+        "version": 1,
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": epic_name or "Document Requirement",
+                "description": "",
+                "user_stories": stories or [],
+            }
+        ],
+    }
+
+
+def make_story(ticket, title, criteria=None):
+    return {
+        "ticket_code": ticket,
+        "story_title": title,
+        "as_a": "bank teller",
+        "i_want_to": f"use {title.lower()}",
+        "so_that": "work is faster",
+        "acceptance_criteria": criteria or ["Given X when Y then Z"],
+    }
+
+
+# =====================================================================
+# Token routing decision (full vs chunked) at the DOCUMENT_BUDGET boundary
+# =====================================================================
+class TestTokenRouting:
+    def test_budget_is_fraction_of_context(self, monkeypatch):
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 8192)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        assert document_budget() == 4915
+
+    def test_at_budget_boundary_runs_full(self, monkeypatch):
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 100)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        # 60 tokens == budget -> still a single full pass (inclusive boundary).
+        assert decide_document_mode(60) == "full"
+        assert decide_document_mode(document_budget()) == "full"
+
+    def test_above_budget_switches_to_chunked(self, monkeypatch):
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 100)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        assert decide_document_mode(61) == "chunked"
+        assert decide_document_mode(document_budget() + 1) == "chunked"
+
+    def test_routing_reports_expected_chunk_count(self, monkeypatch):
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 100)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_SIZE", 30)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_OVERLAP", 5)
+        routing = route_document_tokens(61)
+        assert routing.mode == "chunked"
+        # usable window = 30 - 5 = 25 tokens -> ceil(61 / 25) = 3 passes
+        assert routing.chunk_count == 3
+        full = route_document_tokens(60)
+        assert full.mode == "full" and full.chunk_count == 1
+
+
+# =====================================================================
+# Chunker correctness: counts, overlap, no content loss across boundaries
+# =====================================================================
+class TestChunker:
+    def test_empty_text_returns_no_chunks(self):
+        assert split_markdown_into_chunks("") == []
+
+    def test_small_text_single_chunk(self):
+        text = "# Heading\nJust a couple of lines."
+        chunks = split_markdown_into_chunks(text, chunk_size=1000, overlap=100)
+        assert chunks == [text]
+
+    @pytest.fixture
+    def long_doc_lines(self):
+        return [f"Line {i}: the quick brown fox jumps over the lazy dog." for i in range(200)]
+
+    def test_multi_chunk_counts_within_budget(self, long_doc_lines):
+        text = "\n".join(long_doc_lines)
+        chunk_size, overlap = 120, 12
+        chunks = split_markdown_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            # Chunks respect the budget with only single-line slack.
+            assert count_tokens_local(chunk) <= chunk_size + 20
+
+    def test_no_content_loss_across_boundaries(self, long_doc_lines):
+        text = "\n".join(long_doc_lines)
+        chunk_size, overlap = 120, 12
+        chunks = split_markdown_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
+        for line in long_doc_lines:
+            assert any(line in chunk for chunk in chunks), f"lost line: {line}"
+
+    def test_overlap_carries_tail_into_next_chunk(self, long_doc_lines):
+        text = "\n".join(long_doc_lines)
+        chunk_size, overlap = 120, 12
+        chunks = split_markdown_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
+        for prev_chunk, next_chunk in zip(chunks, chunks[1:]):
+            tail = _tail_by_tokens(prev_chunk, overlap)
+            assert tail, "expected non-empty overlap tail"
+            assert next_chunk.startswith(tail)
+
+    def test_unbreakable_line_is_word_split(self):
+        blob = " ".join(["supercalifragilistic"] * 80)
+        chunks = split_markdown_into_chunks(blob, chunk_size=50, overlap=0)
+        assert len(chunks) > 1
+        for word in blob.split(" "):
+            assert any(word in chunk for chunk in chunks)
+
+
+def count_tokens_local(text: str) -> int:
+    from app.input_validation import count_tokens
+
+    return count_tokens(text)
+
+
+# =====================================================================
+# Upload validation: bad extension, MIME mismatch, oversized file, happy path
+# =====================================================================
+class TestUploadValidation:
+    @pytest.mark.asyncio
+    async def test_bad_extension_rejected(self, seeded_project, client):
+        resp = await client.post(
+            f"/api/project/{seeded_project}/documents/upload",
+            files={"file": ("malware.exe", b"MZ...", "application/octet-stream")},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Supported formats" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_mime_mismatch_rejected(self, seeded_project, client):
+        resp = await client.post(
+            f"/api/project/{seeded_project}/documents/upload",
+            files={"file": ("notes.md", b"# hi", "video/mp4")},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "does not match" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_empty_file_rejected(self, seeded_project, client):
+        resp = await client.post(
+            f"/api/project/{seeded_project}/documents/upload",
+            files={"file": ("empty.md", b"", "text/markdown")},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "empty" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_oversized_file_rejected_with_413(self, seeded_project, client, monkeypatch):
+        # MAX_UPLOAD_MB is the ONLY size gate at save time; shrink it so the cap
+        # triggers on a tiny payload.
+        monkeypatch.setattr(settings, "MAX_UPLOAD_MB", 0)
+        resp = await client.post(
+            f"/api/project/{seeded_project}/documents/upload",
+            files={"file": ("big.md", b"x" * 64, "text/markdown")},
+        )
+        assert resp.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+        assert "maximum upload size" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_markdown_upload_stores_full_content(self, seeded_project, client, db_session):
+        markdown = "# Requirements Brief\n\n- Payments\n- Ledger integrity\n"
+        resp = await client.post(
+            f"/api/project/{seeded_project}/documents/upload",
+            files={"file": ("brief.md", markdown.encode(), "text/markdown")},
+        )
+        assert resp.status_code == status.HTTP_201_CREATED
+        body = resp.json()
+        assert body["status"] == "processed"
+        assert body["original_format"] == "md"
+        assert body["token_count"] > 0
+
+        # Knowledge base only: requirement tables remain untouched.
+        assert await _count(db_session, RequirementModel) == 0
+        assert await _count(db_session, UserStoryModel) == 0
+        assert await _count(db_session, AcceptanceCriteriaModel) == 0
+        assert await _count(db_session, PendingActionModel) == 0
+
+        # Full markdown retrievable via the detail endpoint.
+        detail = await client.get(f"/api/project/{seeded_project}/documents/{body['id']}")
+        assert detail.status_code == 200
+        assert detail.json()["content_markdown"] == markdown
+
+        listing = await client.get(f"/api/project/{seeded_project}/documents")
+        assert listing.status_code == 200
+        assert len(listing.json()) == 1
+
+    @pytest.mark.asyncio
+    async def test_scanned_pdf_fails_loudly_needs_ocr(self, seeded_project, client, db_session, monkeypatch):
+        """Image-only PDFs surface an explicit needs-OCR failure (OCR out of scope)."""
+        class _FakePage:
+            def extract_text(self):
+                return ""  # scanned page: no text layer
+
+        class _FakeReader:
+            def __init__(self, stream):
+                self.pages = [_FakePage(), _FakePage()]
+
+        import sys
+        import types
+
+        fake_pypdf = types.ModuleType("pypdf")
+        fake_pypdf.PdfReader = _FakeReader
+        monkeypatch.setitem(sys.modules, "pypdf", fake_pypdf)
+
+        minimal_pdf = b"%PDF-1.4 fake scanned bytes"
+        resp = await client.post(
+            f"/api/project/{seeded_project}/documents/upload",
+            files={"file": ("scan.pdf", minimal_pdf, "application/pdf")},
+        )
+        assert resp.status_code == status.HTTP_201_CREATED  # record kept for traceability
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert "OCR is out of scope" in body["message"]
+
+        # The failed document cannot be processed into requirements.
+        process = await client.post(
+            f"/api/project/{seeded_project}/documents/{body['id']}/process"
+        )
+        assert process.status_code == status.HTTP_400_BAD_REQUEST
+
+
+# =====================================================================
+# CRITICAL: DRAFT-ONLY accumulation — nothing written until confirmation
+# =====================================================================
+async def _upload_doc(client, project_id: str, name="spec.md", body="# Spec\n\n" + "Detail line.\n" * 40) -> dict:
+    resp = await client.post(
+        f"/api/project/{project_id}/documents/upload",
+        files={"file": (name, body.encode(), "text/markdown")},
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    return resp.json()
+
+
+class TestDraftOnlyExtraction:
+    @pytest.fixture
+    def fake_gatherer(self, monkeypatch):
+        """Replace the LLM gatherer with deterministic per-chunk output.
+
+        Chunk overlap means consecutive chunks re-report the same story; the
+        accumulator must collapse those duplicates across the whole document.
+        """
+        calls = {"chunks": []}
+
+        async def _fake_extract(chunk_text, *, chunk_index=1, chunk_count=1):
+            calls["chunks"].append(chunk_text)
+            return make_gathered(
+                stories=[
+                    make_story("US-001", "Duplicate From Overlap"),
+                    make_story(f"US-{chunk_index + 1:03d}", f"Unique Story {chunk_index}"),
+                ]
+            )
+
+        import app.routes.documents as documents_module
+        monkeypatch.setattr(documents_module, "extract_requirements_from_text", _fake_extract)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_process_creates_draft_only_and_confirm_applies_once(
+        self, seeded_project, client, db_session, monkeypatch, fake_gatherer
+    ):
+        # Small budget => the doc routes to CHUNKED mode with several chunks.
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 60)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_SIZE", 30)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_OVERLAP", 5)
+
+        doc = await _upload_doc(client, seeded_project)
+        assert await _count(db_session, RequirementModel) == 0
+        assert await _count(db_session, UserStoryModel) == 0
+        assert await _count(db_session, AcceptanceCriteriaModel) == 0
+        assert await _count(db_session, PendingActionModel) == 0
+
+        # --- Explicit processing: DRAFT ONLY -----------------------------
+        proc = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+        assert proc.status_code == 200
+        payload = proc.json()
+        assert payload["status"] == "draft_ready"
+        assert payload["mode"] == "chunked"
+        assert payload["chunk_count"] > 1  # sequential chunked passes ran
+        assert payload["pending_action_id"]
+
+        # The whole document went through the gatherer chunk-by-chunk...
+        assert len(fake_gatherer["chunks"]) == payload["chunk_count"]
+
+        action_rows = (
+            (await db_session.execute(select(PendingActionModel))).scalars().all()
+        )
+        assert len(action_rows) == 1
+        action = action_rows[0]
+        assert action.action_type == DRAFT_ACTION_TYPE
+        proposed = action.proposed_changes
+        flat_titles = [
+            s["story_title"]
+            for req in proposed["requirements"]
+            for s in req.get("user_stories", [])
+        ]
+        assert len(flat_titles) == len(set(flat_titles)), "duplicates leaked into draft"
+        draft_story_count = len(flat_titles)
+        assert draft_story_count > 2  # overlap duplicates were really collapsed
+
+        # NOTHING was persisted to requirement tables — draft only!
+        assert await _count(db_session, RequirementModel) == 0
+        assert await _count(db_session, UserStoryModel) == 0
+        assert await _count(db_session, AcceptanceCriteriaModel) == 0
+
+        doc_row = (
+            (await db_session.execute(select(DocumentModel))).scalars().one()
+        )
+        assert doc_row.extraction_status == "extraction_pending"
+
+        # --- Confirm: single atomic merge, ONE version bump --------------
+        confirm = await client.post(
+            f"/api/confirm-action/{action.id}", params={"project_id": seeded_project}
+        )
+        assert confirm.status_code == 200
+
+        states = (
+            (await db_session.execute(select(RequirementStateModel))).scalars().all()
+        )
+        assert len(states) == 1
+        assert states[0].version_number == 2  # exactly one bump from default v1
+
+        story_rows = (
+            (await db_session.execute(select(UserStoryModel))).scalars().all()
+        )
+        # Every deduped draft story lands EXACTLY once — the merged draft is
+        # applied as one atomic insert, never per-chunk.
+        assert len(story_rows) == draft_story_count
+        assert await _count(db_session, AcceptanceCriteriaModel) >= draft_story_count
+
+        # Pending action consumed; confirming again is impossible (404).
+        assert await _count(db_session, PendingActionModel) == 0
+        replay = await client.post(
+            f"/api/confirm-action/{action.id}", params={"project_id": seeded_project}
+        )
+        assert replay.status_code == status.HTTP_404_NOT_FOUND
+
+        # Audit trail entry for the confirmed document merge.
+        events = (
+            (await db_session.execute(select(ArtifactEventLogModel))).scalars().all()
+        )
+        doc_events = [e for e in events if e.artifact_type == "uploaded_document"]
+        assert len(doc_events) == 1
+        assert doc_events[0].action == "CREATE"
+
+        doc_row = (
+            (await db_session.execute(select(DocumentModel))).scalars().one()
+        )
+        assert doc_row.extraction_status == "extraction_applied"
+        doc_row = (
+            (await db_session.execute(select(DocumentModel))).scalars().one()
+        )
+        assert doc_row.extraction_status == "extraction_applied"
+
+    @pytest.mark.asyncio
+    async def test_cancel_discards_draft_writes_nothing(
+        self, seeded_project, client, db_session, monkeypatch, fake_gatherer
+    ):
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 60)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_SIZE", 30)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_OVERLAP", 5)
+
+        doc = await _upload_doc(client, seeded_project)
+        proc = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+        assert proc.status_code == 200
+        pending_id = proc.json()["pending_action_id"]
+
+        cancel = await client.post(
+            f"/api/cancel-action/{pending_id}", params={"project_id": seeded_project}
+        )
+        assert cancel.status_code == 200
+
+        # Draft discarded — nothing was EVER written.
+        assert await _count(db_session, PendingActionModel) == 0
+        assert await _count(db_session, RequirementModel) == 0
+        assert await _count(db_session, UserStoryModel) == 0
+        assert await _count(db_session, AcceptanceCriteriaModel) == 0
+        assert await _count(db_session, RequirementStateModel) == 0
+
+    @pytest.mark.asyncio
+    async def test_full_mode_single_pass_when_under_budget(
+        self, seeded_project, client, monkeypatch, fake_gatherer
+    ):
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 100000)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+
+        doc = await _upload_doc(client, seeded_project)
+        proc = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+        assert proc.status_code == 200
+        payload = proc.json()
+        assert payload["mode"] == "full"
+        assert payload["chunk_count"] == 1
+        assert len(fake_gatherer["chunks"]) == 1

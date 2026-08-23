@@ -3,7 +3,7 @@ import uuid
 from typing import Dict, Any, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -30,6 +30,7 @@ from app.llm_client import (
     LMStudioOutputParsingError,
     LMStudioUnavailableError,
 )
+from app.prompt_loader import load_prompt
 from app.event_manager import event_manager
 
 logger = logging.getLogger("app.routes.projects")
@@ -49,6 +50,31 @@ async def get_projects(db: AsyncSession = Depends(get_db)) -> List[ProjectSummar
         List[ProjectSummary]: All project summary records.
     """
     return await ProjectRepository.list_all(db)
+
+
+@router.get("/api/projects/search", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
+async def search_projects(
+    q: str = Query(..., min_length=1, description="Text matched case-insensitively against project names and conversation message content."),
+    db: AsyncSession = Depends(get_db),
+) -> List[ProjectSummary]:
+    """
+    Search projects by name or by their conversation message content.
+
+    Args:
+        q: Search text; matched case-insensitively against project names and
+           any persisted conversation message belonging to the project.
+        db: Active asynchronous database session.
+
+    Returns:
+        List[ProjectSummary]: Matching project summary records (pinned first).
+
+    Raises:
+        HTTPException: 400 if the query is empty after trimming.
+    """
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query must not be empty")
+    return await ProjectRepository.search(db, query)
 
 
 @router.post("/api/projects", response_model=ProjectCreated, status_code=status.HTTP_201_CREATED)
@@ -402,14 +428,15 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
 
     system_payload_description = "\n".join(payload_sections)
 
+    # The system prompt lives in prompts/prd_export.md so it is versioned and
+    # reviewed like every other agent prompt (it used to be an inline string
+    # that silently diverged from the LangGraph Architect prompt). Project
+    # metadata and the requirement payload travel in the user message; keeping
+    # them out of .format() also avoids KeyError on braces inside user data.
     prompt = [
         {
             "role": "system",
-            "content": (
-                "You are a senior system architect. Synthesize the provided project requirements "
-                "into a formal, compliant Product Requirements Document (PRD) in markdown format. "
-                "Include a mermaid sequence diagram when describing core system flows."
-            )
+            "content": load_prompt("prd_export"),
         },
         {
             "role": "user",
@@ -429,7 +456,15 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(err))
     except LMStudioGatewayError as err:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(err))
-    markdown_content = prd_response.get("text", "# PRD\n\nFailed to synthesize PRD.")
+
+    # FAIL LOUDLY: persisting a placeholder document ("# PRD\n\nFailed to
+    # synthesize PRD.") used to record a fake immutable version on export.
+    markdown_content = (prd_response.get("text") or "").strip()
+    if not markdown_content:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LM Studio returned an empty PRD document; nothing was exported or persisted.",
+        )
 
     # Persist the newly generated PRD as an immutable version record
     version_record = None

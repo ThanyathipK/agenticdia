@@ -14,6 +14,7 @@ from app.repositories.acceptance_criteria import AcceptanceCriteriaRepository
 from app.repositories.audit_result import AuditResultRepository
 from app.repositories.clarification_question import ClarificationQuestionRepository
 from app.repositories.conversation import ConversationMessageRepository
+from app.repositories.document import DocumentRepository
 from app.repositories.epic import EpicRepository
 from app.repositories.event_log import ArtifactEventLogRepository
 from app.repositories.pending_action import PendingActionRepository
@@ -37,6 +38,7 @@ __all__ = [
     "VersionHistoryRepository",
     "RequirementStateRepository",
     "ConversationMessageRepository",
+    "DocumentRepository",
     "PendingActionRepository",
     "ArtifactEventLogRepository",
 ]

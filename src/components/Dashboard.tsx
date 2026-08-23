@@ -7,6 +7,7 @@
 //   - VersionHistory    -> Version Ledger tab
 //   - MarkdownRenderer  -> markdown rendering (via PRDEditor)
 //   - DocxExporter      -> DOCX/PDF export (src/utils/docx.ts)
+import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   PanelLeft,
@@ -34,6 +35,9 @@ import { PRDEditor } from './PRDEditor';
 import { ArchitectureFlows } from './ArchitectureFlows';
 import { VersionHistory } from './VersionHistory';
 import { ConfirmationPanel } from './ConfirmationPanel';
+import { DocumentLibrary } from './DocumentLibrary';
+import { NewProjectModal } from './NewProjectModal';
+import { ConfirmModal } from './ConfirmModal';
 
 export default function Dashboard() {
   const state = useProjectState();
@@ -53,6 +57,12 @@ export default function Dashboard() {
     handleDeleteProject,
     handleCreateProject,
     handleTogglePin,
+    isCreateModalOpen,
+    setIsCreateModalOpen,
+    projectPendingDelete,
+    setProjectPendingDelete,
+    projectSearchQuery,
+    setProjectSearchQuery,
     pendingActions,
     setPendingActions,
     loadProjectState,
@@ -73,7 +83,37 @@ export default function Dashboard() {
     handleLockRequirement,
     handleUnlockRequirement,
     currentVersion,
+    documents,
   } = state;
+
+  // ---- Sidebar project search (pure presentation state) --------------------
+  // The query itself lives in useProjects; this only controls whether the
+  // search input row is revealed and keeps it focused when opened.
+  const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isSearchOpen) {
+      searchInputRef.current?.focus();
+    }
+  }, [isSearchOpen]);
+
+  const handleToggleProjectSearch = () => {
+    // Expanding the sidebar first guarantees the input row is visible.
+    if (historyCollapsed) setHistoryCollapsed(false);
+    setIsSearchOpen((open) => !open);
+  };
+
+  const handleCloseProjectSearch = () => {
+    setIsSearchOpen(false);
+    setProjectSearchQuery('');
+  };
+
+  // Sidebar projects to render. Matching (project names AND conversation
+  // message content) happens server-side via GET /api/projects/search — the
+  // hook's debounced search effect swaps `projects` for the matching subset.
+  // Only the pinned-first presentation ordering is applied here.
+  const visibleProjects = [...projects].sort((a, b) => Number(!!b.is_pinned) - Number(!!a.is_pinned));
 
   return (
     <div className="flex-1 flex overflow-hidden h-full">
@@ -95,7 +135,7 @@ export default function Dashboard() {
           <button
             className="w-8 h-8 rounded-xl border border-outline bg-surface flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
             onClick={() => setHistoryCollapsed((v: boolean) => !v)}
-            title="ย่อ/ขยายแถบประวัติ"
+            title="Collapse/Expand history panel"
           >
             <PanelLeft className="w-4 h-4" />
           </button>
@@ -104,31 +144,73 @@ export default function Dashboard() {
         <div className="px-2">
           <button
             className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${historyCollapsed ? 'justify-center' : ''}`}
-            title="โปรเจกต์ใหม่"
-            onClick={handleCreateProject}
+            title="New Project"
+            onClick={() => setIsCreateModalOpen(true)}
           >
             <Plus className="w-4 h-4 shrink-0" />
-            {!historyCollapsed && <span>โปรเจกต์ใหม่</span>}
+            {!historyCollapsed && <span>New Project</span>}
           </button>
-          <button className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors ${historyCollapsed ? 'justify-center' : ''}`}>
+          <button
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${historyCollapsed ? 'justify-center' : ''} ${
+              isSearchOpen || projectSearchQuery
+                ? 'bg-primary/10 text-primary'
+                : 'text-on-surface-variant hover:bg-primary/10 hover:text-primary'
+            }`}
+            title="Search Projects"
+            onClick={handleToggleProjectSearch}
+          >
             <Search className="w-4 h-4 shrink-0" />
-            {!historyCollapsed && <span>ค้นหาโปรเจกต์</span>}
+            {!historyCollapsed && <span>Search Projects</span>}
           </button>
+          {isSearchOpen && !historyCollapsed && (
+            <div className="relative flex items-center mt-1">
+              <Search className="absolute left-2.5 w-3.5 h-3.5 text-on-surface-variant pointer-events-none" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={projectSearchQuery}
+                onChange={(e) => setProjectSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.stopPropagation();
+                    handleCloseProjectSearch();
+                  }
+                }}
+                placeholder="Search projects or messages..."
+                className="w-full bg-white border border-outline rounded-xl pl-8 pr-7 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary"
+              />
+              {projectSearchQuery && (
+                <button
+                  onClick={() => {
+                    setProjectSearchQuery('');
+                    searchInputRef.current?.focus();
+                  }}
+                  className="absolute right-1.5 p-0.5 text-slate-400 hover:text-slate-600 rounded"
+                  title="Clear search"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {!historyCollapsed && (
           <div className="px-4 pt-4 pb-1.5 text-[11px] font-bold tracking-wide uppercase text-on-surface-variant/70">
-            โปรเจกต์ล่าสุด
+            Recent Projects
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
           {projects.length === 0 && !historyCollapsed && (
-            <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">ยังไม่มีโปรเจกต์</div>
+            <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">No projects yet</div>
           )}
-          {[...projects]
-            .sort((a, b) => Number(!!b.is_pinned) - Number(!!a.is_pinned))
-            .map(p => {
+          {projects.length > 0 && visibleProjects.length === 0 && !historyCollapsed && (
+            <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">
+              No projects or messages matching &quot;{projectSearchQuery.trim()}&quot;
+            </div>
+          )}
+          {visibleProjects.map(p => {
             const isActive = projectId === p.id;
             return (
               <div key={p.id} className="relative group">
@@ -207,7 +289,7 @@ export default function Dashboard() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleDeleteProject(p.id);
+                              setProjectPendingDelete(p.id);
                             }}
                             className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                             title="Delete"
@@ -268,7 +350,9 @@ export default function Dashboard() {
             <button
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-600 hover:bg-red-50 transition-colors"
               onClick={() => {
-                handleDeleteProject(projectContextMenu.projectId);
+                const pid = projectContextMenu.projectId;
+                setProjectContextMenu(null);
+                setProjectPendingDelete(pid);
               }}
             >
               <XCircle className="w-3.5 h-3.5" />
@@ -327,7 +411,7 @@ export default function Dashboard() {
                 }`}
               >
                 <Clock className="w-3.5 h-3.5" />
-                <span>Version Ledger</span>
+                <span>Versions & Docs</span>
               </button>
             </div>
 
@@ -511,13 +595,37 @@ export default function Dashboard() {
             <div className="max-w-4xl mx-auto">
               {activeTab === 'prd' && <PRDEditor state={state} />}
               {activeTab === 'flows' && <ArchitectureFlows state={state} />}
-              {activeTab === 'history' && <VersionHistory state={state} />}
+              {activeTab === 'history' && (
+                <>
+                  <VersionHistory state={state} />
+                  <DocumentLibrary projectId={projectId} docs={documents} />
+                </>
+              )}
             </div>
 
           </div>
         </section>
 
       </div>
+
+      {/* NEW PROJECT MODAL (styled replacement for native prompt()) */}
+      <NewProjectModal
+        isOpen={isCreateModalOpen}
+        onCreate={handleCreateProject}
+        onClose={() => setIsCreateModalOpen(false)}
+      />
+
+      {/* DELETE PROJECT CONFIRM MODAL (styled replacement for native confirm()) */}
+      <ConfirmModal
+        isOpen={!!projectPendingDelete}
+        title="Delete Project"
+        description={`Are you sure you want to delete "${projects.find(p => p.id === projectPendingDelete)?.name ?? 'this project'}"? This action cannot be undone.`}
+        confirmLabel="Delete"
+        pendingLabel="Deleting..."
+        danger
+        onConfirm={() => handleDeleteProject(projectPendingDelete as string)}
+        onClose={() => setProjectPendingDelete(null)}
+      />
     </div>
   );
 }

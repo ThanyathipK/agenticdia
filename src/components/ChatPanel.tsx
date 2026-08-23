@@ -1,6 +1,8 @@
 // ChatPanel — left conversational panel extracted from the former Dashboard.tsx.
 // Renders the message timeline (with embedded human-in-the-loop clarification
 // forms), the agent execution ticker, and the fixed input + action bar.
+import { useRef } from 'react';
+import type { ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Network,
@@ -11,6 +13,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   FileText,
+  Loader2,
+  Square,
 } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
 
@@ -24,6 +28,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
     rawInput,
     setRawInput,
     handleSendMessage,
+    handleStopGeneration,
     clarificationAnswers,
     handleUpdateAnswerValue,
     handleSubmitClarifications,
@@ -35,7 +40,37 @@ export function ChatPanel({ state }: { state: ProjectState }) {
     // Finding #40: the header pill surfaces LLM status; the model name is dynamic.
     lmStudioOnline,
     lmStudioModel,
+    documents,
+    canRunAgentActions,
   } = state;
+
+  // Clip-icon attach: uploads straight into the project knowledge base
+  // (same KNOWLEDGE-ONLY contract as the DocumentLibrary upload control).
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleClipClick = (): void => {
+    if (!projectId) return;
+    fileInputRef.current?.click();
+  };
+
+  const handleFilePicked = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ): Promise<void> => {
+    const file = event.target.files?.[0];
+    // Allow re-picking the same file later.
+    event.target.value = '';
+    if (!file || !projectId) return;
+    await documents.handleUploadDocument(file);
+  };
+
+  // Agent-action button gating: a brand-new project with no knowledge
+  // documents and no gathered requirements has nothing for the Auditor /
+  // Architect agents to work with, so Validate Requirements / Generate PRD
+  // stay disabled until real content exists.
+  const agentActionsDisabled = isLoading || isProcessing || !canRunAgentActions;
+  const agentActionHint = !projectId
+    ? 'Create or select a project first'
+    : 'Add requirements via chat or upload a knowledge document first';
 
   return (
     <section className="flex flex-col bg-surface border-r border-outline relative z-10 shrink-0" style={{ width: `${state.splitPct}%` }}>
@@ -105,7 +140,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                 <div className={`flex flex-col gap-1.5 max-w-[85%] ${isUser ? 'items-end' : 'items-start'}`}>
                   {/* Name card */}
                   <span className="font-label-md text-[10px] text-on-surface-variant/70 font-mono">
-                    {isUser ? 'Product Owner (Thanyathip)' : 'Requirements Analyst Node'} • {msg.timestamp}
+                    {isUser ? 'Product Owner' : 'Requirements Analyst Node'} • {msg.timestamp}
                   </span>
 
                   {/* Chat text box */}
@@ -203,30 +238,52 @@ export function ChatPanel({ state }: { state: ProjectState }) {
         <div className="flex items-center gap-2">
           <button
             onClick={handleValidateRequirements}
-            disabled={isLoading || isProcessing}
-            className="flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            disabled={agentActionsDisabled}
+            title={agentActionsDisabled ? agentActionHint : 'Run the compliance audit against the current requirements'}
+            className="flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CheckCircle2 className="w-3.5 h-3.5 text-primary" />
             <span>Validate Requirements</span>
           </button>
           <button
             onClick={handleGeneratePRD}
-            disabled={isLoading || isProcessing}
-            className="flex-1 px-3 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            disabled={agentActionsDisabled}
+            title={agentActionsDisabled ? agentActionHint : 'Compile the formal PRD and architecture diagram'}
+            className="flex-1 px-3 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <FileText className="w-3.5 h-3.5" />
             <span>Generate PRD</span>
           </button>
         </div>
 
+        {/* Knowledge-base attach feedback (e.g. scanned-PDF / needs-OCR notice) */}
+        {documents.lastDraftMessage && (
+          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            {documents.lastDraftMessage}
+          </p>
+        )}
+
         <div className="flex items-center gap-3 bg-black/5 rounded-full px-4 py-2.5 border border-outline focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/10 transition-all">
           <button
             type="button"
-            title="แนบไฟล์"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+            title={projectId ? 'Attach file (.docx / .pdf / .md / .txt)' : 'Create or select a project first'}
+            onClick={handleClipClick}
+            disabled={!projectId || isLoading || isProcessing || documents.isUploading}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Paperclip className="w-4.5 h-4.5" />
+            {documents.isUploading ? (
+              <Loader2 className="w-4.5 h-4.5 animate-spin" />
+            ) : (
+              <Paperclip className="w-4.5 h-4.5" />
+            )}
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".docx,.pdf,.md,.txt"
+            className="hidden"
+            onChange={(e) => void handleFilePicked(e)}
+          />
           <input
             type="text"
             value={rawInput}
@@ -236,21 +293,28 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             placeholder={isLoading || isProcessing ? "Processing..." : "Describe a change or write feedback..."}
             className="flex-1 bg-transparent border-none focus:ring-0 font-body-sm text-sm placeholder:text-on-surface-variant/55 text-on-surface outline-none"
           />
-          <button
-            onClick={() => handleSendMessage()}
-            disabled={isLoading || isProcessing || !rawInput.trim()}
-            className={`w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm ${
-              rawInput.trim() && !(isLoading || isProcessing)
-                ? 'bg-primary text-on-primary hover:scale-105 cursor-pointer' 
-                : 'bg-black/10 text-on-surface-variant/40 cursor-not-allowed'
-            }`}
-          >
-            {isLoading || isProcessing ? (
-              <RefreshCw className="w-4 h-4 animate-spin text-on-primary" />
-            ) : (
+          {isLoading || isProcessing ? (
+            <button
+              type="button"
+              title="Stop generating"
+              onClick={handleStopGeneration}
+              className="w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm bg-red-600 text-white hover:bg-red-700 hover:scale-105 cursor-pointer"
+            >
+              <Square className="w-3.5 h-3.5 fill-current" />
+            </button>
+          ) : (
+            <button
+              onClick={() => handleSendMessage()}
+              disabled={!rawInput.trim()}
+              className={`w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm ${
+                rawInput.trim()
+                  ? 'bg-primary text-on-primary hover:scale-105 cursor-pointer'
+                  : 'bg-black/10 text-on-surface-variant/40 cursor-not-allowed'
+              }`}
+            >
               <Send className="w-4 h-4" />
-            )}
-          </button>
+            </button>
+          )}
         </div>
       </div>
     </section>

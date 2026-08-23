@@ -257,3 +257,46 @@ export interface ConfirmActionResponse {
 export interface ActionStatusResponse {
   status: string;
 }
+
+// ----------------------------------------------------------------------------
+// Uploaded documents (`/api/project/{id}/documents/*`)
+//
+// Uploading ONLY adds knowledge-base source material; extraction is a separate,
+// explicit action whose output stays a DRAFT pending_action until confirmed.
+// ----------------------------------------------------------------------------
+
+export type DocumentFormat = 'docx' | 'pdf' | 'md' | 'txt';
+
+export interface UploadedDocumentPayload {
+  id: string;
+  project_id: string;
+  original_filename: string;
+  original_format: DocumentFormat | string;
+  mime_type?: string | null;
+  content_markdown?: string | null;
+  original_storage_url?: string | null;
+  file_size_bytes: number;
+  token_count: number;
+  status: 'processed' | 'failed' | string;
+  uploaded_by: string;
+  extraction_status: 'not_extracted' | 'extraction_pending' | 'extraction_applied' | string;
+  created_at: string;
+  updated_at: string;
+  /** Present on scanned-PDF failures: explicit needs-OCR message. */
+  message?: string | null;
+}
+
+export interface DocumentMarkdownPayload extends UploadedDocumentPayload {
+  content_markdown: string;
+}
+
+export interface ProcessDocumentResponse {
+  status: 'draft_ready' | 'failed' | string;
+  mode: 'full' | 'chunked' | string;
+  chunk_count: number;
+  processed_tokens: number;
+  pending_action_id?: string | null;
+  excluded_anything: boolean;
+  document_id: string;
+  message?: string | null;
+}

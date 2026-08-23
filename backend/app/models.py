@@ -284,6 +284,38 @@ class PendingActionModel(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class DocumentModel(Base):
+    """
+    Uploaded project document — the immutable knowledge/document store.
+
+    Uploading a document ONLY adds source material to the knowledge base: it
+    never mutates requirements, user stories, or acceptance criteria. The full
+    converted markdown is ALWAYS persisted (no token truncation at save time —
+    token limits apply only to the explicit LLM extraction path). Extracted
+    requirements are never stored here; they live only in the draft merge state
+    (a pending_action) until the user confirms.
+    """
+    __tablename__ = "uploaded_documents"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    original_filename = Column(String(255), nullable=False)
+    original_format = Column(String(20), nullable=False)  # 'docx' | 'pdf' | 'md' | 'txt'
+    mime_type = Column(String(100), nullable=True)
+    content_markdown = Column(Text, nullable=False, default="")  # canonical converted markdown, ALWAYS full
+    original_storage_url = Column(String(255), nullable=True)  # reserved for object storage later
+    file_size_bytes = Column(Integer, nullable=False, default=0)
+    token_count = Column(Integer, nullable=False, default=0)  # measured at ingest via count_tokens
+    status = Column(String(20), nullable=False, default="processed")  # 'processed' | 'failed'
+    uploaded_by = Column(String(100), nullable=False, default="user", server_default="user")
+    # Tracks whether the user has explicitly triggered extraction for this
+    # document: 'not_extracted' | 'extraction_pending' | 'extraction_applied'.
+    # Extracted requirements are NEVER stored on this table.
+    extraction_status = Column(String(30), nullable=False, default="not_extracted", server_default="not_extracted")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class ArtifactEventLogModel(Base):
     """
     Append-only immutable event log for tracking all artifact modifications.

@@ -45,6 +45,26 @@ class Settings(BaseSettings):
     MAX_CONTEXT_TOKENS: int = 8192
     TEMPERATURE: float = 0.0
 
+    # Document upload & extraction (see app/routes/documents.py, app/document_processor.py)
+    # MAX_UPLOAD_MB is the ONLY size gate applied at save time — it guards against
+    # disk abuse. It is deliberately NOT a token check: the FULL converted markdown
+    # is always persisted regardless of size. Token limits apply solely to the
+    # LLM-feeding path (the explicit "process this document" action).
+    MAX_UPLOAD_MB: int = 25
+    # Fraction of MAX_CONTEXT_TOKENS reserved for a document chunk so the system
+    # prompt + gatherer instructions + tool schema + output slack still fit when
+    # the chunk is joined to the prompt (Option 2 math — never set the chunk near
+    # the full context window).
+    DOCUMENT_BUDGET_FRACTION: float = 0.6
+    # Target token size of a single document chunk (~10% overlap keeps headings
+    # and context from being clipped at chunk boundaries).
+    DOCUMENT_CHUNK_SIZE: int = 2500
+    DOCUMENT_CHUNK_OVERLAP: int = 250
+    # Hard ceiling on how many sequential chunked-lambda runs a single document
+    # extraction may produce. Beyond this the extraction is refused (413) with a
+    # clear message instead of silently degrading into a truncation.
+    MAX_DOCUMENT_CHUNKS: int = 30
+
     # Rate limiting (per-client sliding window; see app/rate_limit.py).
     # Finding #39: LLM-facing endpoints accept arbitrary input, so inbound
     # requests are throttled per client IP per scope.

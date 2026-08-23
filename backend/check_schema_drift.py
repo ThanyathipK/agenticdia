@@ -42,6 +42,7 @@ DATA_TS = os.path.join(SRC, "data.ts")
 DOCUMENTED_MODEL_ONLY_TABLES = {
     "requirement_states",
     "pending_actions",
+    "uploaded_documents",
 }
 
 # INITIAL_* constant name in src/data.ts  ->  table name in init.sql

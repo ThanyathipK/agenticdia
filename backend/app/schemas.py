@@ -546,3 +546,67 @@ class ProcessRequirementsResponse(BaseModel):
     message: Optional[str] = Field(None, description="Assistant/agent message text.")
     pending_merge: Optional[bool] = Field(None, description="True when a pending merge action awaits confirmation.")
     pending_action_id: Optional[str] = Field(None, description="Pending-action UUID string awaiting confirmation.")
+
+
+# ==========================================
+# 12. UPLOADED DOCUMENTS (KNOWLEDGE / DOCUMENT STORE)
+# ==========================================
+# Uploading a document ONLY adds source material to the project's knowledge
+# base. It never mutates requirements, user stories, or acceptance criteria.
+# The full converted markdown is ALWAYS persisted; token limits apply solely to
+# the explicit, user-confirmed extraction path (see routes/documents.py).
+
+class UploadedDocumentResponse(BaseModel):
+    """A single uploaded-document record, as serialized by ``serialize_document``.
+
+    ``content_markdown`` is omitted from list/detail responses unless
+    ``include_markdown=True`` (the dedicated get-markdown endpoint).
+    """
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Document UUID string.")
+    project_id: str = Field(..., description="Owning project UUID string.")
+    original_filename: str = Field(..., description="Original uploaded file name.")
+    original_format: str = Field(..., description="Source format: 'docx' | 'pdf' | 'md' | 'txt'.")
+    mime_type: Optional[str] = Field(None, description="Detected MIME type of the upload.")
+    content_markdown: Optional[str] = Field(None, description="Canonical converted markdown. Present only when the detail/markdown endpoint is used and the full text is always stored.")
+    original_storage_url: Optional[str] = Field(None, description="Reserved object-storage URL (unused today).")
+    file_size_bytes: int = Field(0, description="Uploaded file size in bytes.")
+    token_count: int = Field(0, description="Markdown token count measured at ingest via count_tokens.")
+    status: str = Field("processed", description="'processed' | 'failed'.")
+    uploaded_by: str = Field("user", description="Actor that uploaded the document.")
+    extraction_status: str = Field("not_extracted", description="'not_extracted' | 'extraction_pending' | 'extraction_applied'.")
+    created_at: str = Field("", description="ISO8601 creation timestamp.")
+    updated_at: str = Field("", description="ISO8601 last-update timestamp.")
+
+
+class DocumentMarkdownResponse(BaseModel):
+    """Full canonical markdown + metadata returned by the detail/markdown endpoint."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Document UUID string.")
+    project_id: str = Field(..., description="Owning project UUID string.")
+    original_filename: str = Field(..., description="Original uploaded file name.")
+    original_format: str = Field(..., description="Source format: 'docx' | 'pdf' | 'md' | 'txt'.")
+    content_markdown: str = Field(..., description="FULL canonical converted markdown (never truncated).")
+    token_count: int = Field(0, description="Markdown token count measured at ingest.")
+    status: str = Field("processed", description="'processed' | 'failed'.")
+    extraction_status: str = Field("not_extracted", description="Extraction tracking flag.")
+
+
+class DocumentProcessResponse(BaseModel):
+    """Payload returned by ``POST .../documents/{document_id}/process``.
+
+    The extraction is DRAFT-ONLY: nothing is written to the requirements,
+    user_stories, or acceptance_criteria tables. The complete merged draft lives
+    in ``pending_action_id``'s ``proposed_changes`` until the user confirms via
+    the existing ``/api/confirm-action/{action_id}`` flow.
+    """
+    status: str = Field(..., description="Outcome: 'draft_ready' | 'failed'.")
+    mode: str = Field(..., description="'full' (single pass) | 'chunked' (sequential chunked passes).")
+    chunk_count: int = Field(..., description="Number of gatherer passes executed (1 for full mode).")
+    processed_tokens: int = Field(..., description="Total document tokens fed through extraction.")
+    pending_action_id: Optional[str] = Field(None, description="Pending-action UUID holding the merged draft, awaiting confirmation.")
+    excluded_anything: bool = Field(False, description="True when any content was left out of extraction (never silently).")
+    message: str = Field("", description="Human-readable summary including which mode ran and chunk count.")
+    document_id: str = Field(..., description="Source document UUID string.")

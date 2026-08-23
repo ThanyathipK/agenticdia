@@ -3,8 +3,9 @@
 // (send, validate, generate PRD, clarifications). Domain state lives in the
 // shared `RequirementStore`; project info and pending-actions are injected
 // through `deps`.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
+import axios from 'axios';
 import { api } from '../api/client';
 import type { PendingActionPayload, ProjectSummary } from '../api/types';
 import {
@@ -24,6 +25,13 @@ export interface ChatDeps {
   setPendingActions: Dispatch<SetStateAction<PendingActionPayload[]>>;
   setActiveTab: (tab: WorkspaceTab) => void;
   loadProjectState: (projId: string, retries?: number, delay?: number) => Promise<void>;
+  /**
+   * Gate shared with the ChatPanel action buttons: false while the project has
+   * neither knowledge documents nor gathered requirements, so the agent
+   * handlers refuse to run on an empty project (defense-in-depth parity with
+   * the disabled Validate / Generate PRD buttons).
+   */
+  canRunAgentActions: boolean;
 }
 
 export interface UseChatResult {
@@ -40,6 +48,8 @@ export interface UseChatResult {
   handleSendMessage: (textToSend?: string) => Promise<void>;
   handleValidateRequirements: () => Promise<void>;
   handleGeneratePRD: () => Promise<void>;
+  /** Aborts the in-flight agent request (Stop button). No-op when idle. */
+  handleStopGeneration: () => void;
   handleSubmitClarifications: (e: React.FormEvent) => Promise<void>;
   handleUpdateAnswerValue: (key: string, value: string) => void;
 }
@@ -76,13 +86,38 @@ const rateLimitedContent = (err: unknown): string => {
   return `⏳ **Rate Limit Reached:** Too many requests in a short window. ${suffix}`;
 };
 
+// --- Stop-button (request abort) awareness ----------------------------------
+// When the user presses Stop we cancel the axios request. Axios then rejects
+// with a CanceledError — that is an intentional user action, NOT a failure, so
+// every handler surfaces a neutral "stopped" notice instead of an error toast.
+const isAbortError = (err: unknown): boolean =>
+  axios.isCancel(err) || (err as { code?: string })?.code === 'ERR_CANCELED';
+
 export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult {
   const [rawInput, setRawInput] = useState<string>('');
+
+  // Abort controller for whichever agent request is currently in flight.
+  // The Stop button aborts it; each handler creates a fresh controller per run.
+  const abortRef = useRef<AbortController | null>(null);
 
   // Keep the chat scrolled to the latest message
   useEffect(() => {
     store.chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [store.messages, store.isProcessing]);
+
+  // Build a truthful change-history digest for the backend prompt context.
+  // Every agent call used to hardcode 'No previous history.', which defeated
+  // the Architect node's incremental-regeneration logic (it could never see
+  // what had already been approved). Returning undefined lets the backend's
+  // documented default ("No previous history.") apply for genuinely new
+  // projects instead of duplicating that string here.
+  const buildVersionHistorySummaries = (): string | undefined => {
+    const history = store.versionHistory || [];
+    if (history.length === 0) return undefined;
+    return history
+      .map(h => `- v${h.version} (${h.timestamp}, ${h.author}): ${h.description}`)
+      .join('\n');
+  };
 
   // Handle Raw Conversational Input Submission
   const handleSendMessage = async (textToSend?: string) => {
@@ -116,6 +151,9 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     store.setSyncStatus('Detecting intent...');
     store.setCurrentAgentNode(null);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       // The backend handles intent detection internally and routes accordingly:
       //   - GENERAL_CHAT: returns conversational response directly (no agent workflow)
@@ -127,7 +165,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         version_history_summaries: 'No previous history.',
         target_agent: 'gatherer',
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
-      });
+      }, controller.signal);
 
       const detectedIntent = data.detected_intent || 'GENERAL_CHAT';
 
@@ -176,7 +214,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           const newHist: VersionHistory = {
             version: nextVer,
             timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-            author: 'Thanyathip (Product Owner)',
+            author: 'Product Owner',
             description: inputMsg.substring(0, 70) + (inputMsg.length > 70 ? '...' : ''),
             requirementsSnapshot: nextStructured,
           };
@@ -194,6 +232,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         }
       }
     } catch (err) {
+      if (isAbortError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `stopped-${Date.now()}`,
+          role: 'assistant',
+          content: '⏹️ **Stopped.**\nYou cancelled this request — the server-side run was terminated and no requirement changes were applied.',
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Request stopped by user.');
+        return;
+      }
       if (isRateLimitError(err)) {
         store.setMessages(prev => [...prev, {
           id: `rate-limited-${Date.now()}`,
@@ -214,6 +262,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       }]);
       store.setSyncStatus('Request failed. Nothing was saved.');
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       store.setIsLoading(false);
       store.setIsProcessing(false);
       store.setCurrentAgentNode(null);
@@ -223,11 +272,20 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   // Handle On-Demand Audit Execution
   const handleValidateRequirements = async () => {
     if (!deps.projectId) return;
+    if (!deps.canRunAgentActions) {
+      // Nothing to audit yet — mirror the disabled button instead of running
+      // the auditor agent against an empty project.
+      store.setSyncStatus('Nothing to validate yet — add requirements or upload a knowledge document.');
+      return;
+    }
     const projectId = deps.projectId;
     store.setIsLoading(true);
     store.setIsProcessing(true);
     store.setSyncStatus('Running Technical Audit...');
     store.setCurrentAgentNode('auditor_node');
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const data = await api.processRequirements({
@@ -237,7 +295,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
         current_version: deps.currentVersion,
         version_history_summaries: 'No previous history.',
-      });
+      }, controller.signal);
 
       const receivedAudit = toAuditResultFromPayload(data.audit_result);
       const pendingActionId = data.pending_action_id;
@@ -292,6 +350,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setClarificationAnswers(initialAnswers);
       }
     } catch (err) {
+      if (isAbortError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `stopped-${Date.now()}`,
+          role: 'assistant',
+          content: '⏹️ **Stopped.**\nYou cancelled this request — the audit was terminated and no validation verdict was applied.',
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Validation stopped by user.');
+        return;
+      }
       if (isRateLimitError(err)) {
         store.setMessages(prev => [...prev, {
           id: `rate-limited-${Date.now()}`,
@@ -311,6 +379,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       }]);
       store.setSyncStatus('Audit failed. No changes were saved.');
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       store.setIsLoading(false);
       store.setIsProcessing(false);
       store.setCurrentAgentNode(null);
@@ -320,11 +389,20 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   // Handle On-Demand PRD & Architecture Diagram Generation
   const handleGeneratePRD = async () => {
     if (!deps.projectId) return;
+    if (!deps.canRunAgentActions) {
+      // Nothing to compile yet — mirror the disabled button instead of asking
+      // the architect agent to build a PRD from an empty project.
+      store.setSyncStatus('Nothing to compile yet — add requirements or upload a knowledge document.');
+      return;
+    }
     const projectId = deps.projectId;
     store.setIsLoading(true);
     store.setIsProcessing(true);
     store.setSyncStatus('Compiling enterprise PRD document...');
     store.setCurrentAgentNode('architect_node');
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const data = await api.processRequirements({
@@ -333,8 +411,8 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         target_agent: 'architect',
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
         current_version: deps.currentVersion,
-        version_history_summaries: 'No previous history.',
-      });
+        version_history_summaries: buildVersionHistorySummaries(),
+      }, controller.signal);
 
       const generatedPrd = data.prd_markdown || '';
       const generatedMermaid = data.mermaid_diagram || '';
@@ -352,6 +430,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setSyncStatus('PRD and sequence diagram updated.');
       deps.setActiveTab('prd'); // switch tab automatically to PRD
     } catch (err) {
+      if (isAbortError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `stopped-${Date.now()}`,
+          role: 'assistant',
+          content: '⏹️ **Stopped.**\nYou cancelled this request — PRD generation was terminated server-side; no document was produced.',
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Generation stopped by user.');
+        return;
+      }
       if (isRateLimitError(err)) {
         store.setMessages(prev => [...prev, {
           id: `rate-limited-${Date.now()}`,
@@ -371,10 +459,30 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       }]);
       store.setSyncStatus('PRD generation failed. No document saved.');
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       store.setIsLoading(false);
       store.setIsProcessing(false);
       store.setCurrentAgentNode(null);
     }
+  };
+
+  // Stop button — terminates generation on BOTH sides: asks the backend to
+  // hard-cancel the running workflow task (best-effort), then aborts the local
+  // axios request so the UI unlocks immediately instead of waiting for the LLM
+  // workflow to finish.
+  const handleStopGeneration = () => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    const projectId = deps.projectId;
+    if (projectId) {
+      void api.cancelProcessRequirements(projectId).catch(() => {
+        // Best-effort only: if this loses a race with completion (or fails),
+        // the local abort below still unblocks the UI instantly.
+      });
+    }
+    controller.abort();
+    abortRef.current = null;
+    store.setSyncStatus('Stopping generation...');
   };
 
   // (Removed) The former `simulateAgentWorkflowFallback` fabricated a fake user
@@ -432,6 +540,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     handleSendMessage,
     handleValidateRequirements,
     handleGeneratePRD,
+    handleStopGeneration,
     handleSubmitClarifications,
     handleUpdateAnswerValue,
   };

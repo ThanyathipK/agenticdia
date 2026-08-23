@@ -281,6 +281,34 @@ async def confirm_action(action_id: str, project_id: str, session: AsyncSession 
     logger.info(f"[MERGE CONFIRM] Persisting merged state for project {project_id}...")
     persisted_state = await RequirementStateRepository.save_or_update(project_id, proposed_changes, session)
 
+    # 3b. Document-extraction merges (INSERT_CHUNKED_REQUIREMENTS): flip the
+    # source document's extraction flag and append the audit-log entry. The
+    # draft was created by POST .../documents/{id}/process; THIS is the only
+    # point at which document-derived requirements ever reach the DB.
+    document_ref = proposed_changes.get("_document_ref") or {}
+    if action.get("action_type") == "INSERT_CHUNKED_REQUIREMENTS" and document_ref.get("document_id"):
+        from app.repositories import ArtifactEventLogRepository, DocumentRepository
+
+        await DocumentRepository.update_extraction_status(
+            str(document_ref["document_id"]), project_id, "extraction_applied", session
+        )
+        try:
+            await ArtifactEventLogRepository.log_event(
+                artifact_type="uploaded_document",
+                artifact_id=str(document_ref["document_id"]),
+                action="CREATE",
+                session=session,
+                old_value=None,
+                new_value={
+                    "document_filename": document_ref.get("document_filename"),
+                    "pending_action_id": action_id,
+                    "applied_version": persisted_state.get("version_number"),
+                },
+                performed_by="user",
+            )
+        except Exception as log_err:  # never block a confirmed merge on logging
+            logger.warning(f"[MERGE CONFIRM] Failed to log document merge event: {log_err}")
+
     # 4. Delete the pending action
     await PendingActionRepository.delete(action_id, project_id, session)
 

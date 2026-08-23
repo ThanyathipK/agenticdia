@@ -1,4 +1,4 @@
-"""Alembic migration runner for AgenticDIA.
+"""Alembic migration runner for Agentic AI.
 
 Replaces the previous ad-hoc startup migrations (routes/migrations.py) with
 proper versioned Alembic migrations. Migrations are stored in

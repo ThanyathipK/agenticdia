@@ -4,7 +4,7 @@ Revision ID: 0001_initial_schema
 Revises: 
 Create Date: 2026-08-09 19:55:00.000000
 
-This migration establishes the baseline schema for the AgenticDIA database.
+This migration establishes the baseline schema for the Agentic AI database.
 It replaces the previous ad-hoc startup migrations by:
 
 1. Creating all tables defined in app.models (for fresh databases)

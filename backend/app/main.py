@@ -10,7 +10,7 @@ from app.config import settings
 from app.migrations import run_migrations, seed_default_user
 from app.event_manager import verify_single_worker_guarantee as verify_sse_single_worker_guarantee
 from app.rate_limit import verify_single_worker_guarantee
-from app.routes import chat, projects, requirements, lock, events
+from app.routes import chat, projects, requirements, lock, events, documents
 from app.llm_client import check_lm_studio_health
 
 # Logger initialization
@@ -151,11 +151,13 @@ app.add_middleware(
 #   - lock:        /api/project/{id}/artifacts/*/lock|unlock|lock-status,
 #                  /api/pending-actions, /api/confirm-action, /api/cancel-action
 #   - events:      /api/events, /api/project/{id}/events, /api/project/{id}/sse (SSE push stream)
+#   - documents:   /api/project/{id}/documents upload/list/get + DRAFT-only process endpoint
 app.include_router(chat.router, tags=["System"])
 app.include_router(projects.router, tags=["Projects"])
 app.include_router(requirements.router, tags=["Requirements & Workflow"])
 app.include_router(lock.router, tags=["Locking & Pending Actions"])
 app.include_router(events.router, tags=["Events & SSE"])
+app.include_router(documents.router, tags=["Documents"])
 
 
 # ==========================================

@@ -5,11 +5,11 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.lock_service import LockService
-from app.models import ProjectModel, RequirementStateModel
+from app.models import ConversationMessageModel, ProjectModel, RequirementStateModel
 from app.repositories.base import as_uuid, serialize_project
 from app.repositories.event_log import ArtifactEventLogRepository
 
@@ -22,13 +22,47 @@ class ProjectRepository:
     """Handles project-level operations."""
 
     @staticmethod
+    def _sort_projects(projects: List[ProjectModel]) -> None:
+        """Sidebar ordering: pinned projects float to the top, then most recently updated first."""
+        projects.sort(key=lambda p: (not (p.is_pinned or False), -(p.updated_at or p.created_at).timestamp() if (p.updated_at or p.created_at) else 0))
+
+    @staticmethod
     async def list_all(session: AsyncSession) -> List[Dict[str, Any]]:
         stmt = select(ProjectModel)
         result = await session.execute(stmt)
         projects = list(result.scalars().all())
-        # Pinned chats/projects float to the top of the sidebar, then order by
-        # most recently updated first.
-        projects.sort(key=lambda p: (not (p.is_pinned or False), -(p.updated_at or p.created_at).timestamp() if (p.updated_at or p.created_at) else 0))
+        ProjectRepository._sort_projects(projects)
+        return [serialize_project(p) for p in projects]
+
+    @staticmethod
+    async def search(session: AsyncSession, query: str) -> List[Dict[str, Any]]:
+        """Search projects by name OR by their persisted conversation messages.
+
+        A project is returned when its name contains ``query`` (case-insensitive)
+        or when at least one of its conversation messages contains ``query``
+        (case-insensitive). Results use the same pinned-first ordering as
+        :meth:`list_all`.
+
+        Args:
+            session: Active asynchronous database session.
+            query: Non-empty search text (caller validates; stripped here).
+
+        Returns:
+            List[Dict[str, Any]]: Matching project summary records.
+        """
+        pattern = f"%{query.strip()}%"
+        stmt = (
+            select(ProjectModel)
+            .outerjoin(ConversationMessageModel, ConversationMessageModel.project_id == ProjectModel.id)
+            .where(or_(
+                ProjectModel.name.ilike(pattern),
+                ConversationMessageModel.message.ilike(pattern),
+            ))
+            .distinct()
+        )
+        result = await session.execute(stmt)
+        projects = list(result.scalars().all())
+        ProjectRepository._sort_projects(projects)
         return [serialize_project(p) for p in projects]
 
     @staticmethod

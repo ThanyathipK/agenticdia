@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏦 AgenticDIA
+# 🏦 Agentic AI
 
 ### Enterprise Requirements Architecture Core
 
@@ -8,7 +8,7 @@
 
 </div>
 
-AgenticDIA turns plain-English banking product briefs into **audited, versioned, engineering-ready requirements**. You describe a feature in the chat; a LangGraph workflow of specialist agents (Router, Matcher, Gatherer, Auditor, Architect) runs **fully locally** against a model served by [LM Studio](https://lmstudio.ai), then persists only the changes you confirm to a PostgreSQL database — with per-artifact locking along the way.
+Agentic AI turns plain-English banking product briefs into **audited, versioned, engineering-ready requirements**. You describe a feature in the chat; a LangGraph workflow of specialist agents (Router, Matcher, Gatherer, Auditor, Architect) runs **fully locally** against a model served by [LM Studio](https://lmstudio.ai), then persists only the changes you confirm to a PostgreSQL database — with per-artifact locking along the way.
 
 > [!IMPORTANT]
 > This project **does not** use Gemini or any cloud LLM API key. All inference happens 100% locally through LM Studio. There is **no** `.env.local` and no `GEMINI_API_KEY` setup — backend configuration lives in [`backend/.env`](backend/.env.example).

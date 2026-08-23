@@ -36,104 +36,41 @@ const INITIAL_MESSAGES: ChatMessage[] = [
     id: 'init-1',
     role: 'system',
     content:
-      'Krungsri Nimble Requirements Engine Initialized. Multi-Agent workflow is ready to ingest raw Product Owner specifications.',
+      'Requirements Engine Initialized. Multi-Agent workflow is ready to ingest raw Product Owner specifications.',
     timestamp: '10:24 AM',
   },
   {
     id: 'init-2',
     role: 'assistant',
     content:
-      'Hello! I am your Senior Business Analyst AI Agent. Please provide your raw, conversational, or messy requirement text for the PromptPay integration or core banking upgrade, and I will extract it, run a full compliance audit, and design a pristine PRD for you.',
+      'Hello! I am your Senior Business Analyst AI Agent. Share your raw, conversational, or messy requirement text and I will structure it, run a compliance audit, and compile a formal PRD for you.',
     timestamp: '10:24 AM',
   },
 ];
 
+// Neutral starting state: the workspace boots EMPTY until real data is loaded
+// from the backend or produced by an agent run. Seeding fabricated demo PRDs /
+// diagrams here made every fresh project display fake "generated" documents
+// before any LLM invocation had ever happened.
 const INITIAL_STRUCTURED_REQUIREMENTS: StructuredRequirements = {
-  epic_name: 'PromptPay Real-Time Merchant Settlement Engine',
+  epic_name: '',
   version: 1,
-  user_stories: [
-    {
-      ticket_code: 'US-001',
-      story_title: 'Real-time Fund Settlement via QR Scan',
-      as_a: 'Corporate Merchant Retailer',
-      i_want_to:
-        'receive instant notifications and settlement when a customer scans my PromptPay QR code',
-      so_that: 'I can verify payment immediately and dispense goods without settlement delay',
-      acceptance_criteria: [
-        'Given a customer has scanned a valid static PromptPay QR code, When the transaction is approved by the national switch, Then the funds are instantly credited to the corporate account.',
-        'Given the system detects a network timeout during national switch callback, When the transaction is retried, Then an explicit idempotency key must be checked to prevent double posting.',
-      ],
-    },
-  ],
+  user_stories: [],
 };
 
 const INITIAL_AUDIT_RESULT: AuditResult = {
   is_valid: false,
   audit_version_reviewed: 1,
-  passed_checks: ['Financial Regulatory Compliance', 'Security & Data Masking'],
-  failed_checks: ['Idempotency & De-duplication', 'Network Timeouts & Retry Strategies'],
-  clarification_questions: [
-    {
-      checklist_category: 'Idempotency & De-duplication',
-      target_user_story_id: 'US-001',
-      question_text:
-        'The settlement workflow for US-001 does not specify how back-to-back duplicate transaction payloads are caught. Please define an explicit Idempotency Key mechanism (e.g. key duration, field source).',
-    },
-    {
-      checklist_category: 'Network Timeouts & Retry Strategies',
-      target_user_story_id: 'US-001',
-      question_text:
-        'What is the designated timeout ceiling and circuit-breaker retry pattern for dependent 3rd-party node queries when contacting the PromptPay national switch?',
-    },
-  ],
+  passed_checks: [],
+  failed_checks: [],
+  clarification_questions: [],
 };
-const INITIAL_PRD_MARKDOWN = `# Product Requirement Document (PRD)
 
-## 1. Executive Summary
-This document specifies the functional, non-functional, and technical requirements for integrating the PromptPay real-time payment network into our core banking ecosystem. It targets robust, high-throughput transactions with compliance audits enforced.
+const INITIAL_PRD_MARKDOWN = '';
 
-## 2. Technical Architecture & Constraints
-- **Inbound Gateways:** mTLS with Bank of Thailand national switch
-- **Message Standard:** ISO 20022 real-time pain.001 / pain.002 settlement envelopes
-- **Data Guardrails:** Strict AES-256 field-level encryption for corporate merchant routing configurations
+const INITIAL_MERMAID = '';
 
-## 3. Scope of Requirements (User Stories)
-- **REQ-PP-001:** Real-time settlement notifications with dynamic webhook routing
-- **REQ-PP-002:** Automated end-of-day reconciliation with zero general ledger discrepancies`;
-
-const INITIAL_MERMAID = `sequenceDiagram
-  autonumber
-  Client Browser->>FastAPI Backend: HTTP POST /api/transaction
-  FastAPI Backend->>Security Module: Validate Signature & Token
-  Security Module->>National Switch API: Dispatch ISO 20022 payload
-  National Switch API-->>FastAPI Backend: Confirm Settlement Status
-  FastAPI Backend->>Supabase DB: Persist Ledger & Update Idempotency`;
-
-const INITIAL_VERSION_HISTORY: VersionHistory[] = [
-  {
-    version: 1,
-    timestamp: '2026-07-10 10:24',
-    author: 'Thanyathip (Product Owner)',
-    description: 'Initial raw draft of PromptPay QR scan integration specifications.',
-    requirementsSnapshot: {
-      epic_name: 'PromptPay Real-Time Merchant Settlement Engine',
-      version: 1,
-      user_stories: [
-        {
-          ticket_code: 'US-001',
-          story_title: 'Real-time Fund Settlement via QR Scan',
-          as_a: 'Corporate Merchant Retailer',
-          i_want_to:
-            'receive instant notifications and settlement when a customer scans my PromptPay QR code',
-          so_that: 'I can verify payment immediately and dispense goods without settlement delay',
-          acceptance_criteria: [
-            'Given a customer scanned a PromptPay QR, When transaction approved, Then credit funds.',
-          ],
-        },
-      ],
-    },
-  },
-];
+const INITIAL_VERSION_HISTORY: VersionHistory[] = [];
 
 // ----------------------------------------------------------------------------
 // Store interface

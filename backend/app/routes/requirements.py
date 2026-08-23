@@ -1,13 +1,16 @@
+import asyncio
 import logging
 from typing import Dict, Any, List
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
 from app.rate_limit import rate_limit_dependency
+from app.workflow_cancellation import workflow_cancellations
 from app.input_validation import validate_text_budget, validate_body_budget
 from app.repositories import (
     RequirementRepository,
@@ -37,6 +40,35 @@ from app.event_manager import event_manager
 logger = logging.getLogger("app.routes.requirements")
 
 router = APIRouter()
+
+
+def _ensure_requirement_ids(reqs: Any) -> List[Dict[str, Any]]:
+    """Guarantee every requirement entry satisfies ``RequirementDetail``.
+
+    The multi-agent workflow (and the legacy ``epic_name`` conversion) rebuild
+    requirement dicts from the frontend's ``structured_requirements`` payload,
+    which does not carry database identity. ``RequirementDetail.id`` (and
+    ``requirement_code``/``title``) are REQUIRED response fields, so a missing
+    ``id`` failed FastAPI response validation and surfaced as an opaque HTTP
+    500 ("PRD Generation Failed — No Document Saved") in the UI. Falling back
+    to ``requirement_code`` (or a fresh UUID) keeps the API contract intact.
+    """
+    if not isinstance(reqs, list):
+        return []
+    safe: List[Dict[str, Any]] = []
+    for entry in reqs:
+        if not isinstance(entry, dict):
+            logger.warning("Skipping non-dict requirement entry in process-requirements response: %r", entry)
+            continue
+        item = dict(entry)
+        if not item.get("id"):
+            item["id"] = item.get("requirement_code") or str(uuid4())
+        if not item.get("requirement_code"):
+            item["requirement_code"] = f"REQ-{len(safe) + 1:03d}"
+        if item.get("title") is None:
+            item["title"] = ""
+        safe.append(item)
+    return safe
 
 
 # ==========================================
@@ -304,6 +336,40 @@ async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSessi
 
 
 # ==========================================
+# GENERATION CANCELLATION API (Stop button)
+# ==========================================
+
+@router.post("/api/process-requirements/cancel", status_code=status.HTTP_200_OK)
+async def post_cancel_process_requirements(
+    project_id: str = Query(..., description="Project whose in-flight generation should be terminated."),
+) -> Dict[str, Any]:
+    """
+    Cancel an in-flight multi-agent generation for a project (Stop button).
+
+    The long-running ``/api/process-requirements`` handler registers its asyncio
+    task in the cancellation registry at request start. This endpoint cancels
+    that task, which raises ``asyncio.CancelledError`` at its current await
+    point (including mid-LLM-call, aborting the outbound LM Studio request).
+    The handler's cancellation path then skips every persistence step, so a
+    stopped run saves NOTHING (no pending actions, no assistant messages, no
+    SSE publishes).
+
+    Returns ``{"cancelled": true}`` when a running generation was terminated,
+    ``{"cancelled": false}`` when nothing was in flight (e.g. Stop pressed just
+    after the run already completed).
+
+    Deliberately NOT rate limited: stopping a runaway generation must always
+    succeed.
+    """
+    cancelled = workflow_cancellations.cancel(str(project_id))
+    if cancelled:
+        logger.info(f"[CANCELLED] Termination requested for in-flight generation, project {project_id}")
+    else:
+        logger.info(f"[CANCELLED] No in-flight generation to cancel for project {project_id}")
+    return {"project_id": str(project_id), "cancelled": cancelled}
+
+
+# ==========================================
 # MULTI-AGENT PROCESS REQUIREMENTS API
 # ==========================================
 
@@ -316,6 +382,45 @@ async def post_process_requirements(
             "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
         )
     ),
+) -> ProcessRequirementsResponse:
+    """
+    Public entrypoint for the multi-agent workflow, with Stop-button support.
+
+    Registers the running asyncio task under the project ID so a concurrent
+    ``POST /api/process-requirements/cancel`` can hard-cancel it. On
+    cancellation the pipeline's ``asyncio.CancelledError`` is converted into a
+    ``{"status": "cancelled"}`` response and NO results are persisted. See
+    :func:`_process_requirements_pipeline` for the full pipeline behavior.
+    """
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        workflow_cancellations.register(str(request.project_id), current_task)
+    try:
+        return await _process_requirements_pipeline(request, session)
+    except asyncio.CancelledError:
+        # Hard-cancel from the Stop button. CancelledError is a BaseException,
+        # so the pipeline's `except Exception -> HTTP 500` guard never swallows
+        # it. Skip ALL persistence and report the cancellation instead.
+        logger.warning(
+            f"[CANCELLED] Generation for project {request.project_id} was stopped by the user; "
+            "skipping all result persistence."
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "cancelled",
+                "project_id": str(request.project_id),
+                "message": "Generation was stopped by the user before completion. No results were saved.",
+            },
+        )
+    finally:
+        if current_task is not None:
+            workflow_cancellations.unregister(str(request.project_id), current_task)
+
+
+async def _process_requirements_pipeline(
+    request: ProcessRequirementsRequest,
+    session: AsyncSession,
 ) -> ProcessRequirementsResponse:
     """
     Asynchronously invokes the LangGraph multi-agent workflow (prd_workflow)
@@ -529,7 +634,9 @@ async def post_process_requirements(
 
         req_state = {
             "project_id": request.project_id,
-            "project_name": "PromptPay Settlement Engine",
+            # The authoritative project name lives in the projects table;
+            # keep this denormalized copy blank rather than a demo label.
+            "project_name": "",
             "requirements": [
                 {
                     "requirement_code": "REQ-001",
@@ -564,12 +671,21 @@ async def post_process_requirements(
                 # Use the requirements list from frontend
                 req_state["requirements"] = reqs_list
             else:
-                # Convert legacy epic_name to requirement format
+                # Convert legacy epic_name to requirement format.
+                # Preserve database identity (id/priority/status/...) from the
+                # previous requirement record: a bare synthetic dict without
+                # the REQUIRED ``id`` field previously failed RequirementDetail
+                # response validation -> opaque HTTP 500 on PRD generation.
+                previous_reqs = [r for r in (req_state.get("requirements", []) or []) if isinstance(r, dict)]
+                prev_matched = previous_reqs[0] if previous_reqs else {}
                 req_state["requirements"] = [
                     {
-                        "requirement_code": "REQ-001",
-                        "title": reqs.get("epic_name", ""),
-                        "description": "",
+                        **prev_matched,
+                        # Preserve the stored requirement code; only synthesize
+                        # one when no prior requirement record exists at all.
+                        "requirement_code": prev_matched.get("requirement_code") or "REQ-001",
+                        "title": reqs.get("epic_name") or prev_matched.get("title", ""),
+                        "description": prev_matched.get("description", ""),
                         "user_stories": reqs.get("user_stories", [])
                     }
                 ]
@@ -669,12 +785,12 @@ async def post_process_requirements(
         reqs_data = req_state.get("requirements", [])
         if isinstance(reqs_data, list):
             # Multi-requirement format
-            epic_name = reqs_data[0].get("title", "") if reqs_data else ""
+            epic_name = reqs_data[0].get("title", "") if reqs_data and isinstance(reqs_data[0], dict) else ""
             structured_out = {
                 "epic_name": epic_name,
                 "version": req_state.get("version_number", 1),
                 "user_stories": req_state.get("user_stories", []),
-                "requirements": reqs_data
+                "requirements": _ensure_requirement_ids(reqs_data)
             }
         elif isinstance(reqs_data, dict):
             # Legacy dict format

@@ -17,6 +17,7 @@ from app.models import (
     AuditResultModel,
     ClarificationQuestionModel,
     ConversationMessageModel,
+    DocumentModel,
     EpicModel,
     PendingActionModel,
     PRDDocumentModel,
@@ -227,6 +228,32 @@ def serialize_conversation_message(m: ConversationMessageModel) -> Dict[str, Any
         "intent": m.intent,
         "created_at": dt_iso(m.created_at),
     }
+
+
+def serialize_document(doc: DocumentModel, *, include_markdown: bool = False) -> Dict[str, Any]:
+    """Serialize a DocumentModel into its public dict representation.
+
+    The canonical converted markdown is always persisted in full; it is only
+    included in the payload when ``include_markdown=True`` (the dedicated
+    detail/markdown endpoint) so list responses stay lean.
+    """
+    data = {
+        "id": str(doc.id),
+        "project_id": str(doc.project_id),
+        "original_filename": doc.original_filename,
+        "original_format": doc.original_format,
+        "mime_type": doc.mime_type,
+        "file_size_bytes": doc.file_size_bytes,
+        "token_count": doc.token_count,
+        "status": doc.status,
+        "uploaded_by": doc.uploaded_by,
+        "extraction_status": doc.extraction_status,
+        "created_at": dt_iso(doc.created_at),
+        "updated_at": dt_iso(doc.updated_at),
+    }
+    if include_markdown:
+        data["content_markdown"] = doc.content_markdown
+    return data
 
 
 def serialize_pending_action(a: PendingActionModel, *, full: bool = False) -> Dict[str, Any]:

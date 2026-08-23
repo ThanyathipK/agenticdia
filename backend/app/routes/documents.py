@@ -1,0 +1,620 @@
+"""
+Document upload & extraction API.
+
+Product intent enforced here (see also ``app/document_processor.py``):
+
+1. **Knowledge base (RAG-ready).** Uploading a document ONLY adds source material
+   to the project's knowledge store. The FULL converted markdown (plus metadata)
+   is always persisted immutably — no token truncation at save time. The only
+   size gate at save time is ``MAX_UPLOAD_MB`` (disk abuse), NOT a token check.
+2. **Requirements source (opt-in, explicit).** Extraction happens only on the
+   explicit ``POST .../documents/{id}/process`` action, produces a DRAFT merge
+   preview stored in a ``pending_action``, and is NEVER written until the user
+   confirms through the existing ``/api/confirm-action/{id}`` flow. Neither the
+   upload nor the processing endpoints ever mutate requirements, user stories
+   or acceptance criteria.
+
+Alembic migration ``0004`` provisions the table; ``DocumentRepository`` owns
+persistence; serialization lives in ``repositories/base.py``.
+"""
+import io
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.database import get_db
+from app.document_processor import (
+    DRAFT_ACTION_TYPE,
+    accumulate_document_draft,
+    build_merge_preview,
+    decide_document_mode,
+    document_budget,
+    extract_requirements_from_text,
+    split_markdown_into_chunks,
+)
+from app.event_manager import event_manager
+from app.input_validation import count_tokens
+from app.rate_limit import rate_limit_dependency
+from app.repositories import (
+    DocumentRepository,
+    PendingActionRepository,
+    RequirementStateRepository,
+)
+from app.schemas import (
+    DocumentMarkdownResponse,
+    DocumentProcessResponse,
+    UploadedDocumentResponse,
+)
+
+logger = logging.getLogger("app.routes.documents")
+
+router = APIRouter()
+
+# ==========================================
+# ALLOWED FORMATS / MIME VALIDATION
+# ==========================================
+ALLOWED_FORMATS = {
+    "docx": {
+        "original_format": "docx",
+        "mime_types": {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+    },
+    "pdf": {
+        "original_format": "pdf",
+        "mime_types": {"application/pdf"},
+    },
+    "md": {
+        "original_format": "md",
+        "mime_types": {"text/markdown", "text/x-markdown", "text/plain"},
+    },
+    "txt": {
+        "original_format": "txt",
+        "mime_types": {"text/plain"},
+    },
+}
+
+# Generic content-types tolerated for any supported format (curl uploads,
+# drag&drop, etc.) after the extension itself has validated.
+_GENERIC_MIME_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
+
+# OCR is explicitly OUT OF SCOPE. A PDF with no extractable text is surfaced
+# with this clear message (never a silent stub).
+NEEDS_OCR_MESSAGE = (
+    "This PDF contains no extractable text and appears to be a scanned document. "
+    "OCR is out of scope — please upload a text-based PDF or a markdown/plain-text "
+    "rendition instead."
+)
+def _resolve_upload_format(filename: str, content_type: str) -> Dict:
+    """Validate extension + MIME and return the format descriptor.
+
+    Raises:
+        HTTPException: 400 for an unsupported extension or a mismatched MIME
+            type.
+    """
+    lower_name = (filename or "").lower()
+    ext = lower_name.rsplit(".", 1)[-1] if "." in lower_name else ""
+    entry = ALLOWED_FORMATS.get(ext)
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Unsupported file type '.{ext}'. Supported formats: "
+                "docx, pdf, md, txt."
+            ),
+        )
+    mime = (content_type or "").strip().lower()
+    if mime and mime not in entry["mime_types"] and mime not in _GENERIC_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"MIME type '{content_type}' does not match the file extension "
+                f"'.{ext}'. Expected one of: {', '.join(sorted(entry['mime_types']))}."
+            ),
+        )
+    return {"original_format": entry["original_format"], "mime_type": mime or None}
+
+
+async def _read_upload_with_size_cap(file: UploadFile) -> bytes:
+    """Read the whole upload, rejecting anything over ``MAX_UPLOAD_MB`` early.
+
+    This is the ONLY size check applied at save time — it guards against disk
+    abuse, NOT tokens. ``token_count`` is measured on the converted markdown and
+    the full content is always persisted regardless of token size.
+    """
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"File exceeds the maximum upload size of {settings.MAX_UPLOAD_MB}MB.",
+            )
+    return bytes(buf)
+
+
+def _convert_to_markdown(raw: bytes, original_format: str) -> str:
+    """Convert an uploaded byte stream into canonical markdown server-side.
+
+    - docx -> mammoth (best-maintained converter; ``convert_to_markdown``).
+    - pdf  -> pypdf text extraction; scanned/no-text PDFs raise an explicit,
+      clear 'needs-OCR' error (OCR is out of scope — never a silent stub).
+    - md/txt -> passthrough as-is.
+    """
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The uploaded file is empty.",
+        )
+
+    if original_format in ("md", "txt"):
+        return raw.decode("utf-8", errors="replace")
+
+    if original_format == "docx":
+        try:
+            import mammoth  # type: ignore
+        except ImportError as exc:  # pragma: no cover - dependency install guard
+            logger.error("mammoth is not installed; cannot convert docx files.")
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="DOCX conversion is unavailable on this server (mammoth missing).",
+            ) from exc
+        try:
+            result = mammoth.convert_to_markdown(io.BytesIO(raw))
+            return result.value or ""
+        except Exception as exc:
+            logger.error("DOCX conversion failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Could not read this DOCX file: {exc}",
+            ) from exc
+
+    # pdf
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except ImportError as exc:  # pragma: no cover - dependency install guard
+        logger.error("pypdf is not installed; cannot extract PDF text.")
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="PDF extraction is unavailable on this server (pypdf missing).",
+        ) from exc
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        pages = []
+        for page in reader.pages:
+            pages.append((page.extract_text() or "").strip())
+    except Exception as exc:
+        logger.error("PDF extraction failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not read this PDF file: {exc}",
+        ) from exc
+
+    text = "\n\n".join(p for p in pages if p)
+    if not text.strip():
+        # Scanned / image-only PDF -> explicit, loud 'needs-OCR' signal.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=NEEDS_OCR_MESSAGE,
+        )
+    return text
+
+
+# ==========================================
+# UPLOAD — KNOWLEDGE ONLY (never writes requirements)
+# ==========================================
+
+@router.post(
+    "/api/project/{project_id}/documents/upload",
+    response_model=UploadedDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_document(
+    project_id: str,
+    file: UploadFile = File(..., description="The document file (.docx/.pdf/.md/.txt)."),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Upload a document into the project's knowledge base.
+
+    This endpoint ONLY stores converted markdown as source material. It MUST NOT
+    create any requirements, user stories, acceptance criteria, or pending
+    actions for them. Extraction is a separate, explicitly-triggered action
+    (``POST .../documents/{document_id}/process``).
+
+    Args:
+        project_id: Owning project UUID string.
+        file: Multipart ``UploadFile`` (docx/pdf/md/txt).
+        session: Active asynchronous database session.
+
+    Returns:
+        UploadedDocumentResponse: The persisted document record (status
+            'processed' on success; a scanned-PDF failure returns status
+            'failed' with a clear 'needs-OCR' message in ``result.message``).
+
+    Raises:
+        HTTPException: 400 bad extension/MIME, 413 oversized file, 422
+            unreadable/OCR-only PDF.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    fmt = _resolve_upload_format(file.filename or "", file.content_type or "")
+    raw = await _read_upload_with_size_cap(file)
+
+    status_value = "processed"
+    error_message = None
+    try:
+        markdown = _convert_to_markdown(raw, fmt["original_format"])
+    except HTTPException as exc:
+        # A scanned/no-text PDF keeps a traceable 'failed' record and surfaces an
+        # explicit, non-silent 'needs-OCR' message. All other conversion errors
+        # abort with the raised status code (nothing is persisted).
+        if (
+            exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+            and exc.detail == NEEDS_OCR_MESSAGE
+        ):
+            status_value = "failed"
+            error_message = exc.detail
+            markdown = ""
+        else:
+            raise
+
+    token_count = count_tokens(markdown)
+    doc = await DocumentRepository.create(
+        str(project_id),
+        {
+            "original_filename": (file.filename or "unnamed").strip(),
+            "original_format": fmt["original_format"],
+            "mime_type": fmt["mime_type"],
+            "content_markdown": markdown,
+            "file_size_bytes": len(raw),
+            "token_count": token_count,
+            "status": status_value,
+            "uploaded_by": "user",
+            "extraction_status": "not_extracted",
+        },
+        session,
+    )
+
+    await event_manager.publish(
+        str(project_id),
+        "document_uploaded",
+        {
+            "project_id": str(project_id),
+            "document_id": doc["id"],
+            "original_filename": doc["original_filename"],
+            "status": doc["status"],
+        },
+    )
+
+    logger.info(
+        "Document uploaded for project %s: %s (%s, %d bytes, %d tokens) -> status=%s",
+        project_id,
+        doc["original_filename"],
+        fmt["original_format"],
+        len(raw),
+        token_count,
+        status_value,
+    )
+    if error_message:
+        doc["message"] = error_message  # surfaced via extra=allow on the schema
+    return doc
+# ==========================================
+# LIST + DETAIL — READ-ONLY KNOWLEDGE ACCESS
+# ==========================================
+
+@router.get(
+    "/api/project/{project_id}/documents",
+    response_model=List[UploadedDocumentResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def list_documents(
+    project_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """List every uploaded document for a project (metadata only, newest first).
+
+    Args:
+        project_id: Owning project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        List[UploadedDocumentResponse]: Document records (without the full
+            markdown body; use the detail endpoint to fetch it).
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    return await DocumentRepository.get_by_project(project_id, session)
+
+
+@router.get(
+    "/api/project/{project_id}/documents/{document_id}",
+    response_model=DocumentMarkdownResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_document_markdown(
+    project_id: str,
+    document_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return the FULL canonical markdown for a document.
+
+    The full converted markdown is always persisted, so this response is never
+    truncated — token budgets apply only to the LLM-feeding path.
+
+    Args:
+        project_id: Owning project UUID string.
+        document_id: Document UUID string.
+        session: Active asynchronous database session.
+
+    Raises:
+        HTTPException: 400 on invalid UUIDs; 404 if the document does not exist.
+    """
+    try:
+        UUID(project_id)
+        UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or document_id format")
+
+    doc = await DocumentRepository.get_by_id(document_id, project_id, session)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+# ==========================================
+# PROCESS — EXPLICIT, DRAFT-ONLY REQUIREMENTS EXTRACTION
+# ==========================================
+
+async def _run_extraction_by_chunks(
+    project_id: str,
+    document_id: str,
+    content_markdown: str,
+    token_count: int,
+) -> Dict[str, Any]:
+    """Feed the whole document through the gatherer, accumulating a draft.
+
+    Mode routing:
+      - ``token_count <= DOCUMENT_BUDGET``   -> ONE gatherer pass over the full doc.
+      - otherwise                            -> sequential chunked passes (~10%
+        overlap each so headings/context are never clipped), streaming per-chunk
+        progress over the SSE event bus.
+
+    The extracted artifacts stay in memory only (``chunk_results``); NOTHING is
+    written to requirements/user_stories/acceptance_criteria until the user
+    confirms the resulting pending_action.
+
+    Returns:
+        Dict with ``mode``, ``chunks`` list of ``GatheredRequirements`` dicts,
+        ``chunk_count`` and ``processed_tokens``.
+    """
+    mode = decide_document_mode(token_count)
+    if mode == "full":
+        chunks = [content_markdown]
+    else:
+        chunks = split_markdown_into_chunks(content_markdown)
+        if len(chunks) > settings.MAX_DOCUMENT_CHUNKS:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=(
+                    f"This document requires {len(chunks)} extraction chunks "
+                    f"(~{token_count} tokens), exceeding the limit of "
+                    f"{settings.MAX_DOCUMENT_CHUNKS}. Split the document into "
+                    "smaller files and upload them separately."
+                ),
+            )
+
+    chunk_count = len(chunks)
+    logger.info(
+        "Document %s extraction mode=%s chunks=%d tokens=%d (budget=%d).",
+        document_id,
+        mode,
+        chunk_count,
+        token_count,
+        document_budget(),
+    )
+
+    chunk_results: List[Dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        try:
+            result = await extract_requirements_from_text(
+                chunk, chunk_index=idx, chunk_count=chunk_count
+            )
+        except Exception as exc:
+            logger.error(
+                "Document %s chunk %d/%d extraction failed: %s",
+                document_id,
+                idx,
+                chunk_count,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    f"Extraction failed on chunk {idx}/{chunk_count}. No changes "
+                    f"were written. ({exc})"
+                ),
+            ) from exc
+        chunk_results.append(result)
+
+        await event_manager.publish(
+            project_id,
+            "document_extraction_progress",
+            {
+                "project_id": project_id,
+                "document_id": document_id,
+                "mode": mode,
+                "chunk_index": idx,
+                "chunk_count": chunk_count,
+                "processed_tokens": sum(count_tokens(c) for c in chunk_results),
+            },
+        )
+
+    return {
+        "mode": mode,
+        "chunks": chunk_results,
+        "chunk_count": chunk_count,
+        "processed_tokens": token_count,
+    }
+
+
+@router.post(
+    "/api/project/{project_id}/documents/{document_id}/process",
+    response_model=DocumentProcessResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def process_document(
+    project_id: str,
+    document_id: str,
+    session: AsyncSession = Depends(get_db),
+    _rate_limit: None = Depends(
+        rate_limit_dependency(
+            "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
+        )
+    ),
+) -> Dict[str, Any]:
+    """Extract requirements from an uploaded document — DRAFT ONLY.
+
+    This is the explicit, user-triggered extraction action. It NEVER writes
+    requirements, user stories, or acceptance criteria directly. Instead it
+    accumulates every chunk's gatherer output in memory, de-duplicates it across
+    the whole document, builds a SINGLE merged merge preview against the current
+    requirement state, and stores that draft in ONE pending_action (action_type
+    ``INSERT_CHUNKED_REQUIREMENTS``). The draft is versioned
+    (``version_number + 1``) so confirming via ``/api/confirm-action/{id}``
+    applies it as a single atomic merge with one version bump.
+
+    Args:
+        project_id: Owning project UUID string.
+        document_id: Document UUID string.
+        session: Active asynchronous database session.
+        _rate_limit: Injected rate limiter (Finding #39 — this endpoint fans out
+            into up to MAX_DOCUMENT_CHUNKS sequential LLM calls).
+
+    Returns:
+        DocumentProcessResponse: status/mode/chunk stats + the pending_action id
+            the UI can offer the user to Confirm or Cancel.
+
+    Raises:
+        HTTPException: 400 invalid UUID or failed (OCR) document; 404 unknown
+            document; 413 document too large to extract; 502 gatherer failure.
+    """
+    try:
+        UUID(project_id)
+        UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or document_id format")
+
+    doc = await DocumentRepository.get_by_id(document_id, project_id, session)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.get("status") != "processed":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This document was not processed successfully — extraction is "
+                "only available for successfully converted documents."
+            ),
+        )
+
+    content_markdown = doc.get("content_markdown") or ""
+    token_count = count_tokens(content_markdown)
+
+    # Explicit, loud tracking flag: the user has triggered extraction.
+    await DocumentRepository.update_extraction_status(
+        document_id, project_id, "extraction_pending", session
+    )
+    await event_manager.publish(
+        project_id,
+        "document_extraction_started",
+        {
+            "project_id": project_id,
+            "document_id": document_id,
+            "token_count": token_count,
+            "budget": document_budget(),
+        },
+    )
+
+    run = await _run_extraction_by_chunks(
+        project_id, document_id, content_markdown, token_count
+    )
+
+    doc_draft = accumulate_document_draft(run["chunks"])
+    current_state = await RequirementStateRepository.get_by_project_id(project_id, session)
+
+    preview = build_merge_preview(
+        project_id,
+        current_state,
+        doc_draft,
+        document_id,
+        doc.get("original_filename") or "",
+    )
+
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    pending_action = await PendingActionRepository.create(
+        project_id,
+        {
+            "action_type": DRAFT_ACTION_TYPE,
+            "target_requirement_id": None,
+            "original_user_message": (
+                f"Extract requirements from uploaded document "
+                f"'{doc.get('original_filename') or document_id}'."
+            ),
+            "proposed_changes": preview,
+            "affected_user_story_ids": [],
+            "affected_acceptance_criteria_ids": [],
+            "workflow_stage": "gatherer_node",
+        },
+        expires_at=expires_at,
+        session=session,
+    )
+
+    await event_manager.publish(
+        project_id,
+        "document_extraction_draft",
+        {
+            "project_id": project_id,
+            "document_id": document_id,
+            "pending_action_id": pending_action["id"],
+            "mode": run["mode"],
+            "chunk_count": run["chunk_count"],
+            "processed_tokens": run["processed_tokens"],
+        },
+    )
+
+    logger.info(
+        "Document %s processed (%s mode, %d chunks, %d tokens) -> draft pending_action %s.",
+        document_id,
+        run["mode"],
+        run["chunk_count"],
+        run["processed_tokens"],
+        pending_action["id"],
+    )
+
+    return {
+        "status": "draft_ready",
+        "mode": run["mode"],
+        "chunk_count": run["chunk_count"],
+        "processed_tokens": run["processed_tokens"],
+        "pending_action_id": pending_action["id"],
+        "excluded_anything": False,
+        "document_id": document_id,
+        "message": (
+            f"Extraction draft ready ({run['mode']} mode, {run['chunk_count']} "
+            f"chunk(s), {run['processed_tokens']} tokens processed). Nothing has "
+            "been written — review the merge preview and confirm to apply."
+        ),
+    }
