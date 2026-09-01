@@ -21,14 +21,112 @@ export function renderInlineFormatting(text: string) {
   });
 }
 
+// Splits a markdown table row "| a | b |" into its trimmed cells.
+function splitMarkdownRow(row: string): string[] {
+  return row
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+}
+
+// True for GFM separator rows like "|---|---|".
+function isSeparatorRow(row: string): boolean {
+  const cells = splitMarkdownRow(row);
+  return cells.length > 0 && cells.every((cell) => /^:?-{1,}:?$/.test(cell) || cell === '');
+}
+
+// Renders a template/PRD table cell. Cells may contain inline markdown and
+// GFM-style <br> line breaks (the Krungsri template uses them heavily), which
+// are converted into real line breaks instead of literal text.
+function renderCellContent(cell: string) {
+  const segments = cell.split(/<br\s*\/?>/i);
+  return segments.map((segment, i) => (
+    <span key={i}>
+      {i > 0 && <br />}
+      {renderInlineFormatting(segment)}
+    </span>
+  ));
+}
+
+// Renders grouped markdown-table lines as a styled React table.
+function renderMarkdownTable(rows: string[], key: string) {
+  const hasHeader = rows.length > 1 && isSeparatorRow(rows[1]);
+  const headerCells = hasHeader ? splitMarkdownRow(rows[0]) : null;
+  const bodyRows = hasHeader ? rows.slice(2) : rows;
+
+  return (
+    <table key={key} className="w-full border-collapse my-4 text-sm">
+      {headerCells && (
+        <thead>
+          <tr>
+            {headerCells.map((cell, i) => (
+              <th
+                key={i}
+                className="border border-slate-200 bg-slate-50 px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-slate-700"
+              >
+                {renderCellContent(cell)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+      )}
+      <tbody>
+        {bodyRows.map((row, r) => (
+          <tr key={r} className={r % 2 === 1 ? 'bg-slate-50/50' : ''}>
+            {splitMarkdownRow(row).map((cell, c) => (
+              <td key={c} className="border border-slate-200 px-3 py-2 align-top text-slate-600 leading-relaxed">
+                {renderCellContent(cell)}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+type MarkdownBlock = { kind: 'line'; line: string } | { kind: 'table'; rows: string[] };
+
 export function parseAndRenderMarkdown(md: string) {
   if (!md) return null;
   const lines = md.split('\n');
+
+  // First pass: group consecutive pipe-table lines into single table blocks so
+  // they render as real <table> elements (the Krungsri PRD template is almost
+  // entirely tables) instead of raw "|" characters.
+  const blocks: MarkdownBlock[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('|')) {
+      const last = blocks[blocks.length - 1];
+      if (last && last.kind === 'table') last.rows.push(trimmed);
+      else blocks.push({ kind: 'table', rows: [trimmed] });
+    } else {
+      blocks.push({ kind: 'line', line });
+    }
+  }
+
   return (
     <div className="space-y-3.5 text-on-surface-variant font-sans">
-      {lines.map((line, idx) => {
-        const trimmed = line.trim();
-        
+      {blocks.map((block, idx) => {
+        if (block.kind === 'table') {
+          return renderMarkdownTable(block.rows, `tbl-${idx}`);
+        }
+
+        const trimmed = block.line.trim();
+
+        // Manual page break marker — shown as a subtle divider in the preview.
+        if (trimmed === '\\newpage') {
+          return (
+            <div key={idx} className="my-6 flex items-center gap-3" aria-label="Page break">
+              <span className="h-px flex-1 bg-slate-200" />
+              <span className="text-[10px] uppercase tracking-widest text-slate-400">Page Break</span>
+              <span className="h-px flex-1 bg-slate-200" />
+            </div>
+          );
+        }
+
         // Headers
         if (trimmed.startsWith('# ')) {
           return (
@@ -38,9 +136,11 @@ export function parseAndRenderMarkdown(md: string) {
           );
         }
         if (trimmed.startsWith('## ')) {
+          const headingText = trimmed.slice(3);
+          const isCoverTitle = headingText.trim().toLowerCase() === 'nimble by krungsri';
           return (
-            <h2 key={idx} className="text-xl font-bold text-slate-800 border-b border-slate-100/50 pb-2 mt-6 mb-3 tracking-tight">
-              {trimmed.slice(3)}
+            <h2 key={idx} className={`text-xl font-bold text-slate-800 border-b border-slate-100/50 pb-2 mt-6 mb-3 tracking-tight${isCoverTitle ? ' text-right' : ''}`}>
+              {headingText}
             </h2>
           );
         }

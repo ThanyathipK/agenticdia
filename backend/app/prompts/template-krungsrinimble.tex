@@ -1,0 +1,231 @@
+% =============================================================================
+% Krungsri Nimble - Product Requirement Document (PRD) LaTeX Template
+% =============================================================================
+% This file is the authoritative document template and reproduces the layout
+% of template-krungsrinimble.pdf EXACTLY (cover, stakeholders, version history,
+% reviews, contents, and the four numbered sections including the complex
+% nested tables).  It is a fill-in-the-blank template: per-project values are
+% substituted where field markers appear below.
+%
+% Recommended engine: XeLaTeX or pdfLaTeX (compiles to A4, 7 pages, with the
+% "PRODUCT REQUIREMENT" running header and "KRUNGSRI NIMBLE CONFIDENTIAL"
+% running footer applied via fancyhdr).
+% =============================================================================
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,top=2.2cm,bottom=2.2cm,left=2.4cm,right=2.4cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+
+% ---- Tables & nested tables ------------------------------------------------
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{makecell}
+\renewcommand{\arraystretch}{1.35}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+
+% ---- Headers / footers (running furniture) ---------------------------------
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small PRODUCT REQUIREMENT}
+\fancyfoot[L]{\small \thepage}
+\fancyfoot[C]{\small KRUNGSRI NIMBLE CONFIDENTIAL}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\definecolor{tblHeader}{HTML}{F8FAFC}
+\definecolor{tblBorder}{HTML}{CBD5E1}
+
+% Section numbering like the PDF (no automatic numbers on H2-style headings).
+\setcounter{secnumdepth}{0}
+
+\newcommand{\prdlbl}[1]{{\bfseries #1}}
+\newcommand{\prdfield}[1]{#1}
+
+\begin{document}
+
+% =============================================================================
+% PAGE 1 -- COVER
+% =============================================================================
+\vspace*{6cm}
+
+\begin{flushright}
+  {\fontsize{40}{46}\selectfont \bfseries Nimble by Krungsri}\\[2.2cm]
+  {\Large \bfseries KRUNGSRI NIMBLE}\\[0.4cm]
+  {\Large Product Requirement Document}\\[1.8cm]
+\end{flushright}
+
+\begin{center}
+\begin{tabular}{L{4.5cm}L{9.5cm}}
+  \prdlbl{PMO No:}      & \prdfield{PMO\_NO} \\
+  \prdlbl{PMO Name:}    & \prdfield{PMO\_NAME} \\
+  \prdlbl{Version:}     & \prdfield{VERSION} \\
+  \prdlbl{Status:}      & \prdfield{STATUS} \\
+  \prdlbl{Last Update:} & \prdfield{LAST\_UPDATE} \\
+  \prdlbl{Author:}      & \prdfield{AUTHOR} \\
+\end{tabular}
+\end{center}
+
+\newpage
+
+% =============================================================================
+% PAGE 2 -- STAKEHOLDERS / VERSION HISTORY / REVIEWS
+% =============================================================================
+\section*{Stakeholders}
+\begin{tabular}{|L{5.5cm}|L{8.5cm}|}
+  \hline
+  \rowcolor{tblHeader}\prdlbl{Role} & \prdlbl{Name} \\
+  \hline
+  Product Owner & \\
+  Technical Product Owner & \\
+  Solution Architecture & \\
+  System Analyst & \\
+  Engineering Manager & \\
+  Project Manager & \\
+  Quality Assurance Lead & \\
+  Performance QA Lead & \\
+  \hline
+\end{tabular}
+
+\vspace{1em}
+\section*{Version History}
+\begin{tabular}{|L{2.5cm}|L{3.5cm}|L{3.5cm}|L{4.5cm}|}
+  \hline
+  \rowcolor{tblHeader}\prdlbl{Version} & \prdlbl{Date} & \prdlbl{Author} & \prdlbl{Description} \\
+  \hline
+  V1.0 & & & \\
+  \hline
+\end{tabular}
+
+\vspace{1em}
+\section*{Reviews}
+\begin{tabular}{|L{4.5cm}|L{3.5cm}|L{3.5cm}|L{3.5cm}|}
+  \hline
+  \rowcolor{tblHeader}\prdlbl{Role} & \prdlbl{Name} & \prdlbl{Signature} & \prdlbl{Date} \\
+  \hline
+  Product Owner & & & \\
+  Head of Product Management & & & \\
+  \hline
+\end{tabular}
+
+\newpage
+
+% =============================================================================
+% PAGE 3 -- CONTENTS
+% =============================================================================
+\section*{Contents}
+\begin{enumerate}
+  \item Business \& Strategic Overview
+  \item Product Scope \& Functional Requirements
+  \item Technical \& Operational Considerations
+  \item Appendix
+\end{enumerate}
+
+\newpage
+
+% =============================================================================
+% PAGE 4 -- 1. BUSINESS & STRATEGIC OVERVIEW
+% =============================================================================
+\section*{1. Business \& Strategic Overview}
+\begin{longtable}{|L{6cm}|L{10cm}|}
+  \hline
+  Introduction \&\\ Executive Summary & \\
+  \hline
+  Problem Statement & 1. \\[0.15cm] 2. \\
+  \hline
+  Business Objectives & 1. \\
+  \hline
+  Expected Benefit & 1. \\
+  \hline
+  Success Metrics & 1. \\
+  \hline
+  Target Audience \&\\ user Personas & 1. \\
+  \hline
+\end{longtable}
+
+\newpage
+
+% =============================================================================
+% PAGE 5 -- 2. PRODUCT SCOPE & FUNCTIONAL REQUIREMENTS (complex nested tables)
+% =============================================================================
+\section*{2. Product Scope \& Functional Requirements}
+\bgroup
+\renewcommand{\arraystretch}{1.25}
+\begin{longtable}{|L{4cm}|L{4cm}|L{4cm}|L{4cm}|}
+  \hline
+  \multirow{3}{*}{\shortstack{User Story\\ Mapping \&\\ Functional\\ Requirements}}
+    & \multicolumn{3}{L{12cm}|}{Epic Name:} \\
+  \cline{2-4}
+    & \shortstack{\prdlbl{User Story (System}\\
+\prdlbl{Focus)}} & \shortstack{\prdlbl{Functional}\\
+\prdlbl{Requirement (FR)}} & \prdlbl{Acceptance Criteria} \\
+  \cline{2-4}
+    & & \shortstack{FR 1.1: The system\\
+must\ldots} & \shortstack{AC 1.1:\\
+AC 1.2:} \\
+  \hline
+  \shortstack{User Flow \&\\
+Wireframes}
+    & \multicolumn{3}{L{12cm}|}{} \\
+  \hline
+  \multirow{2}{*}{\shortstack{Scope\\ Definition (In\\ vs. Out)}}
+    & \multicolumn{3}{c}{\parbox{11.5cm}{%
+        \shortstack{\prdlbl{Scope In}\\
+1.\\
+2.\\[0.15cm]
+\prdlbl{Scope out}\\
+1.\\
+2.}}} \\
+  \hline
+\end{longtable}
+\egroup
+
+\newpage
+
+% =============================================================================
+% PAGE 6 -- 3. TECHNICAL & OPERATIONAL CONSIDERATIONS
+% =============================================================================
+\section*{3. Technical \& Operational Considerations}
+\begin{longtable}{|L{6cm}|L{10cm}|}
+  \hline
+  Non-Functional\\ Requirements & 1. Performance \& Latency \\
+  \hline
+  Expected\\ TPS/Customer\\ volume & 1. \\
+  \hline
+  Growth\\ prediction\\ Y0Y\% & 1. \\
+  \hline
+  Launch \&\\ Rollout Plan & 1. \\
+  \hline
+\end{longtable}
+
+\newpage
+
+% =============================================================================
+% PAGE 7 -- 4. APPENDIX
+% =============================================================================
+\section*{4. Appendix}
+\begin{longtable}{|L{3.4cm}|L{2.1cm}|L{10.4cm}|}
+  \hline
+  Open\\ Questions \&\\ Risks & \multicolumn{2}{L{12.5cm}|}{1.} \\
+  \hline
+  Assumptions & \multicolumn{2}{L{12.5cm}|}{1.} \\
+  \hline
+  Glossary & \prdlbl{Term} & \prdlbl{Definition} \\
+  \cline{2-3}
+  & \prdfield{TBD} & \prdfield{TBD} \\
+  \cline{2-3}
+  & \prdfield{TBD} & \prdfield{TBD} \\
+  \hline
+  Related\\ Documents & \multicolumn{2}{L{12.5cm}|}{} \\
+  \hline
+\end{longtable}
+
+\end{document}
+

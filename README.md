@@ -384,10 +384,26 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/prd/export/{project_id}` | Generate and persist a new immutable PRD version |
+| `POST` | `/api/prd/export/{project_id}` | Generate and persist a new immutable PRD version (LaTeX, following `template-krungsrinimble.tex`) |
+| `POST` | `/api/project/{project_id}/export/pdf` | Export the supplied LaTeX PRD as a downloadable PDF rendered from the same Word document via headless LibreOffice (Tectonic fallback) |
+| `POST` | `/api/project/{project_id}/export/docx` | Convert the supplied LaTeX PRD to a downloadable Word document via the native renderer (Pandoc fallback) |
+| `GET` | `/api/prd/template` | Authoritative PRD templates (`template_latex` + markdown preview skeleton) |
 | `GET` | `/api/project/{project_id}/prd-versions` | List all PRD versions |
 | `GET` | `/api/project/{project_id}/prd-versions/latest` | Latest PRD version |
 | `GET` | `/api/project/{project_id}/prd-versions/{version_number}` | A specific PRD version |
+
+> **Export toolchain** — DOCX exports render the generated LaTeX natively via
+> `python-docx` (vendored Pandoc under `.tools/` as fallback). PDF exports
+> render that SAME Word document with headless LibreOffice, so the PDF always
+> matches the DOCX (including Thai text, which the TeX fonts drop). Install
+> LibreOffice (`brew install --cask libreoffice`) and/or point `SOFFICE_BIN`
+> at your `soffice` binary; hosts without it fall back to the Tectonic
+> LaTeX->PDF pipeline. The Thai-capable `Noto Sans Thai` faces vendored under
+> `backend/.tools/fonts/` (local tooling, gitignored like the rest of
+> `.tools/` — copy the two `NotoSansThai-*.ttf` files back after a fresh
+> clone) are staged into the LibreOffice profile on every conversion, because
+> the macOS headless build cannot see system fonts. Point `TECTONIC_BIN` /
+> `PANDOC_BIN` at your own installs to override.
 
 ### Locking & Pending Actions
 

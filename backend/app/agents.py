@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements, UserStoryModel
 from app.prompt_loader import load_prompt, _PromptProxy
-from app.llm_factory import llm, parser
+from app.llm_factory import llm, parser, build_prd_llm
 from app.llm_utils import invoke_llm_structured
 from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
 from app.semantic_service import (
@@ -352,6 +352,26 @@ def _previous_requirement_identity(req_state: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(r, dict):
             return r
     return {}
+
+
+# Marker section heading from prompts/template.md (the official Krungsri
+# Nimble PRD template). Used to detect whether a persisted PRD already follows
+# the template or is a legacy document built from the old hard-coded sections.
+KRUNGSRI_TEMPLATE_MARKER = "Business & Strategic Overview"
+# The LaTeX template escapes the ampersand, so both forms are matched.
+KRUNGSRI_TEMPLATE_MARKER_LATEX = "Business \\& Strategic Overview"
+
+
+def _prd_follows_krungsri_template(prd_markdown: Any) -> bool:
+    """
+    Heuristically detect whether a stored PRD follows the Krungsri Nimble
+    template (prompts/template.md or its LaTeX counterpart
+    template-krungsrinimble.tex). Legacy documents generated before the
+    template switch lack the template's numbered section headings, so they can
+    be told apart cheaply and reliably by this marker string.
+    """
+    text = str(prd_markdown or "")
+    return KRUNGSRI_TEMPLATE_MARKER in text or KRUNGSRI_TEMPLATE_MARKER_LATEX in text
 
 
 async def gatherer_node(state: AgentState) -> Dict[str, Any]:
@@ -1090,13 +1110,21 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     if len(unlocked_stories) != len(all_stories):
         logger.info(f"[ARCHITECT] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from PRD generation.")
     to_build_stories = [story for story in unlocked_stories if story.get("change_type") in ["created", "updated", None]]
-    unchanged_stories = [story for story in unlocked_stories if story.get("change_type") == "unchanged"]
     
-    # If everything is unchanged, and we have an existing PRD/Diagram, bypass LLM entirely
+    # If everything is unchanged, and we have an existing PRD/Diagram, bypass LLM entirely.
+    # GUARD: only reuse when the stored PRD already follows the official
+    # Krungsri Nimble template (prompts/template.md); legacy PRDs generated
+    # from the old hard-coded section list must be regenerated so they migrate
+    # to the new document structure instead of being served verbatim forever.
     existing_prd = req_state.get("generated_prd")
     existing_diagrams = req_state.get("generated_diagrams")
-    
-    if not to_build_stories and existing_prd and existing_diagrams:
+
+    if (
+        not to_build_stories
+        and existing_prd
+        and existing_diagrams
+        and _prd_follows_krungsri_template(existing_prd)
+    ):
         logger.info("Architect Node: All user stories are unchanged. Reusing existing PRD and diagrams without LLM invocation.")
         req_state["current_workflow_state"] = "architect_node"
         return {
@@ -1105,101 +1133,98 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             "mermaid_diagram": existing_diagrams
         }
 
-    if not unlocked_stories and not existing_prd:
+    requirements = req_state.get("requirements", [])
+    nested = any(
+        isinstance(r, dict) and r.get("user_stories") for r in requirements
+    )
+
+    if not unlocked_stories and not nested:
         # FAIL LOUDLY: invoking the LLM with an empty story set would only
         # produce a hallucinated PRD. Raise so /api/process-requirements maps
-        # this to HTTP 500 and nothing is persisted.
+        # this to HTTP 500 and nothing is persisted. Stories may live flat in
+        # user_stories OR nested inside requirements - both are valid. A
+        # stored LEGACY PRD does not excuse an empty dataset: it is never
+        # reused or merged, so there is nothing to regenerate from.
         raise ValueError(
             f"Cannot compile PRD for project {project_id}: no unlocked user stories "
             "are available. Gather requirements before generating a PRD."
         )
 
-    requirements = req_state.get("requirements", [])
-    epic_name = requirements[0].get("title", "") if requirements else ""
-    structured_reqs_for_prompt = {
-        "epic_name": epic_name,
-        "version": req_state["version_number"],
-        "user_stories": unlocked_stories
-    }
     version_history_summaries = state.get("version_history_summaries", "No previous revision logs available.")
-    
-    # Customize prompt for incremental generation if existing PRD exists
-    dynamic_instructions = ""
-    if existing_prd:
-        dynamic_instructions = (
-            f"\n\nCRITICAL INCREMENTAL MERGE INSTRUCTIONS:\n"
-            f"An existing PRD is provided below. You must ONLY regenerate the sections of the PRD "
-            f"affected by the newly created or updated user stories ({json.dumps([s.get('ticket_code') for s in to_build_stories])}). "
-            f"All other sections of the PRD must remain completely unchanged, preserving their original wording "
-            f"and formatting exactly.\n\n"
-            f"<existing_prd_content>\n{existing_prd}\n</existing_prd_content>\n"
-        )
-        
-    prompt = PromptTemplate(
-        template=load_prompt("architect") + dynamic_instructions,
-        input_variables=["project_id", "current_version", "validated_requirements", "version_history_summaries"]
+
+    # DETERMINISTIC TEMPLATE FILL: the PRD is the official Krungsri Nimble
+    # template with its blank fields filled from the project's own (AI-gathered
+    # and AI-validated) data. The skeleton - every table, merged-cell structure
+    # and \newpage marker - is ALWAYS the untouched official template, so the
+    # result is PDF-exact and compiles every time. No free-form LLM text is
+    # spliced into the structure, so exports can no longer fail on model
+    # escaping mistakes (dropped row terminators, unbalanced braces, ...).
+    from app.prd_filler import fill_template_body
+
+    stories_flat: List[Dict[str, Any]] = []
+    if nested:
+        for r in requirements:
+            if isinstance(r, dict):
+                stories_flat.extend(r.get("user_stories") or [])
+    else:
+        stories_flat = unlocked_stories
+
+    epic_name = requirements[0].get("title", "") if requirements else ""
+    data: Dict[str, Any] = {
+        "epic_name": epic_name,
+        "business_goals": req_state.get("business_goals", []),
+        "actors": req_state.get("actors", []),
+        "requirements": requirements if nested else [],
+        "user_stories": [] if nested else unlocked_stories,
+        "acceptance_criteria": [] if nested else req_state.get("acceptance_criteria", []),
+        "problem_statement": req_state.get("problem_statement", []),
+        "scope_in": [s.get("story_title", "") for s in stories_flat if s.get("story_title")],
+        "scope_out": req_state.get("scope_out", []),
+    }
+
+
+    generated_prd = fill_template_body(
+        project_id=project_id,
+        project_name=req_state.get("project_name", "") or "",
+        version=req_state["version_number"],
+        data=data,
+        version_summary=(version_history_summaries or "").strip() or "Initial approved version",
+    )
+
+    req_state["generated_prd"] = generated_prd
+    # Keep any previously generated diagram; the template fill owns the document.
+    req_state["generated_diagrams"] = req_state.get("generated_diagrams", "")
+    req_state["current_workflow_state"] = "architect_node"
+
+    # Persist the freshly filled document as an immutable version record.
+
+
+    # Create an immutable PRD version record
+    try:
+        if db_session:
+            await PRDVersionRepository.create(project_id, {
+                "generated_prd": req_state["generated_prd"],
+                "generated_diagram": req_state["generated_diagrams"],
+                "generated_by": "automated_agent"
+            }, db_session)
+            logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
+    except Exception as version_err:
+        logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
+
+    architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
+    await ConversationMessageRepository.save_message(
+        project_id=project_id,
+        role="architect",
+        message=architect_msg,
+        workflow_state="architect_node",
+        intent="PRD_GENERATION"
     )
     
-    chain = prompt | llm | parser
-    
-    try:
-        req_json_str = json.dumps(structured_reqs_for_prompt, ensure_ascii=False)
-        result = await chain.ainvoke({
-            "project_id": project_id,
-            "current_version": current_version,
-            "validated_requirements": req_json_str,
-            "version_history_summaries": version_history_summaries
-        })
-        
-        # Modify only its own fields in RequirementState in memory.
-        # FAIL LOUDLY on a missing document: persisting a placeholder like
-        # "# Core Banking PRD ..." (or a dummy "Start --> End" diagram) into an
-        # immutable PRD version record used to masquerade failure as success.
-        generated_prd = (result.get("prd_markdown") or "").strip()
-        if not generated_prd:
-            raise ValueError(
-                "Architect LLM returned an empty 'prd_markdown'; refusing to persist a placeholder PRD."
-            )
-        req_state["generated_prd"] = result.get("prd_markdown")
-        req_state["generated_diagrams"] = (result.get("mermaid_diagram") or "").strip()
-        req_state["current_workflow_state"] = "architect_node"
-
-        # Create an immutable PRD version record
-        try:
-            if db_session:
-                await PRDVersionRepository.create(project_id, {
-                    "generated_prd": req_state["generated_prd"],
-                    "generated_diagram": req_state["generated_diagrams"],
-                    "generated_by": "automated_agent"
-                }, db_session)
-                logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
-        except Exception as version_err:
-            logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
-
-        architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
-        await ConversationMessageRepository.save_message(
-            project_id=project_id,
-            role="architect",
-            message=architect_msg,
-            workflow_state="architect_node",
-            intent="PRD_GENERATION"
-        )
-        
-        return {
-            "requirement_state": req_state,
-            "prd_markdown": req_state["generated_prd"],
-            "mermaid_diagram": req_state["generated_diagrams"]
-        }
-    except Exception as e:
-        # FAIL LOUDLY: never fabricate a placeholder document here (the old
-        # "# Core Banking PRD ..." / "graph TD\n Start --> End" fallback wrote
-        # junk into an immutable PRD version record). Re-raise so the route
-        # handler returns HTTP 500 and any previously valid PRD stays intact.
-        logger.error(
-            f"Error compiling PRD in architect_node for project "
-            f"{state.get('project_id', 'PROJ-UNKNOWN')}: {str(e)}"
-        )
-        raise
+    return {
+        "requirement_state": req_state,
+        "prd_markdown": req_state["generated_prd"],
+        "mermaid_diagram": req_state["generated_diagrams"]
+    }
 
 # ==========================================
 # ON-DEMAND ROUTING ROUTINE

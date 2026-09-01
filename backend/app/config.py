@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # backend/.env to match whatever model is loaded in LM Studio (no longer a
     # hard-coded reference — see Finding #40). backend/.env.example ships qwen3.5.
     LM_STUDIO_MODEL_FALLBACK: str = "qwen3.5-9b-instruct"
+    # Qwen3.x models are REASONING models: they first emit a long `reasoning_content`
+    # chain-of-thought and only then the real answer. With a bounded max_tokens the
+    # model can exhaust the whole budget thinking and return an EMPTY `content`
+    # (finish_reason="length"), so every structured-JSON parser fails and PRD /
+    # audit generation surfaces as "Connection error" / "cannot generate PRD".
+    # When enabled, every request sets chat_template_kwargs={"enable_thinking": false}
+    # so the model writes its answer directly to `content` (fast + JSON-parseable).
+    LM_STUDIO_DISABLE_THINKING: bool = True
 
     # Context & Memory Safety Constraints (optimised for MacBook Air M4 with 16GB RAM)
     MAX_CONTEXT_TOKENS: int = 8192

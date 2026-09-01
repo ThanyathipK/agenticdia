@@ -52,10 +52,18 @@ def _retry_backoff(attempt: int, retry_after: Optional[str] = None) -> float:
     return LM_INFERENCE_RETRY_BACKOFF_SECONDS * attempt
 
 
-async def call_lm_studio(prompt_messages: List[Dict[str, str]], response_format_schema: Any = None) -> Dict[str, Any]:
+async def call_lm_studio(
+    prompt_messages: List[Dict[str, str]],
+    response_format_schema: Any = None,
+    max_tokens: int = 1500,
+) -> Dict[str, Any]:
     """
     Direct low-latency route utility to LM Studio.
     Forces strict JSON outputs using custom parameters, staying within MacBook memory parameters.
+
+    ``max_tokens`` defaults to the 1500 safe generation budget for short
+    structured payloads. Whole-document generation (e.g. the LaTeX PRD export)
+    passes a larger allowance - a document body alone is several thousand tokens.
 
     Raises:
         LMStudioGatewayError: LM Studio returned a non-2xx HTTP response.
@@ -72,7 +80,7 @@ async def call_lm_studio(prompt_messages: List[Dict[str, str]], response_format_
         "model": settings.LM_STUDIO_MODEL_FALLBACK,
         "messages": prompt_messages,
         "temperature": settings.TEMPERATURE,
-        "max_tokens": 1500,  # Retain safe generation budget within the 8192 limit
+        "max_tokens": max_tokens,  # Retain safe generation budget within the 8192 limit
         "stream": False
     }
 

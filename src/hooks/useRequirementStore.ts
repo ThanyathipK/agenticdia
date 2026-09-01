@@ -70,6 +70,29 @@ const INITIAL_PRD_MARKDOWN = '';
 
 const INITIAL_MERMAID = '';
 
+// ----------------------------------------------------------------------------
+// Official Krungsri Nimble PRD template
+// ----------------------------------------------------------------------------
+
+// One-session cache for the official Krungsri Nimble PRD template served by
+// GET /api/prd/template. This is the LATEX template (template-krungsrinimble.tex)
+// - the exact structure the Architect agent fills in from project data. The
+// right panel shows its normalized preview whenever the project has no
+// generated PRD yet, and exports compile this same LaTeX.
+let cachedPrdTemplate: string | null = null;
+
+export async function getPrdTemplateMarkdown(): Promise<string> {
+  if (cachedPrdTemplate !== null) return cachedPrdTemplate;
+  try {
+    const resp = await api.getPrdTemplate();
+    cachedPrdTemplate = resp.template_latex || '';
+  } catch {
+    // The template is cosmetic — an unreachable backend surfaces its own errors.
+    cachedPrdTemplate = '';
+  }
+  return cachedPrdTemplate;
+}
+
 const INITIAL_VERSION_HISTORY: VersionHistory[] = [];
 
 // ----------------------------------------------------------------------------
@@ -81,6 +104,14 @@ export interface RequirementStore {
   structuredRequirements: StructuredRequirements;
   auditResult: AuditResult;
   prdMarkdown: string;
+  /**
+   * Preview copy of the PRD shown in the PRD panel. Generated PRDs are
+   * Krungsri LaTeX bodies; this holds their server-normalized GFM form so the
+   * markdown renderer never shows raw LaTeX. Markdown documents pass through.
+   * Exports keep using the raw `prdMarkdown` so the PDF is still compiled from
+   * the original .tex source.
+   */
+  prdMarkdownDisplay: string;
   sections: PRDSection[];
   editingSectionId: string | null;
   editBuffer: string;
@@ -130,6 +161,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     useState<StructuredRequirements>(INITIAL_STRUCTURED_REQUIREMENTS);
   const [auditResult, setAuditResult] = useState<AuditResult>(INITIAL_AUDIT_RESULT);
   const [prdMarkdown, setPrdMarkdown] = useState<string>(INITIAL_PRD_MARKDOWN);
+  const [prdMarkdownDisplay, setPrdMarkdownDisplay] = useState<string>(INITIAL_PRD_MARKDOWN);
   const [sections, setSections] = useState<PRDSection[]>([]);
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
   const [editBuffer, setEditBuffer] = useState<string>('');
@@ -149,10 +181,54 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Sync sections whenever prdMarkdown or structuredRequirements.user_stories changes
+  // Preload the official Krungsri Nimble template once per session so the PRD
+  // panel shows the document skeleton immediately. The updater form guarantees
+  // a concurrently arriving generated PRD is never clobbered by the skeleton.
+  useEffect(() => {
+    let cancelled = false;
+    getPrdTemplateMarkdown().then((tpl) => {
+      if (!cancelled && tpl) setPrdMarkdown((prev) => prev || tpl);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Keep the PREVIEW copy of the PRD in sync with the stored document.
+  // Generated PRDs are Krungsri LaTeX bodies: the backend normalizes them into
+  // clean GFM (POST /api/prd/convert) so the markdown renderer never shows raw
+  // LaTeX. Markdown documents pass through untouched. Exports keep using the
+  // raw `prdMarkdown`, so PDFs are still compiled from the original .tex.
+  useEffect(() => {
+    const src = prdMarkdown;
+    if (!src) {
+      setPrdMarkdownDisplay('');
+      return;
+    }
+    const looksLikeLatex = /\\(begin|section|documentclass|thispagestyle|newpage|vspace|shortstack)/.test(src);
+    if (!looksLikeLatex) {
+      setPrdMarkdownDisplay(src);
+      return;
+    }
+    let cancelled = false;
+    api
+      .convertPrdToMarkdown(src)
+      .then((res) => {
+        if (!cancelled && res.markdown) setPrdMarkdownDisplay(res.markdown);
+      })
+      .catch(() => {
+        // Preview-only concern: fall back to the raw document, never blank out.
+        if (!cancelled) setPrdMarkdownDisplay(src);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prdMarkdown]);
+
+  // Sync sections whenever the PRD preview or structuredRequirements.user_stories changes
   useEffect(() => {
     setSections(prevSections => {
-      const remoteRaw = getSafeSectionContent(prdMarkdown);
+      const remoteRaw = getSafeSectionContent(prdMarkdownDisplay);
       const remoteSections = parsePRDToSections(remoteRaw);
 
       if (prevSections.length === 0) {
@@ -197,7 +273,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
 
       return changed ? updated : prevSections;
     });
-  }, [prdMarkdown, structuredRequirements.user_stories, editingSectionId]);
+  }, [prdMarkdownDisplay, structuredRequirements.user_stories, editingSectionId]);
 
   // Keep the chat scrolled to the latest message
   useEffect(() => {
@@ -214,6 +290,8 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     // 2. Stitch back to a single prdMarkdown block
     const stitchedMarkdown = stitchSectionsToPRD(updatedSections);
     setPrdMarkdown(stitchedMarkdown);
+    // Manual edits are markdown, so the preview copy can take them directly.
+    setPrdMarkdownDisplay(stitchedMarkdown);
 
     // 3. Save to backend database
     if (projectId) {
@@ -243,6 +321,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
       clarification_questions: [],
     });
     setPrdMarkdown('');
+    setPrdMarkdownDisplay('');
     setMermaidDiagram('');
     setCurrentVersion(1);
     setCurrentAgentNode(null);
@@ -257,6 +336,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     structuredRequirements,
     auditResult,
     prdMarkdown,
+    prdMarkdownDisplay,
     sections,
     editingSectionId,
     editBuffer,

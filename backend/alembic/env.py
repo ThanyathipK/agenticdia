@@ -30,8 +30,15 @@ logger = logging.getLogger("alembic.env")
 config = context.config
 
 # Interpret the config file for Python logging.
+# NOTE: keep disable_existing_loggers=False so Alembic's logging config (which
+# sets root level to WARN in alembic.ini) does NOT silence the application's own
+# INFO logs. With the default True, every log record AFTER this point — the
+# "Alembic migrations completed successfully.", "Application startup complete."
+# and "Uvicorn running on ..." readiness lines — is swallowed, which makes the
+# backend look permanently stuck at "Will assume transactional DDL." when it has
+# actually finished starting.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Set the database URL from application settings.
 # Alembic needs a sync-style URL; asyncpg URLs are handled by async_engine_from_config.

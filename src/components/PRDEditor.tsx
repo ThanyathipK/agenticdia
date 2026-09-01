@@ -32,8 +32,8 @@ export function PRDEditor({ state }: { state: ProjectState }) {
         {!prdMarkdown ? (
           <div className="flex flex-col items-center justify-center py-20 text-center text-on-surface-variant no-print">
             <FileText className="w-12 h-12 text-primary/40 mb-4 animate-pulse" />
-            <p className="font-bold text-lg text-on-surface">Waiting for PRD generation...</p>
-            <p className="text-xs max-w-sm mt-1">Please enter your raw requirements in the chat or respond to outstanding clarifications to trigger a document build.</p>
+            <p className="font-bold text-lg text-on-surface">PRD template not loaded yet</p>
+            <p className="text-xs max-w-sm mt-1">The Krungsri Nimble template could not be fetched. Enter your raw requirements in the chat or click Generate PRD to build the document.</p>
           </div>
         ) : (
           <div className="space-y-10 divide-y divide-slate-100">

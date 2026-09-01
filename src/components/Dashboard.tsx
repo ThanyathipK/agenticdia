@@ -6,7 +6,8 @@
 //   - ArchitectureFlows -> System Flows tab
 //   - VersionHistory    -> Version Ledger tab
 //   - MarkdownRenderer  -> markdown rendering (via PRDEditor)
-//   - DocxExporter      -> DOCX/PDF export (src/utils/docx.ts)
+//   - File exports (PDF/DOCX) are compiled server-side in useProjectState.ts
+//     (the browser never re-parses the LaTeX PRD into markdown).
 import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {

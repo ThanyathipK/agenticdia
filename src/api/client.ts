@@ -9,6 +9,7 @@ import type {
   ActionStatusResponse,
   ArtifactLockResponse,
   ConfirmActionResponse,
+  ConvertedPrdMarkdownPayload,
   DocumentMarkdownPayload,
   HealthPayload,
   PendingActionPayload,
@@ -53,6 +54,25 @@ async function del<T>(url: string): Promise<T> {
 async function postFormData<T>(url: string, formData: FormData): Promise<T> {
   const { data } = await axios.post<T>(url, formData);
   return data;
+}
+
+// Binary download helper — the JSON helpers above parse the body; file exports
+// (LaTeX-compiled PDF / DOCX) must come back untouched as a Blob.
+async function postBlob(url: string, body?: unknown): Promise<Blob> {
+  const resp = await axios.post<Blob>(url, body ?? null, { responseType: 'blob' });
+  return resp.data;
+}
+
+// Error bodies from binary endpoints arrive as a Blob too, so the FastAPI
+// {"detail": ...} payload has to be decoded before it can be surfaced.
+export async function detailFromBlobError(err: unknown): Promise<string | null> {
+  if (!axios.isAxiosError(err) || !(err.response?.data instanceof Blob)) return null;
+  try {
+    const parsed = JSON.parse(await err.response.data.text()) as { detail?: unknown };
+    return typeof parsed.detail === 'string' ? parsed.detail : null;
+  } catch {
+    return null;
+  }
 }
 
 export const api = {
@@ -101,6 +121,21 @@ export const api = {
   processRequirements: (request: ProcessRequirementsRequest, signal?: AbortSignal) =>
     post<ProcessRequirementsResponse>('/api/process-requirements', request, undefined, signal),
 
+  // ---- PRD template ---------------------------------------------------------
+  // Official Krungsri Nimble PRD LaTeX template served from
+  // backend/app/prompts/template-krungsrinimble.tex — the exact structure the
+  // Architect agent fills in during generation. Normalized for the PRD panel
+  // preview and compiled for exports.
+  getPrdTemplate: () =>
+    get<{ template_latex: string }>('/api/prd/template'),
+
+  // ---- PRD preview normalization --------------------------------------------
+  // The generated PRD body is LaTeX (Krungsri .tex template). The backend turns
+  // either that LaTeX or a legacy Markdown PRD into clean GFM markdown so the
+  // on-screen preview never renders raw LaTeX (POST /api/prd/convert).
+  convertPrdToMarkdown: (source: string) =>
+    post<ConvertedPrdMarkdownPayload>('/api/prd/convert', { latex_source: source }),
+
   // ---- Generation cancellation (Stop button) --------------------------------
   // Asks the backend to hard-terminate the in-flight multi-agent run for a
   // project. Complements the AbortSignal above: the signal stops the UI
@@ -139,6 +174,24 @@ export const api = {
     post<ProcessDocumentResponse>(
       `/api/project/${projectId}/documents/${documentId}/process`,
     ),
+
+  // ---- PRD file export (LaTeX -> PDF / DOCX) --------------------------------
+  // The generated PRD is LaTeX following template-krungsrinimble.tex, so both
+  // exports are COMPILED server-side (PDF via Tectonic, DOCX via Pandoc) from
+  // the current PRD document held in the store. The returned Blob is the
+  // finished file — no client-side markdown parsing is involved.
+  exportPrdPdf: (projectId: string, latexSource: string, version?: number, projectName?: string) =>
+    postBlob(`/api/project/${projectId}/export/pdf`, {
+      latex_source: latexSource,
+      version,
+      project_name: projectName,
+    }),
+  exportPrdDocx: (projectId: string, latexSource: string, version?: number, projectName?: string) =>
+    postBlob(`/api/project/${projectId}/export/docx`, {
+      latex_source: latexSource,
+      version,
+      project_name: projectName,
+    }),
 
   // ---- Health --------------------------------------------------------------
   fetchHealth: () => get<HealthPayload>('/api/health'),

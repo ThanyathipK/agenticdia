@@ -1,12 +1,27 @@
+import asyncio
 import logging
+import re
 import uuid
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.latex_service import (
+    compile_latex_to_pdf,
+    convert_latex_to_docx,
+    convert_markdown_to_docx,
+    convert_markdown_to_pdf,
+    docx_to_pdf,
+    has_markdown_structure,
+    is_markdown_prd,
+    prd_to_markdown,
+    soffice_available,
+)
 from app.repositories import (
     ProjectRepository,
     RequirementStateRepository,
@@ -30,7 +45,7 @@ from app.llm_client import (
     LMStudioOutputParsingError,
     LMStudioUnavailableError,
 )
-from app.prompt_loader import load_prompt
+from app.prompt_loader import load_prompt, load_prd_template, load_prd_latex_template, load_prd_latex_template_body
 from app.event_manager import event_manager
 
 logger = logging.getLogger("app.routes.projects")
@@ -327,6 +342,26 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
     return state
 
 
+@router.get("/api/prd/template", status_code=status.HTTP_200_OK)
+async def get_prd_template() -> Dict[str, str]:
+    """
+    Serves the authoritative Krungsri Nimble PRD templates.
+
+    - "template_latex": prompts/template-krungsrinimble.tex - the PDF-exact
+      LaTeX template injected as the <prd_template> block into every PRD
+      generation prompt. The running header/footer/page numbers are applied by
+      fancyhdr at compile time rather than stored as lines.
+    - "template_markdown": prompts/template.md - the markdown skeleton kept for
+      the ongoing on-screen preview, so no frontend rendering breaks.
+
+    Both expose the SAME document structure that the Architect fills in.
+    """
+    return {
+        "template_latex": load_prd_latex_template(),
+        "template_markdown": load_prd_template(),
+    }
+
+
 @router.post("/api/prd/export/{project_id}", response_model=PRDExportResponse, status_code=status.HTTP_200_OK)
 async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depends(get_db)) -> PRDExportResponse:
     """
@@ -375,97 +410,43 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
             detail=f"No user stories or requirements found for project {project_id}. Gather requirements before exporting a PRD."
         )
 
-    # Build a real context payload for the LLM from actual persisted artifacts
-    payload_sections = []
+    # DETERMINISTIC TEMPLATE FILL: build the PRD by filling the official
+    # Krungsri Nimble template from the persisted project artifacts. The
+    # skeleton - every table, merged-cell structure and \newpage marker - is
+    # always the untouched official template, so the export is PDF-exact and
+    # compiles every time.
+    from app.prd_filler import fill_template_body
 
-    if business_goals:
-        payload_sections.append("## Business Goals")
-        for goal in business_goals:
-            if isinstance(goal, dict):
-                payload_sections.append(f"- {goal.get('description', goal)}")
-            else:
-                payload_sections.append(f"- {goal}")
+    nested = any(
+        isinstance(r, dict) and r.get("user_stories") for r in (requirements or [])
+    )
+    all_stories = (
+        [us for r in requirements for us in (r.get("user_stories") or [])]
+        if nested else user_stories
+    )
+    data = {
+        "epic_name": (
+            requirements[0].get("title", "") if requirements
+            else str(project.get("name", ""))
+        ),
+        "business_goals": business_goals,
+        "actors": actors,
+        "requirements": requirements if nested else [],
+        "user_stories": [] if nested else user_stories,
+        "acceptance_criteria": [] if nested else acceptance_criteria,
+        "scope_in": [
+            s.get("story_title", "") for s in all_stories
+            if isinstance(s, dict) and s.get("story_title")
+        ],
+    }
 
-    if actors:
-        payload_sections.append("## Actors")
-        for actor in actors:
-            if isinstance(actor, dict):
-                payload_sections.append(f"- {actor.get('name', actor)}")
-            else:
-                payload_sections.append(f"- {actor}")
-
-    if requirements:
-        payload_sections.append("## Requirements")
-        for req in requirements:
-            req_title = req.get("title") or req.get("requirement_code") or "Untitled Requirement"
-            payload_sections.append(f"\n### {req.get('requirement_code', 'REQ')}: {req_title}")
-            if req.get("description"):
-                payload_sections.append(f"Description: {req['description']}")
-            for story in req.get("user_stories", []):
-                story_ac = story.get("acceptance_criteria", []) or []
-                payload_sections.append(
-                    f"- [{story.get('ticket_code', 'US-000')}] {story.get('story_title', 'Untitled Story')}\n"
-                    f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')} "
-                    f"so that {story.get('so_that', '')}."
-                )
-                for ac in story_ac:
-                    payload_sections.append(f"  - Acceptance Criteria: {ac}")
-    else:
-        payload_sections.append("## User Stories")
-        for story in user_stories:
-            payload_sections.append(
-                f"- [{story.get('ticket_code', 'US-000')}] {story.get('story_title', 'Untitled Story')}\n"
-                f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')} "
-                f"so that {story.get('so_that', '')}."
-            )
-        if acceptance_criteria:
-            payload_sections.append("\n## Acceptance Criteria")
-            for ac in acceptance_criteria:
-                if isinstance(ac, dict):
-                    payload_sections.append(f"- {ac.get('criteria_text', ac)}")
-                else:
-                    payload_sections.append(f"- {ac}")
-
-    system_payload_description = "\n".join(payload_sections)
-
-    # The system prompt lives in prompts/prd_export.md so it is versioned and
-    # reviewed like every other agent prompt (it used to be an inline string
-    # that silently diverged from the LangGraph Architect prompt). Project
-    # metadata and the requirement payload travel in the user message; keeping
-    # them out of .format() also avoids KeyError on braces inside user data.
-    prompt = [
-        {
-            "role": "system",
-            "content": load_prompt("prd_export"),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Synthesize a formal PRD for project {project_id} "
-                f"(Project: {project.get('name', 'N/A')}, Version {version_number}).\n\n"
-                f"Persisted Requirements Data:\n{system_payload_description}"
-            )
-        }
-    ]
-
-    try:
-        prd_response = await call_lm_studio(prompt)
-    except LMStudioOutputParsingError as err:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(err))
-    except LMStudioUnavailableError as err:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(err))
-    except LMStudioGatewayError as err:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(err))
-
-    # FAIL LOUDLY: persisting a placeholder document ("# PRD\n\nFailed to
-    # synthesize PRD.") used to record a fake immutable version on export.
-    markdown_content = (prd_response.get("text") or "").strip()
-    if not markdown_content:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="LM Studio returned an empty PRD document; nothing was exported or persisted.",
-        )
-
+    markdown_content = fill_template_body(
+        project_id=str(project_id),
+        project_name=str(project.get("name", "")),
+        version=version_number,
+        data=data,
+        version_summary="Initial approved version",
+    )
     # Persist the newly generated PRD as an immutable version record
     version_record = None
     try:
@@ -497,6 +478,253 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
         "prd_markdown": markdown_content,
         "mermaid_diagram": ""
     }
+
+
+# ==========================================
+# PRD FILE EXPORT API (LaTeX -> PDF / DOCX)
+# ==========================================
+# The generated PRD is a LaTeX document that follows the authoritative
+# template-krungsrinimble.tex template, so both file exports are built from
+# THAT LaTeX server-side:
+#   DOCX -> native python-docx renderer (Pandoc fallback)
+#   PDF  -> the SAME Word document, rendered by headless LibreOffice
+#           (Tectonic/LaTeX fallback) so the two downloads always match -
+#           the TeX engine silently drops Thai glyphs, the Word renderer
+#           does not.
+# The browser never parses the LaTeX as markdown again.
+
+
+class LatexExportPayload(BaseModel):
+    """Body for the compiled-file export endpoints.
+
+    ``latex_source`` is the current PRD document as held by the frontend store
+    (a standalone LaTeX document). ``version``/``project_name`` only shape the
+    suggested download filename.
+    """
+
+    latex_source: str = Field(..., description="Full LaTeX PRD document source.")
+    version: Optional[int] = Field(None, ge=1, description="PRD version for the filename.")
+    project_name: Optional[str] = Field(None, description="Project name for the filename.")
+
+
+def _safe_filename_stem(project_id: UUID, payload: LatexExportPayload) -> str:
+    name = (payload.project_name or "").strip()
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", name)[:48].strip("-") if name else str(project_id)[:8]
+    version_part = f"-V{payload.version}" if payload.version else ""
+    return f"PRD-{stem}{version_part or ''}"
+
+
+async def _export_prd_bytes(
+    project_id: str,
+    payload: LatexExportPayload,
+    db: AsyncSession,
+    fmt: str,
+) -> Response:
+    """Shared body of both file exports: validate, compile off-loop, respond.
+
+    Blocking subprocess work runs in a worker thread so the event loop (and the
+    SSE stream other tabs hold open) is never stalled by a slow TeX compile.
+    """
+    project = await ProjectRepository.get_by_id(str(project_id), db)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+
+    source = (payload.latex_source or "").strip()
+    if not source:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No PRD content was supplied to export.",
+        )
+
+    # Exporting BEFORE the first PRD has been generated: the frontend store
+    # still holds the blank Markdown skeleton served by GET /api/prd/template
+    # (preloaded into prdMarkdown on mount). Substitute the OFFICIAL Krungsri
+    # Nimble LaTeX template so the downloaded file is the real branded blank
+    # PRD instead of a plain-GFM rendering of the skeleton (or, before the
+    # classification fix, a 502 compile failure).
+    if source == load_prd_template().strip():
+        source = load_prd_latex_template()
+
+    # The PRD store holds LaTeX (Krungsri .tex template) for documents generated
+    # after the LaTeX switch, and plain GFM Markdown for older ones. Both are
+    # exportable: LaTeX goes through the native DOCX renderer (PDF: rendered
+    # from that DOCX by LibreOffice) and Markdown through Pandoc's GFM readers.
+    is_markdown = is_markdown_prd(source)
+
+    # PDF exports render the SAME Word document the DOCX export produces, so
+    # both downloads always match. This matters because the TeX pipeline drops
+    # every Thai glyph (its fonts have no Thai coverage) and fails hard on LLM
+    # LaTeX mistakes, while the Word renderer handles full Unicode and
+    # degrades gracefully. Hosts without LibreOffice keep the historical TeX
+    # PDF pipelines unchanged.
+    soffice_ok: Optional[bool] = None
+
+    def _soffice_reachable() -> bool:
+        nonlocal soffice_ok
+        if soffice_ok is None:
+            soffice_ok = soffice_available()
+        return soffice_ok
+
+    def _pdf_via_docx(src: str, markdown_reader: bool) -> bytes:
+        """PDF via the Word pipeline, with the TeX pipelines as fallback."""
+        if _soffice_reachable():
+            build = convert_markdown_to_docx if markdown_reader else convert_latex_to_docx
+            try:
+                return docx_to_pdf(build(src))
+            except RuntimeError as soffice_err:
+                logger.warning(
+                    "DOCX->PDF conversion failed for project %s (%s); "
+                    "retrying via the TeX PDF pipeline.",
+                    project_id, soffice_err,
+                )
+        return convert_markdown_to_pdf(src) if markdown_reader else compile_latex_to_pdf(src)
+
+    try:
+        if fmt == "pdf":
+            data = await asyncio.to_thread(_pdf_via_docx, source, is_markdown)
+        elif is_markdown:
+            data = await asyncio.to_thread(convert_markdown_to_docx, source)
+        else:
+            data = await asyncio.to_thread(convert_latex_to_docx, source)
+    except RuntimeError as compile_err:
+        # Defense in depth: a source classified as LaTeX (it carried strong
+        # \begin{...}/\documentclass markers) can still be MOSTLY Markdown —
+        # e.g. a legacy PRD containing a fenced ```latex block. One retry
+        # through the Markdown pipeline beats an opaque 502 for the user.
+        if not is_markdown and has_markdown_structure(source):
+            logger.warning(
+                "LaTeX export failed for project %s (%s) (%s); "
+                "retrying via the Markdown pipeline.",
+                project_id, fmt, compile_err,
+            )
+            if fmt == "pdf":
+                retry_fn = lambda: _pdf_via_docx(source, True)  # noqa: E731
+            else:
+                retry_fn = convert_markdown_to_docx
+            try:
+                data = await asyncio.to_thread(retry_fn, source)
+            except FileNotFoundError as err:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(err),
+                ) from err
+            except ValueError as err:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(err),
+                ) from err
+            except RuntimeError as err:
+                logger.error("Markdown retry export failed for project %s (%s): %s", project_id, fmt, err)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY, detail=str(err),
+                ) from err
+        else:
+            logger.error("LaTeX export failed for project %s (%s): %s", project_id, fmt, compile_err)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(compile_err),
+            ) from compile_err
+    except FileNotFoundError as err:
+        # Toolchain not installed/reachable on this host.
+        logger.error("LaTeX export toolchain missing: %s", err)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(err),
+        ) from err
+    except ValueError as err:
+        # Empty / unusable source.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(err),
+        ) from err
+
+    media_type = "application/pdf" if fmt == "pdf" else (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    stem = _safe_filename_stem(UUID(project_id), payload)
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+    )
+
+
+@router.post("/api/project/{project_id}/export/pdf", status_code=status.HTTP_200_OK)
+async def export_prd_pdf(
+    project_id: str,
+    payload: LatexExportPayload,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """
+    Compiles the supplied LaTeX PRD into a downloadable PDF via Tectonic.
+
+    The PRD source follows prompts/template-krungsrinimble.tex - this endpoint
+    renders THAT LaTeX, it does not re-parse Markdown.
+
+    Returns:
+        Response: application/pdf attachment.
+
+    Raises:
+        HTTPException: 404 unknown project; 422 empty/legacy-Markdown source;
+            502 TeX compile failure; 503 toolchain unavailable.
+    """
+    return await _export_prd_bytes(project_id, payload, db, "pdf")
+
+
+@router.post("/api/project/{project_id}/export/docx", status_code=status.HTTP_200_OK)
+async def export_prd_docx(
+    project_id: str,
+    payload: LatexExportPayload,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """
+    Converts the supplied LaTeX PRD into a downloadable Word document via Pandoc.
+
+    Returns:
+        Response: .docx attachment converted from the Krungsri Nimble LaTeX.
+
+    Raises:
+        HTTPException: same contract as the PDF endpoint.
+    """
+    return await _export_prd_bytes(project_id, payload, db, "docx")
+
+
+@router.post("/api/prd/convert", status_code=status.HTTP_200_OK)
+async def convert_prd_to_markdown(payload: LatexExportPayload) -> Dict[str, str]:
+    """
+    Normalize a stored PRD into GFM Markdown for the on-screen preview.
+
+    Accepts either the Krungsri LaTeX body produced by the Architect agent or a
+    legacy Markdown PRD and returns clean GFM Markdown (pipe tables, ``### ``
+    section headings) that the frontend markdown renderer can display directly,
+    so raw LaTeX never leaks into the PRD panel.
+
+    Returns:
+        Dict[str, str]: ``{"markdown": <converted document>, "source_kind":
+        "latex" | "markdown"}``.
+
+    Raises:
+        HTTPException: 422 when no usable content was supplied.
+    """
+    source = (payload.latex_source or "").strip()
+    if not source:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No PRD content was supplied to convert.",
+        )
+    source_kind = "markdown" if is_markdown_prd(source) else "latex"
+    try:
+        markdown = await asyncio.to_thread(prd_to_markdown, source)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(err),
+        ) from err
+    except RuntimeError as err:
+        logger.error("PRD preview conversion failed: %s", err)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(err),
+        ) from err
+    return {"markdown": markdown, "source_kind": source_kind}
 
 
 # ==========================================

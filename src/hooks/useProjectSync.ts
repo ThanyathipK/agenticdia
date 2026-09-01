@@ -19,6 +19,7 @@ import {
 } from '../api/transforms';
 import { getSafeSectionContent } from '../utils/markdown';
 import { handleWarning } from '../components/Toast';
+import { getPrdTemplateMarkdown } from './useRequirementStore';
 import type { RequirementStore } from './useRequirementStore';
 import type { WorkspaceTab } from './useWorkspaceUi';
 
@@ -64,10 +65,18 @@ export function useProjectSync(
 
         store.setCurrentVersion(payload.version_number || 1);
         store.setAuditResult(toAuditResult(payload));
-        store.setPrdMarkdown(getSafeSectionContent(payload.generated_prd || ''));
+        const loadedPrd = getSafeSectionContent(payload.generated_prd || '');
+        store.setPrdMarkdown(loadedPrd);
         store.setMermaidDiagram(payload.generated_diagrams || '');
         store.setCurrentAgentNode(payload.current_workflow_state || null);
         setActiveTab('prd');
+
+        // No generated PRD yet -> show the official Krungsri Nimble template
+        // skeleton in the right panel; Generate PRD fills it in afterwards.
+        if (!loadedPrd) {
+          const tpl = await getPrdTemplateMarkdown();
+          if (tpl) store.setPrdMarkdown((prev) => prev || tpl);
+        }
 
         // Load conversation history — always from Supabase, in chronological order
         store.setMessages(toChatMessages(payload));

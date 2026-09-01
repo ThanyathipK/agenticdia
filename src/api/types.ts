@@ -300,3 +300,16 @@ export interface ProcessDocumentResponse {
   document_id: string;
   message?: string | null;
 }
+
+// ----------------------------------------------------------------------------
+// PRD preview normalization (`POST /api/prd/convert`)
+//
+// Generated PRDs are Krungsri LaTeX bodies; this endpoint turns them (or a
+// legacy Markdown PRD) into clean GFM markdown so the on-screen preview never
+// renders raw LaTeX.
+// ----------------------------------------------------------------------------
+
+export interface ConvertedPrdMarkdownPayload {
+  markdown: string;
+  source_kind: 'latex' | 'markdown' | string;
+}

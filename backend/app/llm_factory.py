@@ -14,6 +14,7 @@ that load-order dependency. ``app.semantic_service`` no longer imports from
 scope without a deferred-import workaround.
 """
 import logging
+from typing import Any, Dict
 
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_openai import ChatOpenAI
@@ -24,20 +25,51 @@ logger = logging.getLogger("app.llm_factory")
 
 
 # Safe context limit mapping designed for MacBook Air/Pro M4 16GB execution bounds
-def build_llm() -> ChatOpenAI:
+def build_llm(max_tokens: int = 3000) -> ChatOpenAI:
     """Construct the shared ChatOpenAI client from app.config settings.
+
+    ``max_tokens`` defaults to the 3000 structured-output budget shared by the
+    gatherer/auditor nodes. PRD generation needs a larger allowance (a LaTeX
+    document body is several thousand tokens), so callers that compile whole
+    documents pass an explicit override - see ``build_prd_llm``.
 
     Exposed as a function so tests and callers can build/replace the client
     without recreating module state by hand.
     """
-    return ChatOpenAI(
-        base_url=settings.LM_STUDIO_URL,
-        api_key=settings.LM_STUDIO_API_KEY,
-        model=settings.LM_STUDIO_MODEL_FALLBACK,
-        temperature=settings.TEMPERATURE,
-        max_tokens=3000,  # Optimized for structured output
-        seed=42,  # Deterministic sampling; declared as a first-class param (avoids model_kwargs warning)
-    )
+    kwargs: Dict[str, Any] = {
+        "base_url": settings.LM_STUDIO_URL,
+        "api_key": settings.LM_STUDIO_API_KEY,
+        "model": settings.LM_STUDIO_MODEL_FALLBACK,
+        "temperature": settings.TEMPERATURE,
+        "max_tokens": max_tokens,  # Optimized for structured output
+        "seed": 42,  # Deterministic sampling; declared as a first-class param (avoids model_kwargs warning)
+    }
+
+    if settings.LM_STUDIO_DISABLE_THINKING:
+        # Qwen3.x are reasoning models. Left untouched, the model spends its whole
+        # max_tokens budget emitting `reasoning_content` and returns an EMPTY
+        # `content` ("finish_reason": "length"), so JsonOutputParser receives an
+        # empty string and the workflow fails every structured-JSON call. Turning
+        # off thinking makes the model answer directly in `content`, which is both
+        # fast and JSON-parseable. `extra_body` merges chat_template_kwargs into
+        # the request body, matching the LM Studio OpenAI-compatible contract.
+        kwargs["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
+
+    return ChatOpenAI(**kwargs)
+
+
+def build_prd_llm() -> ChatOpenAI:
+    """Dedicated LLM for PRD document generation.
+
+    The default 3000-token budget cannot hold a LaTeX document body (several
+    thousand tokens once JSON-escaped), so responses were being truncated
+    mid-document and the JSON parse failed - which surfaced to users as "cannot
+    generate PRD". This variant raises the ceiling while staying inside the
+    8192-token context window once the template body prompt is subtracted.
+    """
+    return build_llm(max_tokens=4096)
 
 
 # Json Output Parser for strict structured JSON outputs

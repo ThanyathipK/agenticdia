@@ -12,6 +12,7 @@ langchain-openai
 langchain>=0.3
 greenlet>=3.1
 mammoth>=1.8.0
+python-docx>=1.1.0
 pypdf>=4.0.0
 
 # testing

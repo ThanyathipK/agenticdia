@@ -26,7 +26,8 @@ import type {
   VersionHistory,
 } from '../components/types';
 import type { PendingActionPayload, ProjectSummary } from '../api/types';
-import { downloadDocx, printPDF } from '../utils/docx';
+import { api, detailFromBlobError } from '../api/client';
+import { handleError } from '../components/Toast';
 import type { UseDocumentsResult } from './useDocuments';
 import type { WorkspaceTab } from './useWorkspaceUi';
 import { useArtifactLocks } from './useArtifactLocks';
@@ -194,32 +195,64 @@ export function useProjectState(): ProjectState {
   });
 
 
-  const handleDownloadDocx = async () => {
-    await downloadDocx({
-      projectId: projectsApi.projectId,
-      projectName:
-        projectsApi.projects.find(p => p.id === projectsApi.projectId)?.name ||
-        'PromptPay Merchant Settlement Engine',
-      epicName: store.structuredRequirements.epic_name || 'PromptPay Real-Time Merchant Settlement Engine',
-      userStories: store.structuredRequirements.user_stories || [],
-      currentVersion: store.currentVersion,
-      prdMarkdown: store.prdMarkdown,
-      setSyncStatus: store.setSyncStatus,
-    });
+  // Shared plumbing for the two file exports. The generated PRD is LaTeX
+  // (template-krungsrinimble.tex), so the finished PDF/DOCX is COMPILED
+  // server-side (Tectonic / Pandoc) — the browser never re-parses it as
+  // markdown, which is what previously made exports follow template.md.
+  const exportCompiledFile = async (fmt: 'pdf' | 'docx') => {
+    const pid = projectsApi.projectId;
+    if (!pid) {
+      store.setSyncStatus('Select a project before exporting.');
+      return;
+    }
+    const projectName =
+      projectsApi.projects.find(p => p.id === pid)?.name || 'Krungsri Nimble PRD';
+
+    store.setSyncStatus(
+      fmt === 'pdf'
+        ? 'Compiling the Krungsri Nimble LaTeX PRD to PDF (Tectonic)...'
+        : 'Converting the Krungsri Nimble LaTeX PRD to Word (Pandoc)...',
+    );
+
+    try {
+      const blob =
+        fmt === 'pdf'
+          ? await api.exportPrdPdf(pid, store.prdMarkdown, store.currentVersion, projectName)
+          : await api.exportPrdDocx(pid, store.prdMarkdown, store.currentVersion, projectName);
+
+      const stem = `PRD-${projectName.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 48)}`;
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${stem}-V${store.currentVersion}.${fmt}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+
+      store.setSyncStatus(
+        fmt === 'pdf' ? 'PRD PDF exported from the .tex template.' : 'PRD Word Document (.docx) exported from the .tex template.',
+      );
+    } catch (err) {
+      const detail = await detailFromBlobError(err);
+      if (detail) {
+        handleError(detail, err);
+        store.setSyncStatus(`Failed to generate ${fmt.toUpperCase()} document.`);
+      } else if (fmt === 'pdf') {
+        handleError('Failed to generate the PDF document.', err);
+        store.setSyncStatus('Failed to generate PDF document.');
+      } else {
+        handleError('Failed to generate the DOCX document.', err);
+        store.setSyncStatus('Failed to generate DOCX document.');
+      }
+    }
   };
 
-  const handlePrintPDF = () => {
-    printPDF({
-      projectId: projectsApi.projectId,
-      projectName:
-        projectsApi.projects.find(p => p.id === projectsApi.projectId)?.name ||
-        'PromptPay Merchant Settlement Engine',
-      epicName: store.structuredRequirements.epic_name || 'PromptPay Real-Time Merchant Settlement Engine',
-      userStories: store.structuredRequirements.user_stories || [],
-      currentVersion: store.currentVersion,
-      prdMarkdown: store.prdMarkdown,
-      setSyncStatus: store.setSyncStatus,
-    });
+  const handleDownloadDocx = async () => {
+    await exportCompiledFile('docx');
+  };
+
+  const handlePrintPDF = async () => {
+    await exportCompiledFile('pdf');
   };
 
   return {

@@ -31,3 +31,6 @@ venv/
 
 # Node runtime artifacts
 server.js
+
+# Vendored LaTeX toolchain (Tectonic + Pandoc binaries)
+.tools/

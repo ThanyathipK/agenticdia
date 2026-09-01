@@ -1,6 +1,6 @@
 // Shared domain types used across the Requirements Engine workspace.
 // Extracted from the former monolithic Dashboard.tsx so every split module
-// (ChatPanel, PRDEditor, VersionHistory, MarkdownRenderer, DocxExporter,
+// (ChatPanel, PRDEditor, VersionHistory, MarkdownRenderer,
 // useProjectState) can share one source of truth.
 
 export interface UserStory {
