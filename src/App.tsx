@@ -33,7 +33,7 @@ import {
 
 export default function App() {
   // viewMode: 'agent' (Multi-Agent Requirements Workspace) | 'schema' (Postgres Schema Explorer)
-  const [viewMode, setViewMode] = useState<'agent' | 'schema'>('agent');
+  const [viewMode] = useState<'agent' | 'schema'>('agent');
 
   // Local Reactive States simulating the live Postgres Database
   const [users, setUsers] = useState<UserRow[]>(INITIAL_USERS);
@@ -42,13 +42,13 @@ export default function App() {
   const [requirements, setRequirements] = useState<RequirementRow[]>(INITIAL_REQUIREMENTS);
   const [userStories, setUserStories] = useState<UserStoryRow[]>(INITIAL_USER_STORIES);
   const [criteria, setCriteria] = useState<AcceptanceCriterionRow[]>(INITIAL_ACCEPTANCE_CRITERIA);
-  const [auditResults, setAuditResults] = useState<AuditResultRow[]>(INITIAL_AUDIT_RESULTS);
+  const [auditResults] = useState<AuditResultRow[]>(INITIAL_AUDIT_RESULTS);
   const [questions, setQuestions] = useState<ClarificationQuestionRow[]>(INITIAL_QUESTIONS);
-  const [prdDocs, setPrdDocs] = useState<PrdDocumentRow[]>(INITIAL_PRD_DOCS);
+  const [prdDocs] = useState<PrdDocumentRow[]>(INITIAL_PRD_DOCS);
   const [versions, setVersions] = useState<VersionHistoryRow[]>(INITIAL_VERSION_HISTORY);
-  const [prdVersions, setPrdVersions] = useState<PrdVersionRow[]>(INITIAL_PRD_VERSIONS);
-  const [conversationMessages, setConversationMessages] = useState<ConversationMessageRow[]>(INITIAL_CONVERSATION_MESSAGES);
-  const [artifactEventLogs, setArtifactEventLogs] = useState<ArtifactEventLogRow[]>(INITIAL_ARTIFACT_EVENT_LOGS);
+  const [prdVersions] = useState<PrdVersionRow[]>(INITIAL_PRD_VERSIONS);
+  const [conversationMessages] = useState<ConversationMessageRow[]>(INITIAL_CONVERSATION_MESSAGES);
+  const [artifactEventLogs] = useState<ArtifactEventLogRow[]>(INITIAL_ARTIFACT_EVENT_LOGS);
 
   return (
     <div id="app-container" className="w-full h-screen bg-slate-100 flex flex-col font-sans text-slate-800 antialiased overflow-hidden">

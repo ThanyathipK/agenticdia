@@ -1069,7 +1069,6 @@ filteredGridData.map((row: GridRow, rIdx) => {
                 <SnapshotLedger
                   requirements={requirements}
                   users={users}
-                  projects={projects}
                   userStories={userStories}
                   criteria={criteria}
                   versions={versions}

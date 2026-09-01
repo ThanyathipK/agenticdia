@@ -11,9 +11,9 @@ except ImportError:
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
-from app.schemas import GatheredRequirements, UserStoryModel
+from app.schemas import GatheredRequirements
 from app.prompt_loader import load_prompt, _PromptProxy
-from app.llm_factory import llm, parser, build_prd_llm
+from app.llm_factory import llm, parser
 from app.llm_utils import invoke_llm_structured
 from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
 from app.semantic_service import (
@@ -285,7 +285,6 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
     matcher_status = str(match_result.get("status", "MATCHED")).upper()
     matcher_confidence = float(match_result.get("confidence", 1.0))
     reason = match_result.get("reason", "")
-    matched_id = match_result.get("matched_requirement_id")
     candidates = match_result.get("candidates", [])
 
     logger.info(f"[REQUIREMENT MATCHER] Match Result: {match_result}")
@@ -435,12 +434,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Detect user intent before running the Gatherer
     detected_intent = state.get("detected_intent")
     intent_confidence = 1.0
-    intent_reason = ""
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_user_stories)
         detected_intent = intent_res.get("intent", "UPDATE_REQUIREMENT")
         intent_confidence = float(intent_res.get("confidence", 1.0))
-        intent_reason = intent_res.get("reason", "")
     elif not detected_intent:
         detected_intent = "GENERAL_CHAT"
 
@@ -713,7 +710,6 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
     """
     logger.info("Executing delete_requirement_node to archive requirements.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
-    raw_input = state.get("raw_input", "")
     
     # Use session from state if available, otherwise let function create one
     db_session = state.get("db_session")
@@ -1098,8 +1094,6 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             all_ac.extend(us.get("acceptance_criteria", []))
         req_state["acceptance_criteria"] = all_ac
 
-    current_version = req_state["version_number"]
-    
     # Step 11 compliance: Segment user stories to check for changes
     # LOCK ENFORCEMENT: Exclude locked user stories from PRD generation
     all_stories = req_state.get("user_stories", [])

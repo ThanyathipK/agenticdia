@@ -422,4 +422,3 @@ def fill_template_body(
     body = _fill_product_scope(body, data)
     body = _fill_tech_appendix(body, narrative)
     return body
-    return body

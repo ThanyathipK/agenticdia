@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { GitCommit } from 'lucide-react';
 import {
   UserRow,
-  ProjectRow,
   RequirementRow,
   UserStoryRow,
   AcceptanceCriterionRow,
@@ -15,7 +14,6 @@ import { notify } from '../Toast';
 interface SnapshotLedgerProps {
   requirements: RequirementRow[];
   users: UserRow[];
-  projects: ProjectRow[];
   userStories: UserStoryRow[];
   criteria: AcceptanceCriterionRow[];
   versions: VersionHistoryRow[];
@@ -36,7 +34,6 @@ interface SnapshotLedgerProps {
 export default function SnapshotLedger({
   requirements,
   users,
-  projects,
   userStories,
   criteria,
   versions,
@@ -166,7 +163,7 @@ export default function SnapshotLedger({
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
         <h3 className="text-sm font-bold text-slate-900 mb-4">Immutable Ledger History (version_history table)</h3>
 <div className="space-y-4">
-          {versions.map((ver, idx) => {
+          {versions.map((ver) => {
             const snap = JSON.parse(ver.state_snapshot);
             return (
               <div key={ver.id} className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm">

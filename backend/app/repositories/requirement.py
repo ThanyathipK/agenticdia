@@ -3,13 +3,13 @@ Requirement repository operations.
 """
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.lock_service import LockService
+
 from app.models import (
     AcceptanceCriteriaModel,
     RequirementModel,
@@ -141,7 +141,7 @@ class RequirementRepository:
                 return RequirementRepository._serialize(req)
             req.is_locked = True
             req.locked_by = locked_by
-            req.locked_at = datetime.utcnow()
+            req.locked_at = datetime.now(timezone.utc)
             await session.flush()
             await session.refresh(req)
             # Log LOCK event

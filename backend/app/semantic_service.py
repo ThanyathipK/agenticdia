@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
-from app.config import settings
+
 from app.llm_factory import llm
 from app.schemas import RequirementIntentDetectionResult, WorkflowRoutingResult, RequirementMatcherResult
 from app.prompt_loader import load_prompt, _PromptProxy

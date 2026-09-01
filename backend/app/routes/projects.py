@@ -39,13 +39,7 @@ from app.schemas import (
     PRDVersionResponse,
     PRDExportResponse,
 )
-from app.llm_client import (
-    call_lm_studio,
-    LMStudioGatewayError,
-    LMStudioOutputParsingError,
-    LMStudioUnavailableError,
-)
-from app.prompt_loader import load_prompt, load_prd_template, load_prd_latex_template, load_prd_latex_template_body
+from app.prompt_loader import load_prd_template, load_prd_latex_template
 from app.event_manager import event_manager
 
 logger = logging.getLogger("app.routes.projects")
@@ -343,7 +337,7 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
 
 
 @router.get("/api/prd/template", status_code=status.HTTP_200_OK)
-async def get_prd_template() -> Dict[str, str]:
+def get_prd_template() -> Dict[str, str]:
     """
     Serves the authoritative Krungsri Nimble PRD templates.
 

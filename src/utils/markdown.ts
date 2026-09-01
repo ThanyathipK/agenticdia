@@ -3,15 +3,22 @@
 // MarkdownRenderer and the useProjectState hook.
 import { UserStory, PRDSection } from '../components/types';
 
-export function getSafeSectionContent(content: any): string {
+type SectionSource = {
+  content?: unknown;
+  markdown?: unknown;
+  title?: unknown;
+  name?: unknown;
+};
+
+export function getSafeSectionContent(content: unknown): string {
   if (content === null || content === undefined) return "";
   if (typeof content === 'string') return content;
   if (typeof content === 'object') {
-    if (content.content !== undefined) return getSafeSectionContent(content.content);
-    if (content.markdown !== undefined) return getSafeSectionContent(content.markdown);
-    
+    const source = content as SectionSource;
+    if (source.content !== undefined) return getSafeSectionContent(source.content);
+    if (source.markdown !== undefined) return getSafeSectionContent(source.markdown);
     try {
-      return Object.entries(content)
+      return Object.entries(source as Record<string, unknown>)
         .map(([key, val]) => {
           const valStr = typeof val === 'object' ? JSON.stringify(val) : String(val);
           return `**${key}:** ${valStr}`;
@@ -24,18 +31,19 @@ export function getSafeSectionContent(content: any): string {
   return String(content);
 }
 
-export function getSafeSectionTitle(title: any): string {
+export function getSafeSectionTitle(title: unknown): string {
   if (title === null || title === undefined) return "Untitled Section";
   if (typeof title === 'string') return title;
   if (typeof title === 'object') {
-    if (title.title !== undefined) return getSafeSectionTitle(title.title);
-    if (title.name !== undefined) return getSafeSectionTitle(title.name);
+    const source = title as SectionSource;
+    if (source.title !== undefined) return getSafeSectionTitle(source.title);
+    if (source.name !== undefined) return getSafeSectionTitle(source.name);
     return JSON.stringify(title);
   }
   return String(title);
 }
 
-export function parsePRDToSections(markdown: any): PRDSection[] {
+export function parsePRDToSections(markdown: unknown): PRDSection[] {
   if (!markdown) return [];
   const safeMarkdown = getSafeSectionContent(markdown);
   

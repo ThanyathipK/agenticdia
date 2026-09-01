@@ -344,7 +344,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
 
       if (receivedAudit.clarification_questions) {
         const initialAnswers: Record<string, string> = {};
-        receivedAudit.clarification_questions.forEach((q, idx) => {
+        receivedAudit.clarification_questions.forEach((_q, idx) => {
           initialAnswers[`q-${idx}`] = '';
         });
         store.setClarificationAnswers(initialAnswers);

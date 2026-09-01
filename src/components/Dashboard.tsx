@@ -320,7 +320,7 @@ export default function Dashboard() {
               }}
             >
               {(() => {
-                const p = projects.find((pr: any) => pr.id === projectContextMenu.projectId);
+                const p = projects.find((pr) => pr.id === projectContextMenu.projectId);
                 return p && p.is_pinned ? (
                   <>
                     <Pin className="w-3.5 h-3.5 text-primary" />
@@ -337,7 +337,7 @@ export default function Dashboard() {
             <button
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
               onClick={() => {
-                const p = projects.find((pr: any) => pr.id === projectContextMenu.projectId);
+                const p = projects.find((pr) => pr.id === projectContextMenu.projectId);
                 if (p) {
                   setRenameProjectId(p.id);
                   setRenameProjectName(p.name);

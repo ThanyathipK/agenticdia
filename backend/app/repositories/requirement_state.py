@@ -183,14 +183,6 @@ class RequirementStateRepository:
         result = await session.execute(stmt)
         model = result.scalar_one_or_none()
 
-        # Initialize fallback variables
-        original_requirements = {}
-        original_user_stories = []
-        original_acceptance_criteria = []
-        original_clarification_questions = []
-        original_generated_prd = ""
-        original_generated_diagrams = ""
-
         if not model:
             model = RequirementStateModel(
                 project_id=project_id,
@@ -210,14 +202,6 @@ class RequirementStateRepository:
             session.add(model)
             await session.flush()
         else:
-            # Preserve original values for fallback
-            original_requirements = model.requirements or {}
-            original_user_stories = model.user_stories or []
-            original_acceptance_criteria = model.acceptance_criteria or []
-            original_clarification_questions = model.clarification_questions or []
-            original_generated_prd = model.generated_prd or ""
-            original_generated_diagrams = model.generated_diagrams or ""
-
             if "project_name" in updates and updates["project_name"] is not None:
                 model.project_name = updates["project_name"]
             if "validation_status" in updates and updates["validation_status"] is not None:

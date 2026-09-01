@@ -171,7 +171,7 @@ app.include_router(documents.router, tags=["Documents"])
 # (Review finding: "silent error swallowing".)
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """Log server errors loudly, then return a structured JSON error body.
 
     All ``HTTPException``-derived errors (including 404, 405, 415 and the 429 raised
@@ -197,7 +197,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Return a structured 422 for malformed bodies / unsupported content types."""
     logger.warning(
         "Request validation failed on %s %s: %s",

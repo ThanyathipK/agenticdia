@@ -248,7 +248,7 @@ async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubm
     """
     from sqlalchemy import select
     from app.models import ClarificationQuestionModel
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     logger.info(f"Updating clarification question {question_id} state with resolution.")
 
@@ -268,7 +268,7 @@ async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubm
     return {
         "status": "success",
         "message": f"Answer to clarification question {question_id} has been logged and registered.",
-        "resolved_at": question.updated_at.isoformat() if question.updated_at else datetime.utcnow().isoformat(),
+        "resolved_at": question.updated_at.isoformat() if question.updated_at else datetime.now(timezone.utc).isoformat(),
         "is_resolved": question.is_resolved
     }
 
@@ -340,7 +340,7 @@ async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSessi
 # ==========================================
 
 @router.post("/api/process-requirements/cancel", status_code=status.HTTP_200_OK)
-async def post_cancel_process_requirements(
+def post_cancel_process_requirements(
     project_id: str = Query(..., description="Project whose in-flight generation should be terminated."),
 ) -> Dict[str, Any]:
     """
@@ -449,7 +449,7 @@ async def _process_requirements_pipeline(
             requirements) exceeds ``MAX_CONTEXT_TOKENS``; 500 if the
             multi-agent workflow execution fails.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     logger.info(f"Triggering on-demand {request.target_agent} agent for project {request.project_id}")
 
@@ -735,13 +735,11 @@ async def _process_requirements_pipeline(
             req_state["current_workflow_state"] = "COMPLETED"
 
         workflow_routing = final_state.get("workflow_routing") or {}
-        wf_type = str(workflow_routing.get("workflow", "REQUIREMENT")).upper()
 
         # ==========================================
         # IN-MEMORY MERGE: Store merged state as a pending action instead of directly persisting to DB.
         # The user must confirm before changes are committed to the database.
         # ==========================================
-        import uuid
 
         logger.info(f"[IN-MEMORY MERGE] Storing merged state as pending action for project {request.project_id}...")
 
@@ -757,7 +755,7 @@ async def _process_requirements_pipeline(
                 "affected_acceptance_criteria_ids": [],
                 "workflow_stage": req_state.get("current_workflow_state", "gatherer_node")
             },
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             session=session
         )
 
