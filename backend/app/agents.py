@@ -16,6 +16,7 @@ from app.prompt_loader import load_prompt, _PromptProxy
 from app.llm_factory import llm, parser
 from app.llm_utils import invoke_llm_structured
 from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
+from app.prd_section_service import prd_is_sectioned_markdown
 from app.semantic_service import (
     classify_workflow,
     detect_requirement_intent,
@@ -1117,7 +1118,10 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         not to_build_stories
         and existing_prd
         and existing_diagrams
-        and _prd_follows_krungsri_template(existing_prd)
+        and (
+            _prd_follows_krungsri_template(existing_prd)
+            or prd_is_sectioned_markdown(existing_prd)
+        )
     ):
         logger.info("Architect Node: All user stories are unchanged. Reusing existing PRD and diagrams without LLM invocation.")
         req_state["current_workflow_state"] = "architect_node"
@@ -1204,6 +1208,27 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
     except Exception as version_err:
         logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
+
+    # PART-LEVEL PRD SYNC: merge the freshly generated document into the
+    # project's prd_sections. Human-owned (ai_generatable=False) and locked
+    # sections are PRESERVED verbatim — regeneration only touches unlocked,
+    # AI-generatable parts. The stitched markdown of ALL parts (AI + human)
+    # becomes the current generated_prd so human content survives every run.
+    if db_session:
+        try:
+            from app.prd_section_service import sync_sections_from_prd
+            merged_markdown = await sync_sections_from_prd(
+                project_id, req_state["generated_prd"], db_session,
+                changed_by="automated_agent",
+            )
+            if merged_markdown:
+                req_state["generated_prd"] = merged_markdown
+        except Exception as section_sync_err:
+            # Never fail PRD generation because of section bookkeeping.
+            logger.error(
+                f"[PRD SECTIONS] Failed to sync PRD sections for project {project_id}: "
+                f"{str(section_sync_err)}"
+            )
 
     architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
     await ConversationMessageRepository.save_message(

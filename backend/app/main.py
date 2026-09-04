@@ -11,6 +11,7 @@ from app.migrations import run_migrations, seed_default_user
 from app.event_manager import verify_single_worker_guarantee as verify_sse_single_worker_guarantee
 from app.rate_limit import verify_single_worker_guarantee
 from app.routes import chat, projects, requirements, lock, events, documents
+from app.routes import prd_sections
 from app.llm_client import check_lm_studio_health
 
 # Logger initialization
@@ -158,6 +159,8 @@ app.include_router(requirements.router, tags=["Requirements & Workflow"])
 app.include_router(lock.router, tags=["Locking & Pending Actions"])
 app.include_router(events.router, tags=["Events & SSE"])
 app.include_router(documents.router, tags=["Documents"])
+# PRD part-level editing / locking / versioning (the nine preview parts)
+app.include_router(prd_sections.router, tags=["PRD Sections"])
 
 
 # ==========================================
@@ -213,5 +216,5 @@ def validation_exception_handler(request: Request, exc: RequestValidationError) 
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting server on http://0.0.0.0:8000")
+    logger.info("Starting server on http://0.0.0.0:8000")
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=settings.DEBUG)

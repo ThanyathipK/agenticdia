@@ -18,6 +18,8 @@ export interface ProjectSummary {
   description: string | null;
   industry_standard: string;
   is_pinned?: boolean;
+  /** Short excerpt of a matching conversation message, present only when the project matched via message content. */
+  match_snippet?: string | null;
 }
 
 export interface ProjectCreated {
@@ -312,4 +314,57 @@ export interface ProcessDocumentResponse {
 export interface ConvertedPrdMarkdownPayload {
   markdown: string;
   source_kind: 'latex' | 'markdown' | string;
+}
+
+// ----------------------------------------------------------------------------
+// PRD sections (`/api/project/{id}/prd/sections/*`)
+//
+// The PRD is a COLLECTION of editable, lockable, versioned PARTS (the nine
+// preview parts). `section_key` matches the preview section ids produced by
+// `parsePRDToSections` ('title', 'stakeholders', 'version_history', 'reviews',
+// 'contents', 'business_overview', 'product_scope', 'tech_ops', 'appendix').
+// ----------------------------------------------------------------------------
+
+export interface PrdSectionPayload {
+  id: string;
+  project_id: string;
+  section_key: string;
+  title: string;
+  content: string;
+  section_order: number;
+  /** 'template' | 'ai' | 'human' — who owns the content. */
+  content_source: 'template' | 'ai' | 'human' | string;
+  /** False => the Architect agent never regenerates this part. */
+  ai_generatable: boolean;
+  /** 'draft' | 'satisfied' | 'approved'. */
+  review_status: string;
+  is_locked: boolean;
+  locked_by?: string | null;
+  locked_at?: string | null;
+  lock_reason?: string | null;
+  /** Latest version number in prd_section_versions. */
+  version_number?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PrdSectionListPayload {
+  project_id: string;
+  sections: PrdSectionPayload[];
+}
+
+export interface PrdSectionUpdateResponse {
+  section: PrdSectionPayload;
+  /** Full PRD markdown stitched from ALL parts after the edit. */
+  document_markdown: string;
+}
+
+export interface PrdSectionVersionPayload {
+  id: string;
+  section_id: string;
+  version_number: number;
+  content: string;
+  changed_by: string;
+  change_summary?: string | null;
+  created_at: string;
 }

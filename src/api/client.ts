@@ -13,6 +13,8 @@ import type {
   DocumentMarkdownPayload,
   HealthPayload,
   PendingActionPayload,
+  PrdSectionListPayload,
+  PrdSectionUpdateResponse,
   ProcessDocumentResponse,
   ProcessRequirementsRequest,
   ProcessRequirementsResponse,
@@ -25,6 +27,11 @@ import type {
 
 async function get<T>(url: string, params?: Record<string, unknown>): Promise<T> {
   const { data } = await axios.get<T>(url, { params });
+  return data;
+}
+
+async function patch<T>(url: string, body?: unknown): Promise<T> {
+  const { data } = await axios.patch<T>(url, body ?? {});
   return data;
 }
 
@@ -76,6 +83,28 @@ export async function detailFromBlobError(err: unknown): Promise<string | null> 
 }
 
 export const api = {
+  // ---- PRD sections (part-level editing / locking / versioning) ------------
+  // The PRD is stored as NINE editable parts; each part is independently
+  // edited, locked, and versioned (append-only history).
+  getPrdSections: (projectId: string) =>
+    get<PrdSectionListPayload>(`/api/project/${projectId}/prd/sections`),
+  updatePrdSection: (
+    projectId: string,
+    sectionKey: string,
+    content: string,
+    options?: { review_status?: string; change_summary?: string; updated_by?: string }
+  ) =>
+    patch<PrdSectionUpdateResponse>(`/api/project/${projectId}/prd/sections/${sectionKey}`, {
+      content,
+      review_status: options?.review_status,
+      change_summary: options?.change_summary,
+      updated_by: options?.updated_by ?? 'user',
+    }),
+  lockPrdSection: (projectId: string, sectionKey: string, lockedBy = 'user') =>
+    post(`/api/project/${projectId}/prd/sections/${sectionKey}/lock`, { locked_by: lockedBy }),
+  unlockPrdSection: (projectId: string, sectionKey: string, lockedBy = 'user') =>
+    post(`/api/project/${projectId}/prd/sections/${sectionKey}/unlock`, { locked_by: lockedBy }),
+
   // ---- Projects ----------------------------------------------------------
   listProjects: () => get<ProjectSummary[]>('/api/projects'),
   // Server-side search: matches project names AND conversation message content.

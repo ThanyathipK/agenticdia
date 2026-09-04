@@ -38,14 +38,24 @@ class LMStudioOutputParsingError(LMStudioError):
 LM_INFERENCE_RETRY_ATTEMPTS = 2
 #: Base back-off (seconds) between retries; multiplied by the attempt index.
 LM_INFERENCE_RETRY_BACKOFF_SECONDS = 0.5
+#: Upper bound for a server-provided ``Retry-After`` delay. A header is trusted
+#: only up to this cap: an unbounded value (e.g. a misbehaving proxy answering
+#: ``Retry-After: 3600``) would otherwise suspend the request coroutine — and
+#: with it the user's chat turn — for an hour before the first retry.
+LM_INFERENCE_RETRY_AFTER_MAX_SECONDS = 5.0
 
 
 def _retry_backoff(attempt: int, retry_after: Optional[str] = None) -> float:
-    """Return the wait before retrying, preferring the server's ``Retry-After``."""
+    """Return the wait before retrying, preferring the server's ``Retry-After``.
+
+    The ``Retry-After`` value is honoured only when it parses as a positive
+    integer AND stays below :data:`LM_INFERENCE_RETRY_AFTER_MAX_SECONDS`;
+    anything larger (or unparsable) falls back to the linear back-off.
+    """
     if retry_after:
         try:
             seconds = int(retry_after)
-            if seconds > 0:
+            if 0 < seconds <= LM_INFERENCE_RETRY_AFTER_MAX_SECONDS:
                 return float(seconds)
         except (TypeError, ValueError):
             pass
@@ -163,6 +173,14 @@ async def call_lm_studio(
             raise LMStudioOutputParsingError(
                 "Local LLM output failed to resolve as a valid compliance schema."
             ) from json_err
+
+    # Defensive terminal guard: the loop above always returns or raises today,
+    # but if the attempt count or control flow ever changes, silently falling
+    # off the end would return ``None`` and crash the caller with an opaque
+    # AttributeError instead of a clean 503.
+    raise LMStudioUnavailableError(
+        "LM Studio did not respond after the configured retry attempts."
+    )
 
 
 # ==========================================

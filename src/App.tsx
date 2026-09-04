@@ -57,12 +57,12 @@ export default function App() {
       <ToastHost />
       
       {/* GLOBAL TOP NAVBAR (Matching Stitch Header precisely) */}
-      <header className="h-16 w-full shrink-0 flex items-center justify-between px-6 bg-white border-b border-black/5 z-50">
+      <header className="h-16 w-full shrink-0 flex items-center justify-between gap-2 px-4 sm:px-6 bg-white border-b border-black/5 z-50">
         {/* Left: Branding & Project Title */}
-        <div className="flex items-center gap-4 min-w-[280px]">
-          <span className="material-symbols-outlined text-brand text-2xl font-bold">Agentic-AI</span>
-          <div className="flex items-center cursor-pointer group">
-            <h1 className="font-bold text-slate-900 text-sm">For PRD</h1>
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <span className="material-symbols-outlined text-brand text-2xl font-bold shrink-0">Agentic-AI</span>
+          <div className="hidden sm:flex items-center cursor-pointer group min-w-0">
+            <h1 className="font-bold text-slate-900 text-sm truncate">For PRD</h1>
           </div>
         </div>
         

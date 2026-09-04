@@ -1,7 +1,7 @@
 // ChatPanel — left conversational panel extracted from the former Dashboard.tsx.
 // Renders the message timeline (with embedded human-in-the-loop clarification
 // forms), the agent execution ticker, and the fixed input + action bar.
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -17,6 +17,7 @@ import {
   Square,
 } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
+import { highlightMatch } from '../utils/highlight';
 
 export function ChatPanel({ state }: { state: ProjectState }) {
   const {
@@ -27,6 +28,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
     currentAgentNode,
     rawInput,
     setRawInput,
+    projectSearchQuery,
     handleSendMessage,
     handleStopGeneration,
     clarificationAnswers,
@@ -72,10 +74,52 @@ export function ChatPanel({ state }: { state: ProjectState }) {
     ? 'Create or select a project first'
     : 'Add requirements via chat or upload a knowledge document first';
 
+  // ---- Search-driven chat autoscroll --------------------------------------
+  // The-sidebar search also matches conversation message content. When a query
+  // is active, the chat highlight lights up matching bubbles and this brings
+  // the FIRST matching bubble into the center of the chat viewport so the user
+  // doesn't have to hunt for it.
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const lastMatchedBubbleIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const query = projectSearchQuery.trim().toLowerCase();
+    if (!query) {
+      lastMatchedBubbleIdRef.current = null;
+      return;
+    }
+    const matchIndex = messages.findIndex(m => (m.content || '').toLowerCase().includes(query));
+    if (matchIndex === -1) {
+      lastMatchedBubbleIdRef.current = null;
+      return;
+    }
+    const matchId = messages[matchIndex]?.id;
+    // Don't re-jump to a bubble that is already the search target: keeps live
+    // chat auto-scrolling to the bottom without fighting the search focus.
+    if (matchId && lastMatchedBubbleIdRef.current === matchId) return;
+
+    // Deferred so it lands AFTER the store's auto-scroll-to-bottom effect for
+    // the same commit (parent effects run last) — the search focus wins.
+    const timer = setTimeout(() => {
+      const container = chatScrollRef.current;
+      if (!container) return;
+      const el = container.querySelector(`[data-msg-index="${matchIndex}"]`);
+      if (!el) return;
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const top =
+        elRect.top - containerRect.top + container.scrollTop -
+        (container.clientHeight / 2) + (elRect.height / 2);
+      container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+      lastMatchedBubbleIdRef.current = matchId;
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [projectSearchQuery, messages]);
+
   return (
-    <section className="flex flex-col bg-surface border-r border-outline relative z-10 shrink-0" style={{ width: `${state.splitPct}%` }}>
+    <section className="chat-panel flex flex-col bg-surface border-r border-outline relative z-10" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${state.splitPct}%` }}>
       {/* Section Header */}
-      <div className="p-4 border-b border-outline flex items-center justify-between bg-glass-bg backdrop-blur-md">
+      <div className="p-3 md:p-4 border-b border-outline flex items-center justify-between bg-glass-bg backdrop-blur-md">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
             <Network className="text-primary w-4.5 h-4.5" />
@@ -84,14 +128,14 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             <h2 className="font-headline-md text-sm font-bold text-on-surface truncate">
               {projects.find(p => p.id === projectId)?.name || "Conversational Analyst Workspace"}
             </h2>
-            <div className="flex items-center gap-1.5 mt-0.5">
+            <div className="flex items-center gap-1.5 mt-0.5 hidden sm:flex">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
               <p className="text-[10.5px] text-on-surface-variant font-mono truncate">Agent Graph Ready • {syncStatus}</p>
             </div>
           </div>
         </div>
 
-        <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider shrink-0 ml-3">
+        <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider shrink-0 ml-3 hidden sm:inline-block">
           {lmStudioOnline === false
             ? 'LLM Offline'
             : isProcessing
@@ -101,22 +145,28 @@ export function ChatPanel({ state }: { state: ProjectState }) {
       </div>
 
       {/* Chat Logs scroll list */}
-      <div className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar pb-32">
+      <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar pb-32">
         <AnimatePresence initial={false}>
-          {messages.map((msg) => {
+          {messages.map((msg, msgIndex) => {
             const isUser = msg.role === 'user';
             const isSystem = msg.role === 'system';
-            
+            // User bubbles sit on the dark brand background, so the highlight
+            // needs a light translucent wash instead of the brand-tinted one.
+            const bubbleHighlightClass = isUser
+              ? 'bg-white/30 text-on-primary font-semibold rounded-[2px] px-0.5'
+              : '';
+
             if (isSystem) {
               return (
                 <motion.div 
                   key={msg.id}
+                  data-msg-index={msgIndex}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="mx-auto max-w-sm text-center py-2"
                 >
                   <span className="inline-block px-3 py-1 bg-black/5 rounded-full text-[10.5px] font-mono text-on-surface-variant border border-black/5">
-                    {msg.content}
+                    {highlightMatch(msg.content, projectSearchQuery)}
                   </span>
                 </motion.div>
               );
@@ -125,6 +175,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             return (
               <motion.div
                 key={msg.id}
+                data-msg-index={msgIndex}
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.3 }}
@@ -149,7 +200,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                       ? 'bg-primary text-on-primary border-primary rounded-tr-none' 
                       : 'bg-primary/5 text-on-surface border-primary/15 rounded-tl-none'
                   }`}>
-                    <p className="whitespace-pre-line">{msg.content}</p>
+                    <p className="whitespace-pre-line">
+                      {highlightMatch(msg.content, projectSearchQuery, bubbleHighlightClass)}
+                    </p>
                   </div>
 
                   {/* Dynamic Pending Clarifications Form Embedded inside the timeline */}
@@ -235,12 +288,12 @@ export function ChatPanel({ state }: { state: ProjectState }) {
       {/* Conversational Fixed Input Container */}
       <div className="absolute bottom-0 w-full p-4 glass-panel border-t border-outline bg-white/90 z-20 space-y-3">
         {/* Agent Actions Row */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleValidateRequirements}
             disabled={agentActionsDisabled}
             title={agentActionsDisabled ? agentActionHint : 'Run the compliance audit against the current requirements'}
-            className="flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="min-w-[160px] flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CheckCircle2 className="w-3.5 h-3.5 text-primary" />
             <span>Validate Requirements</span>
@@ -249,7 +302,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             onClick={handleGeneratePRD}
             disabled={agentActionsDisabled}
             title={agentActionsDisabled ? agentActionHint : 'Compile the formal PRD and architecture diagram'}
-            className="flex-1 px-3 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="min-w-[160px] flex-1 px-3 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <FileText className="w-3.5 h-3.5" />
             <span>Generate PRD</span>

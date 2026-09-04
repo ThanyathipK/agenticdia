@@ -29,6 +29,7 @@ import {
   Unlock,
   Pin,
   PinOff,
+  Menu,
 } from 'lucide-react';
 import { useProjectState } from '../hooks/useProjectState';
 import { ChatPanel } from './ChatPanel';
@@ -39,6 +40,7 @@ import { ConfirmationPanel } from './ConfirmationPanel';
 import { DocumentLibrary } from './DocumentLibrary';
 import { NewProjectModal } from './NewProjectModal';
 import { ConfirmModal } from './ConfirmModal';
+import { highlightMatch } from '../utils/highlight';
 
 export default function Dashboard() {
   const state = useProjectState();
@@ -93,6 +95,13 @@ export default function Dashboard() {
   const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  // Mobile drawer: below `lg` the sidebar is hidden and toggled as an overlay
+  // drawer via a hamburger button in the top-left, so it never eats horizontal
+  // space on small screens.
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
+  const collapsed = historyCollapsed && !mobileSidebarOpen;
+  const expanded = !collapsed;
+
   useEffect(() => {
     if (isSearchOpen) {
       searchInputRef.current?.focus();
@@ -126,10 +135,11 @@ export default function Dashboard() {
 
       {/* PROJECT HISTORY SIDEBAR */}
       <aside
-        className={`flex flex-col bg-background border-r border-outline shrink-0 transition-[width] duration-200 ease-out ${historyCollapsed ? 'w-[68px]' : 'w-[248px]'}`}
+        id="project-sidebar"
+        className={`${mobileSidebarOpen ? 'mobile-open' : ''} hidden lg:flex lg:flex-col lg:bg-background lg:border-r lg:border-outline lg:shrink-0 lg:transition-[width] lg:duration-200 lg:ease-out ${historyCollapsed ? 'lg:w-[68px]' : 'lg:w-[248px]'}`}
       >
         <div className="p-3 flex items-center justify-between">
-          <div className={`flex items-center gap-2 overflow-hidden ${historyCollapsed ? 'w-0 opacity-0' : 'opacity-100'}`}>
+          <div className={`flex items-center gap-2 overflow-hidden ${collapsed ? 'w-0 opacity-0' : 'opacity-100'}`}>
             <div className="w-6.5 h-6.5 rounded-lg bg-primary flex items-center justify-center text-on-primary text-[10px] font-bold shrink-0">Ai</div>
             <span className="text-[13px] font-bold text-on-surface whitespace-nowrap">Agentic-AI</span>
           </div>
@@ -144,15 +154,15 @@ export default function Dashboard() {
 
         <div className="px-2">
           <button
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${historyCollapsed ? 'justify-center' : ''}`}
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${collapsed ? 'justify-center' : ''}`}
             title="New Project"
             onClick={() => setIsCreateModalOpen(true)}
           >
             <Plus className="w-4 h-4 shrink-0" />
-            {!historyCollapsed && <span>New Project</span>}
+            {expanded && <span>New Project</span>}
           </button>
           <button
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${historyCollapsed ? 'justify-center' : ''} ${
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${collapsed ? 'justify-center' : ''} ${
               isSearchOpen || projectSearchQuery
                 ? 'bg-primary/10 text-primary'
                 : 'text-on-surface-variant hover:bg-primary/10 hover:text-primary'
@@ -161,9 +171,9 @@ export default function Dashboard() {
             onClick={handleToggleProjectSearch}
           >
             <Search className="w-4 h-4 shrink-0" />
-            {!historyCollapsed && <span>Search Projects</span>}
+            {expanded && <span>Search Projects</span>}
           </button>
-          {isSearchOpen && !historyCollapsed && (
+          {isSearchOpen && expanded && (
             <div className="relative flex items-center mt-1">
               <Search className="absolute left-2.5 w-3.5 h-3.5 text-on-surface-variant pointer-events-none" />
               <input
@@ -196,17 +206,17 @@ export default function Dashboard() {
           )}
         </div>
 
-        {!historyCollapsed && (
+        {expanded && (
           <div className="px-4 pt-4 pb-1.5 text-[11px] font-bold tracking-wide uppercase text-on-surface-variant/70">
             Recent Projects
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
-          {projects.length === 0 && !historyCollapsed && (
+          {projects.length === 0 && expanded && (
             <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">No projects yet</div>
           )}
-          {projects.length > 0 && visibleProjects.length === 0 && !historyCollapsed && (
+          {projects.length > 0 && visibleProjects.length === 0 && expanded && (
             <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">
               No projects or messages matching &quot;{projectSearchQuery.trim()}&quot;
             </div>
@@ -249,7 +259,7 @@ export default function Dashboard() {
                       e.preventDefault();
                       setProjectContextMenu({ projectId: p.id, x: e.clientX, y: e.clientY });
                     }}
-                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] mb-0.5 transition-colors truncate ${historyCollapsed ? 'justify-center' : ''} ${
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] mb-0.5 transition-colors truncate ${collapsed ? 'justify-center' : ''} ${
                       isActive ? 'bg-primary/10 text-primary font-semibold' : 'text-on-surface hover:bg-surface'
                     }`}
                     title={p.name}
@@ -260,9 +270,9 @@ export default function Dashboard() {
                         <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-primary rounded-full border-2 border-background"></span>
                       )}
                     </div>
-                    {!historyCollapsed && (
+                    {expanded && (
                       <>
-                        <span className="truncate flex-1 text-left">{p.name}</span>
+                        <span className="truncate flex-1 text-left">{highlightMatch(p.name, projectSearchQuery)}</span>
                         <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 shrink-0">
                           <button
                             onClick={(e) => {
@@ -301,6 +311,14 @@ export default function Dashboard() {
                       </>
                     )}
                   </button>
+                )}
+                {expanded && renameProjectId !== p.id && p.match_snippet && (
+                  <div className="mt-1 px-2.5 flex items-center gap-1.5 text-[11px] leading-snug text-on-surface-variant min-w-0">
+                    <MessageSquare className="w-3 h-3 shrink-0 text-on-surface-variant/70" />
+                    <span className="truncate flex-1 text-left">
+                      {highlightMatch(p.match_snippet, projectSearchQuery)}
+                    </span>
+                  </div>
                 )}
               </div>
             );
@@ -362,8 +380,27 @@ export default function Dashboard() {
           </div>
         )}
       </aside>
-{/* HORIZONTAL SPLIT GRID WORKSPACE */}
-      <div className="flex-1 flex overflow-hidden" ref={splitContainerRef}>
+      {/* MOBILE SIDEBAR DRAWER (below `lg`): hamburger toggle + dimmed backdrop.
+          The sidebar itself is re-positioned as an overlay by #project-sidebar.mobile-open. */}
+      <button
+        type="button"
+        className={`fixed ${mobileSidebarOpen ? 'left-[292px]' : 'left-3'} top-[76px] z-30 w-9 h-9 rounded-xl bg-white border border-outline shadow-md flex items-center justify-center text-on-surface hover:bg-primary/10 hover:text-primary transition-colors lg:hidden`}
+        onClick={() => setMobileSidebarOpen((v) => !v)}
+        aria-label={mobileSidebarOpen ? 'Close project sidebar' : 'Open project sidebar'}
+        title={mobileSidebarOpen ? 'Close sidebar' : 'Projects'}
+      >
+        {mobileSidebarOpen ? <XCircle className="w-4.5 h-4.5" /> : <Menu className="w-4.5 h-4.5" />}
+      </button>
+      {mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-20 bg-black/40 lg:hidden"
+          onClick={() => setMobileSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* HORIZONTAL SPLIT GRID WORKSPACE */}
+      <div id="split-container" className="flex-1 flex flex-col lg:flex-row overflow-hidden" ref={splitContainerRef}>
         
         {/* LEFT PANEL: Conversational Timeline & Human-In-The-Loop */}
         <ChatPanel state={state} />
@@ -375,9 +412,9 @@ export default function Dashboard() {
         />
 
         {/* RIGHT PANEL: Live Workspace Previews (Tabbed System) */}
-        <section className="flex-1 flex flex-col bg-background relative overflow-hidden">
+        <section className="flex-1 min-w-0 min-h-0 flex flex-col bg-background relative overflow-hidden">
           {/* Tabs bar */}
-          <div className="h-13 bg-glass-bg border-b border-outline flex items-center px-6 justify-between shrink-0 select-none">
+          <div className="min-h-13 bg-glass-bg border-b border-outline flex flex-wrap items-center px-4 md:px-6 justify-between gap-2 shrink-0 select-none">
             <div className="flex bg-black/5 rounded-full p-1 h-9.5 border border-black/5">
               <button 
                 onClick={() => setActiveTab('prd')}
@@ -388,7 +425,7 @@ export default function Dashboard() {
                 }`}
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span>PRD Document</span>
+                <span className="hidden sm:inline">PRD Document</span>
               </button>
               
               <button 
@@ -400,7 +437,7 @@ export default function Dashboard() {
                 }`}
               >
                 <Network className="w-3.5 h-3.5" />
-                <span>Architecture Flows</span>
+                <span className="hidden sm:inline">Architecture Flows</span>
               </button>
               
               <button 
@@ -412,7 +449,7 @@ export default function Dashboard() {
                 }`}
               >
                 <Clock className="w-3.5 h-3.5" />
-                <span>Versions & Docs</span>
+                <span className="hidden sm:inline">Versions & Docs</span>
               </button>
             </div>
 
@@ -423,7 +460,7 @@ export default function Dashboard() {
                 className="px-3 py-1.5 rounded-xl bg-white border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface transition-all flex items-center gap-1.5 cursor-pointer font-semibold shadow-sm whitespace-nowrap"
               >
                 <Download className="w-3.5 h-3.5 text-primary" />
-                <span>Export Word (DOCX)</span>
+                <span className="hidden md:inline">Export Word (DOCX)</span>
               </button>
 
               <button 
@@ -431,13 +468,13 @@ export default function Dashboard() {
                 className="px-3 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary/15 animate-none whitespace-nowrap"
               >
                 <Printer className="w-3.5 h-3.5" />
-                <span>Export PDF</span>
+                <span className="hidden md:inline">Export PDF</span>
               </button>
             </div>
           </div>
 
           {/* RIGHT VIEW WINDOW */}
-          <div id="printable-document" className="flex-1 overflow-y-auto p-8 md:p-12 custom-scrollbar">
+          <div id="printable-document" className="flex-1 min-w-0 overflow-y-auto p-4 md:p-8 lg:p-12 custom-scrollbar">
 {/* Confirmation Panel Area */}
             {pendingActions.map(action => (
                 <ConfirmationPanel 

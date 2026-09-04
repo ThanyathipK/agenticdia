@@ -19,6 +19,7 @@ from app.repositories.epic import EpicRepository
 from app.repositories.event_log import ArtifactEventLogRepository
 from app.repositories.pending_action import PendingActionRepository
 from app.repositories.prd import PRDDocumentRepository, PRDVersionRepository
+from app.repositories.prd_section import PRDSectionRepository, PRDSectionVersionRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.requirement import RequirementRepository
 from app.repositories.requirement_state import RequirementStateRepository
@@ -35,6 +36,8 @@ __all__ = [
     "AuditResultRepository",
     "PRDDocumentRepository",
     "PRDVersionRepository",
+    "PRDSectionRepository",
+    "PRDSectionVersionRepository",
     "VersionHistoryRepository",
     "RequirementStateRepository",
     "ConversationMessageRepository",

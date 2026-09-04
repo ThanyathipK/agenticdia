@@ -200,6 +200,72 @@ class PRDVersionModel(Base):
     generated_by = Column(String(100), nullable=False, default="automated_agent")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+
+class PRDSectionModel(Base):
+    """
+    One editable, lockable, versioned PART of the project's PRD document.
+
+    The PRD is no longer only a single ``markdown_content`` blob: each part
+    (cover, stakeholders, version history, reviews, contents, business
+    overview, product scope, tech ops, appendix) lives in its own row so it
+    can be edited part-by-part in the preview, locked individually, and
+    excluded from AI regeneration.
+
+    ``content`` stores the CURRENT markdown fragment of the section (heading
+    line included, matching the frontend ``parsePRDToSections`` output). The
+    full document is assembled by stitching rows in ``section_order``.
+
+    Lock columns follow the exact same pattern as every other artifact table
+    so ``LockService`` can manage ``prd_section`` generically.
+    """
+    __tablename__ = "prd_sections"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    section_key = Column(String(100), nullable=False)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False, default="")
+    section_order = Column(Integer, nullable=False, default=0)
+    # Who owns the content: 'template' | 'ai' | 'human'
+    content_source = Column(String(20), nullable=False, default="ai", server_default="ai")
+    # When False the Architect agent NEVER regenerates this section.
+    ai_generatable = Column(Boolean, nullable=False, default=True)
+    # 'draft' | 'satisfied' | 'approved' — the "user satisfies it" gate.
+    review_status = Column(String(30), nullable=False, default="draft", server_default="draft")
+    is_locked = Column(Boolean, nullable=False, default=False)
+    locked_by = Column(String(100), nullable=True)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    lock_reason = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "section_key", name="uq_prd_sections_project_key"),
+    )
+
+
+class PRDSectionVersionModel(Base):
+    """
+    Append-only per-section version history. A new row is inserted on EVERY
+    content change (manual edit, revert, or an AI regeneration that actually
+    changed the content) — the current text is materialized on
+    ``prd_sections.content`` for fast reads, but it is never modified without
+    a corresponding history row here. Nothing is ever overwritten or deleted.
+    """
+    __tablename__ = "prd_section_versions"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    section_id = Column(GUID, ForeignKey("prd_sections.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    changed_by = Column(String(100), nullable=False, default="user", server_default="user")
+    change_summary = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("section_id", "version_number", name="uq_prd_section_versions_section_version"),
+    )
+
 class VersionHistoryModel(Base):
     __tablename__ = "version_history"
     

@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
@@ -9,6 +10,19 @@ logger = logging.getLogger("app.database")
 
 # Declarative base class for SQLAlchemy database models
 Base = declarative_base()
+
+
+def _mask_db_url(url: str) -> str:
+    """Credentials-safe rendering of the database URL for startup logs.
+
+    Keeps the host/port/database so operators can immediately tell WHICH
+    database the engine is pointed at (Supabase vs local SQLite fallback)
+    without ever exposing the username/password.
+    """
+    if url.startswith("sqlite"):
+        return url
+    return re.sub(r"//[^@/?]+@", "//<credentials>@", url)
+
 
 # Async connection engine optimized for Supabase Cloud postgres connectivity
 # Transaction pooler (port 6543) handles connection pooling at infrastructure level
@@ -43,7 +57,10 @@ try:
         db_url,
         **engine_kwargs
     )
-    logger.info(f"Async SQLAlchemy Database Engine initialized successfully (SQLite={is_sqlite}, Pooler mode).")
+    logger.info(
+        f"Async SQLAlchemy Database Engine initialized successfully "
+        f"(SQLite={is_sqlite}, Pooler mode). Target -> {_mask_db_url(db_url)}"
+    )
 except Exception as e:
     logger.error(f"Critical error initializing Database Engine: {str(e)}")
     raise e

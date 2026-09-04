@@ -70,6 +70,16 @@ export interface PRDSection {
   content: string;
 }
 
+/** Per-part PRD section lock/ownership state mirrored from the backend. */
+export interface PrdSectionLockState {
+  is_locked: boolean;
+  locked_by?: string | null;
+  review_status: string;
+  content_source: string;
+  ai_generatable: boolean;
+  version_number?: number | null;
+}
+
 // Optimistic lock state tracked in the UI for generic artifacts.
 export interface ArtifactLockState {
   is_locked: boolean;

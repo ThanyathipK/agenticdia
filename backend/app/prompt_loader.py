@@ -8,14 +8,59 @@ logger = logging.getLogger("app.prompt_loader")
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", str(BASE_DIR / "prompts")))
 
+# ----------------------------------------------------------------------------
+# mtime-aware prompt cache
+# ----------------------------------------------------------------------------
+# `load_prompt` sits on the hottest path of the backend: every workflow step
+# (router / intent / semantic / matcher / gatherer / architect / auditor) reads
+# its prompt via this function, so a single user message previously triggered
+# 5+ blocking open()/read() calls directly on the asyncio event loop (plus one
+# INFO log line each). The cache below keeps the documented "prompts are loaded
+# dynamically" behaviour — editing a .md file takes effect on the NEXT call,
+# no restart needed — while serving repeat reads from memory. Invalidation is
+# keyed on (size, mtime_ns) so it costs one cheap stat() per call instead of a
+# full file read.
+_PROMPT_CACHE: dict[str, tuple[int, int, str]] = {}
+
+
+def clear_prompt_cache() -> None:
+    """Drop all cached prompt contents (exposed for tests and hot reload)."""
+    _PROMPT_CACHE.clear()
+
+
+def _read_prompt_cached(filepath: Path, cache_key: str) -> str:
+    """Read ``filepath`` through the mtime-aware cache and return its text."""
+    stat = filepath.stat()
+    fingerprint = (stat.st_size, stat.st_mtime_ns)
+    cached = _PROMPT_CACHE.get(cache_key)
+    if cached is not None and (cached[0], cached[1]) == fingerprint:
+        return cached[2]
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    _PROMPT_CACHE[cache_key] = (stat.st_size, stat.st_mtime_ns, content)
+    action = "Loaded" if cached is None else "Reloaded"
+    logger.info(
+        "%s prompt '%s' from %s (%d chars)",
+        action,
+        cache_key,
+        filepath,
+        len(content),
+    )
+    return content
+
+
 def load_prompt(prompt_name: str) -> str:
     """
     Dynamically loads prompt template text from a markdown file in the prompts directory.
     E.g. load_prompt("gatherer") -> reads prompts/gatherer.md
+
+    Contents are cached in memory and refreshed automatically when the file's
+    size or mtime changes, so prompt edits still apply without a restart.
     """
     filename = f"{prompt_name}.md" if not prompt_name.endswith(".md") else prompt_name
     filepath = PROMPTS_DIR / filename
-    
+
     if not filepath.exists():
         # Fallback check in app/prompts
         alt_path = Path(__file__).resolve().parent / "prompts" / filename
@@ -25,15 +70,12 @@ def load_prompt(prompt_name: str) -> str:
     if not filepath.exists():
         logger.error(f"Prompt file not found at: {filepath}")
         raise FileNotFoundError(f"Prompt file '{filename}' not found in prompts directory '{PROMPTS_DIR}'.")
-        
+
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-            logger.info(f"Dynamically loaded prompt '{prompt_name}' from {filepath} ({len(content)} chars)")
-            return content
-    except Exception as e:
+        return _read_prompt_cached(filepath, prompt_name)
+    except OSError as e:
         logger.error(f"Failed to read prompt file {filepath}: {str(e)}")
-        raise e
+        raise
 
 
 class _PromptProxy:

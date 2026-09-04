@@ -99,6 +99,63 @@ body.is-resizing {
   user-select: none;
 }
 
+/* Responsive / narrow-window layout.
+   Below the `lg` breakpoint (1024px) the chat panel stacks above the PRD workspace
+   instead of sitting side-by-side, so nothing gets squashed on smaller windows. */
+@media (max-width: 1023px) {
+  #split-container {
+    flex-direction: column;
+  }
+
+  /* Project sidebar becomes an off-canvas overlay drawer below `lg`.
+     Hidden by default (`hidden lg:flex`), revealed via .mobile-open. */
+  #project-sidebar {
+    display: none;
+  }
+
+  #project-sidebar.mobile-open {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 64px;
+    bottom: 0;
+    left: 0;
+    width: 280px;
+    z-index: 25;
+    background: var(--color-background);
+    border-right: 1px solid var(--color-outline);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+    overflow-y: auto;
+  }
+
+  /* Override the drag-resize flex-basis (inline style) so chat becomes full-width
+     on a stacked layout. `flex-basis` becomes the main-axis (height) in a column
+     flex container, so we reset it to auto and cap it so the PRD stays visible. */
+  .chat-panel {
+    flex-basis: auto !important;
+    flex-grow: 0 !important;
+    flex-shrink: 1 !important;
+    width: 100% !important;
+    max-height: 70vh;
+  }
+
+  .resize-divider {
+    display: none;
+  }
+}
+
+/* Very small screens (< ~480px): tighten the chat panel even further so the
+   action buttons and input stay usable instead of spilling over. */
+@media (max-width: 479px) {
+  #split-container {
+    flex-direction: column;
+  }
+
+  .chat-panel {
+    max-height: 55vh;
+  }
+}
+
 @media print {
   /* Hide all interactive and layout items that are not part of the printed content */
   header,

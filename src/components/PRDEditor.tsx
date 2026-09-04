@@ -15,10 +15,8 @@ export function PRDEditor({ state }: { state: ProjectState }) {
     editBuffer,
     setEditBuffer,
     handleSaveSection,
-    structuredRequirements,
-    lockedRequirements,
-    handleLockRequirement,
-    handleUnlockRequirement,
+    sectionLocks,
+    handleToggleSectionLock,
   } = state;
 
   return (
@@ -59,45 +57,74 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                     </h3>
                     
                     <div className="flex items-center gap-2">
-                      {/* Lock/Unlock button for this section */}
-                      {section.id === 'user_stories' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (
-                        <button
-                          onClick={() => {
-                            const req = structuredRequirements.requirements![0];
-                            const isLocked = req.is_locked || lockedRequirements[req.requirement_code]?.is_locked;
-                            if (isLocked) {
-                              handleUnlockRequirement(req.requirement_code);
-                            } else {
-                              handleLockRequirement(req.requirement_code);
+                      {/* Per-part ownership + review badges */}
+                      {(() => {
+                        const lock = sectionLocks[section.id];
+                        if (!lock) return null;
+                        const sourceLabel =
+                          lock.content_source === 'human' ? 'Manual'
+                          : lock.content_source === 'template' ? 'Template'
+                          : 'AI';
+                        const sourceClass =
+                          lock.content_source === 'human' ? 'bg-violet-100 text-violet-700 border-violet-200'
+                          : lock.content_source === 'template' ? 'bg-slate-100 text-slate-600 border-slate-200'
+                          : 'bg-sky-100 text-sky-700 border-sky-200';
+                        const satisfied = lock.review_status === 'satisfied' || lock.review_status === 'approved';
+                        return (
+                          <>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase tracking-wide ${sourceClass}`}>
+                              {sourceLabel}
+                            </span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase tracking-wide ${
+                              satisfied
+                                ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                                : 'bg-slate-100 text-slate-500 border-slate-200'
+                            }`}>
+                              {satisfied ? 'Satisfied' : 'Draft'}
+                            </span>
+                          </>
+                        );
+                      })()}
+
+                      {/* Lock/Unlock button for this part */}
+                      {(() => {
+                        const isLocked = sectionLocks[section.id]?.is_locked ?? false;
+                        return (
+                          <button
+                            onClick={() => handleToggleSectionLock(section.id)}
+                            title={
+                              isLocked
+                                ? 'This part is locked — edits and AI regeneration are blocked.'
+                                : 'Lock this part — the Architect will never overwrite it again.'
                             }
-                          }}
-                          className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border shadow-sm cursor-pointer z-10 font-semibold ${
-                            (structuredRequirements.requirements![0].is_locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.is_locked)
-                              ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
-                              : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
-                          }`}
-                        >
-                          {(structuredRequirements.requirements![0].is_locked || lockedRequirements[structuredRequirements.requirements![0].requirement_code]?.is_locked) ? (
-                            <>
-                              <Unlock className="w-3.5 h-3.5 text-amber-700" />
-                              <span>Unlock</span>
-                            </>
-                          ) : (
-                            <>
-                              <Lock className="w-3.5 h-3.5 text-primary" />
-                              <span>Lock</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-                      
+                            className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border shadow-sm cursor-pointer z-10 font-semibold ${
+                              isLocked
+                                ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                                : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                            }`}
+                          >
+                            {isLocked ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5 text-amber-700" />
+                                <span>Unlock</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5 text-primary" />
+                                <span>Lock</span>
+                              </>
+                            )}
+                          </button>
+                        );
+                      })()}
+
                       {!isEditing && (
                         <button
                           onClick={() => {
                             setEditingSectionId(section.id);
                             setEditBuffer(safeContent);
                           }}
-                          disabled={section.id === 'user_stories' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (structuredRequirements.requirements[0].is_locked || lockedRequirements[structuredRequirements.requirements[0].requirement_code]?.is_locked)}
+                          disabled={sectionLocks[section.id]?.is_locked ?? false}
                           className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold disabled:opacity-30 disabled:cursor-not-allowed`}
                         >
                           <Pencil className="w-3.5 h-3.5 text-primary" />
@@ -126,7 +153,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                       />
                       <div className="flex items-center justify-between pt-3 border-t border-slate-100 mt-2">
                         <p className="text-[11px] text-slate-500 italic">
-                          Changes save instantly to RequirementState.
+                          Saved & versioned per part — lock an approved part and the Architect will never overwrite it.
                         </p>
                         <div className="flex items-center gap-2">
                           <button

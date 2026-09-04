@@ -21,6 +21,7 @@ import type {
   AuditResult,
   ChatMessage,
   PRDSection,
+  PrdSectionLockState,
   RequirementLockState,
   StructuredRequirements,
   VersionHistory,
@@ -130,6 +131,10 @@ export interface ProjectState {
   lockedRequirements: Record<string, RequirementLockState>;
   handleLockRequirement: (requirementCode: string) => Promise<void>;
   handleUnlockRequirement: (requirementCode: string) => Promise<void>;
+  /** Per-part PRD section lock/ownership metadata (the 9 preview parts). */
+  sectionLocks: Record<string, PrdSectionLockState>;
+  /** Lock/unlock ONE PRD part — blocks edits + AI regeneration when locked. */
+  handleToggleSectionLock: (sectionId: string) => Promise<void>;
 
   // Tabs / flows / history (document library lives inside the history tab)
   activeTab: WorkspaceTab;
@@ -302,6 +307,8 @@ export function useProjectState(): ProjectState {
     lockedRequirements: locks.lockedRequirements,
     handleLockRequirement: locks.handleLockRequirement,
     handleUnlockRequirement: locks.handleUnlockRequirement,
+    sectionLocks: store.sectionLocks,
+    handleToggleSectionLock: store.handleToggleSectionLock,
     activeTab: ui.activeTab,
     setActiveTab: ui.setActiveTab,
     mermaidDiagram: store.mermaidDiagram,

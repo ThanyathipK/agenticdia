@@ -16,7 +16,8 @@ from app.models import (
     AcceptanceCriteriaModel,
     ClarificationQuestionModel,
     AuditResultModel,
-    PRDDocumentModel
+    PRDDocumentModel,
+    PRDSectionModel
 )
 
 logger = logging.getLogger("app.lock_service")
@@ -97,6 +98,14 @@ class LockService:
             "locked_at_field": "locked_at",
             "lock_reason_field": "lock_reason",
         },
+        "prd_section": {
+            "model": PRDSectionModel,
+            "id_field": "id",
+            "lock_field": "is_locked",
+            "locked_by_field": "locked_by",
+            "locked_at_field": "locked_at",
+            "lock_reason_field": "lock_reason",
+        },
     }
 
     @staticmethod
@@ -116,7 +125,7 @@ class LockService:
             if artifact_type == "project":
                 return str(getattr(artifact, "id"))
 
-            elif artifact_type in ("epic", "requirement", "user_story", "prd_document"):
+            elif artifact_type in ("epic", "requirement", "user_story", "prd_document", "prd_section"):
                 pid = getattr(artifact, "project_id", None)
                 return str(pid) if pid is not None else None
 

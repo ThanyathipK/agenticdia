@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYSTEM_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 
+def _make_snippet(message: str, query: str, window: int = 60) -> str:
+    """Build a compact excerpt of a conversation message centered on the first
+    case-insensitive occurrence of ``query``.
+
+    The snippet is bounded so the sidebar row stays short; an ellipsis marks the
+    trimmed edges. Returns an empty string when there is nothing meaningful to
+    show (no message text or no occurrence), in which case callers skip the
+    ``match_snippet`` field entirely.
+    """
+    text = (message or "").strip()
+    needle = query.strip().lower()
+    if not text or not needle:
+        return ""
+    lower = text.lower()
+    idx = lower.find(needle)
+    if idx == -1:
+        return text[:160].rstrip() + ("…" if len(text) > 160 else "")
+    start = max(0, idx - window)
+    end = min(len(text), idx + len(needle) + window * 2)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
 class ProjectRepository:
     """Handles project-level operations."""
 
@@ -41,7 +65,9 @@ class ProjectRepository:
         A project is returned when its name contains ``query`` (case-insensitive)
         or when at least one of its conversation messages contains ``query``
         (case-insensitive). Results use the same pinned-first ordering as
-        :meth:`list_all`.
+        :meth:`list_all`. When a project matched purely via message content, a
+        ``match_snippet`` excerpt centered on ``query`` is attached so the UI can
+        show *why* the project matched.
 
         Args:
             session: Active asynchronous database session.
@@ -51,19 +77,36 @@ class ProjectRepository:
             List[Dict[str, Any]]: Matching project summary records.
         """
         pattern = f"%{query.strip()}%"
+        msg_col = ConversationMessageModel.message
         stmt = (
-            select(ProjectModel)
+            select(ProjectModel, msg_col)
             .outerjoin(ConversationMessageModel, ConversationMessageModel.project_id == ProjectModel.id)
             .where(or_(
                 ProjectModel.name.ilike(pattern),
-                ConversationMessageModel.message.ilike(pattern),
+                msg_col.ilike(pattern),
             ))
-            .distinct()
         )
-        result = await session.execute(stmt)
-        projects = list(result.scalars().all())
+        rows = (await session.execute(stmt)).all()
+
+        # De-duplicate by project while capturing one snippet per project from
+        # the first matching message (replaces the old ``.distinct()``).
+        project_by_id: Dict[str, ProjectModel] = {}
+        snippets: Dict[str, str] = {}
+        for proj, message in rows:
+            key = str(proj.id)
+            if key not in project_by_id:
+                project_by_id[key] = proj
+            if message and key not in snippets:
+                snippet = _make_snippet(message, query)
+                if snippet:
+                    snippets[key] = snippet
+
+        projects = list(project_by_id.values())
         ProjectRepository._sort_projects(projects)
-        return [serialize_project(p) for p in projects]
+        return [
+            serialize_project(p, match_snippet=snippets.get(str(p.id)))
+            for p in projects
+        ]
 
     @staticmethod
     async def create_project(project_data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:

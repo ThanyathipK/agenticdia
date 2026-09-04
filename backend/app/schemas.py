@@ -221,6 +221,11 @@ class ProjectSummary(BaseModel):
     description: Optional[str] = Field(None, description="Optional functional-scope description.")
     industry_standard: str = Field(..., description="Target compliance guideline standard.")
     is_pinned: bool = Field(False, description="True when the project/chat is pinned to the top of the sidebar.")
+    match_snippet: Optional[str] = Field(
+        None,
+        description="Short excerpt of a conversation message (if the project matched via "
+                    "message content) centered on the search term, for sidebar highlighting.",
+    )
 
 
 class ProjectCreated(BaseModel):
@@ -610,3 +615,71 @@ class DocumentProcessResponse(BaseModel):
     excluded_anything: bool = Field(False, description="True when any content was left out of extraction (never silently).")
     message: str = Field("", description="Human-readable summary including which mode ran and chunk count.")
     document_id: str = Field(..., description="Source document UUID string.")
+
+
+# ==========================================
+# 10. PRD SECTION SCHEMAS (part-level PRD editing / locking / versioning)
+# ==========================================
+
+class PrdSectionUpdate(BaseModel):
+    """Request body for editing ONE PRD section (part-by-part editing)."""
+    content: str = Field(..., description="Full markdown content for this section (heading line included).")
+    review_status: Optional[str] = Field(
+        None, description="Optional new review status: 'draft' | 'satisfied' | 'approved'."
+    )
+    updated_by: str = Field("user", description="Identifier of who is editing the section.")
+    change_summary: Optional[str] = Field(None, description="Optional human-readable change note stored with the version.")
+
+
+class PrdSectionResponse(BaseModel):
+    """One editable, lockable, versioned PART of a project's PRD."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Section UUID string.")
+    project_id: str = Field(..., description="Owning project UUID string.")
+    section_key: str = Field(..., description="Stable key matching the preview part ('title', 'stakeholders', ...).")
+    title: str = Field(..., description="Display title of the part.")
+    content: str = Field(..., description="Current markdown content of the part (heading included).")
+    section_order: int = Field(..., description="Document order used when stitching parts back together.")
+    content_source: str = Field("ai", description="'template' | 'ai' | 'human' — who owns the content.")
+    ai_generatable: bool = Field(True, description="False => the Architect agent never regenerates this part.")
+    review_status: str = Field("draft", description="'draft' | 'satisfied' | 'approved'.")
+    is_locked: bool = Field(False, description="When True, edits AND AI regeneration are blocked.")
+    locked_by: Optional[str] = Field(None, description="Who locked the part.")
+    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Optional lock reason.")
+    version_number: Optional[int] = Field(None, description="Latest version number in prd_section_versions.")
+    created_at: str = Field("", description="ISO8601 creation timestamp.")
+    updated_at: str = Field("", description="ISO8601 last-update timestamp.")
+
+
+class PrdSectionListResponse(BaseModel):
+    """All PRD parts of a project, in document order."""
+    project_id: str = Field(..., description="Owning project UUID string.")
+    sections: List[PrdSectionResponse] = Field(default_factory=list, description="Ordered PRD parts.")
+
+
+class PrdSectionUpdateResponse(BaseModel):
+    """Result of a part-level edit: the saved part plus the re-assembled document."""
+    section: PrdSectionResponse = Field(..., description="The saved PRD part.")
+    document_markdown: str = Field(..., description="Full PRD markdown stitched from ALL parts after the edit.")
+
+
+class PrdSectionVersionResponse(BaseModel):
+    """One immutable version of a PRD part (append-only history)."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Version row UUID string.")
+    section_id: str = Field(..., description="Owning PRD section UUID string.")
+    version_number: int = Field(..., description="Monotonic per-section version number.")
+    content: str = Field(..., description="Snapshot of the section content at this version.")
+    changed_by: str = Field("user", description="'user' | 'automated_agent' | 'system'.")
+    change_summary: Optional[str] = Field(None, description="Human-readable change note.")
+    created_at: str = Field("", description="ISO8601 creation timestamp.")
+
+
+class PrdSectionRevertResponse(BaseModel):
+    """Result of restoring an old version of a PRD part (stored as a NEW version)."""
+    section: PrdSectionResponse = Field(..., description="The PRD part after the revert.")
+    document_markdown: str = Field(..., description="Full PRD markdown stitched from ALL parts after the revert.")
+    restored_from_version: int = Field(..., description="Version number the content was restored from.")

@@ -21,6 +21,8 @@ from app.models import (
     EpicModel,
     PendingActionModel,
     PRDDocumentModel,
+    PRDSectionModel,
+    PRDSectionVersionModel,
     PRDVersionModel,
     ProjectModel,
     RequirementModel,
@@ -49,15 +51,23 @@ def dt_iso_or_none(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
 
 
-def serialize_project(p: ProjectModel) -> Dict[str, Any]:
-    """Serialize a ProjectModel into its public dict representation."""
-    return {
+def serialize_project(p: ProjectModel, *, match_snippet: Optional[str] = None) -> Dict[str, Any]:
+    """Serialize a ProjectModel into its public dict representation.
+
+    ``match_snippet`` (an excerpt of a conversation message that caused the
+    project to match a sidebar search) is only emitted when provided, so the
+    ordinary list/detail payloads stay unchanged.
+    """
+    data = {
         "id": str(p.id),
         "name": p.name,
         "description": p.description,
         "industry_standard": p.industry_standard,
         "is_pinned": bool(p.is_pinned) if p.is_pinned is not None else False,
     }
+    if match_snippet:
+        data["match_snippet"] = match_snippet
+    return data
 
 
 def serialize_epic(epic: EpicModel, *, with_status: bool = False) -> Dict[str, Any]:
@@ -198,6 +208,47 @@ def serialize_prd_version(v: PRDVersionModel) -> Dict[str, Any]:
         "generated_prd": v.generated_prd,
         "generated_diagram": v.generated_diagram,
         "generated_by": v.generated_by,
+        "created_at": dt_iso(v.created_at),
+    }
+
+
+def serialize_prd_section(s: PRDSectionModel, *, current_version: Optional[int] = None) -> Dict[str, Any]:
+    """Serialize a PRDSectionModel into its public dict representation.
+
+    ``current_version`` is the latest ``prd_section_versions.version_number``
+    for this section (attached by the repository when known).
+    """
+    data = {
+        "id": str(s.id),
+        "project_id": str(s.project_id),
+        "section_key": s.section_key,
+        "title": s.title,
+        "content": s.content,
+        "section_order": s.section_order,
+        "content_source": s.content_source,
+        "ai_generatable": bool(s.ai_generatable),
+        "review_status": s.review_status,
+        "is_locked": bool(s.is_locked) if s.is_locked is not None else False,
+        "locked_by": s.locked_by,
+        "locked_at": dt_iso_or_none(s.locked_at),
+        "lock_reason": s.lock_reason,
+        "created_at": dt_iso(s.created_at),
+        "updated_at": dt_iso(s.updated_at),
+    }
+    if current_version is not None:
+        data["version_number"] = current_version
+    return data
+
+
+def serialize_prd_section_version(v: PRDSectionVersionModel) -> Dict[str, Any]:
+    """Serialize a PRDSectionVersionModel into its public dict representation."""
+    return {
+        "id": str(v.id),
+        "section_id": str(v.section_id),
+        "version_number": v.version_number,
+        "content": v.content,
+        "changed_by": v.changed_by,
+        "change_summary": v.change_summary,
         "created_at": dt_iso(v.created_at),
     }
 

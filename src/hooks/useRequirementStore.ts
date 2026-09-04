@@ -15,6 +15,7 @@ import type {
   AuditResult,
   ChatMessage,
   PRDSection,
+  PrdSectionLockState,
   RequirementLockState,
   StructuredRequirements,
   VersionHistory,
@@ -150,6 +151,11 @@ export interface RequirementStore {
   // actions
   resetProjectState: () => void;
   handleSaveSection: (sectionId: string, newContent: string) => Promise<void>;
+  /** Fetch the per-part PRD section lock/ownership map from the backend. */
+  loadSectionLocks: (projId: string) => Promise<void>;
+  /** Lock/unlock ONE PRD part (blocks edits + AI regeneration when locked). */
+  handleToggleSectionLock: (sectionId: string) => Promise<void>;
+  sectionLocks: Record<string, PrdSectionLockState>;
 }
 
 // ----------------------------------------------------------------------------
@@ -173,6 +179,8 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     useState<Record<string, ArtifactLockState>>({});
   const [lockedRequirements, setLockedRequirements] =
     useState<Record<string, RequirementLockState>>({});
+  // Per-part PRD section lock/ownership state (mirrors prd_sections rows).
+  const [sectionLocks, setSectionLocks] = useState<Record<string, PrdSectionLockState>>({});
   const [syncStatus, setSyncStatus] = useState<string>('Synced with Local LLM');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -287,26 +295,108 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     );
     setSections(updatedSections);
 
-    // 2. Stitch back to a single prdMarkdown block
-    const stitchedMarkdown = stitchSectionsToPRD(updatedSections);
-    setPrdMarkdown(stitchedMarkdown);
-    // Manual edits are markdown, so the preview copy can take them directly.
-    setPrdMarkdownDisplay(stitchedMarkdown);
-
-    // 3. Save to backend database
+    // 2. Save THE PART to the backend (PATCH one section). The server appends
+    // an immutable section version, re-stitches the full document from all
+    // parts, and persists it. Falls back to the legacy whole-document save if
+    // the section endpoint is unavailable (older backend).
     if (projectId) {
-      setSyncStatus('Saving manual section edits...');
+      setSyncStatus('Saving section edit...');
       try {
-        await api.updateProjectState(projectId, { generated_prd: stitchedMarkdown });
-        setSyncStatus('Manual changes saved & synced.');
-      } catch (err) {
-        handleError('Failed to save manual edits to the database.', err);
-        setSyncStatus('Failed to sync manual changes with server.');
+        const res = await api.updatePrdSection(projectId, sectionId, newContent);
+        setPrdMarkdown(res.document_markdown);
+        setPrdMarkdownDisplay(res.document_markdown);
+        // Refresh per-part lock/version metadata (version_number advanced).
+        setSectionLocks(prev => ({
+          ...prev,
+          [sectionId]: {
+            ...(prev[sectionId] ?? {
+              review_status: 'draft',
+              content_source: 'ai',
+              ai_generatable: true,
+            }),
+            ...(res.section.is_locked !== undefined ? { is_locked: res.section.is_locked } : {}),
+            ...(res.section.review_status ? { review_status: res.section.review_status } : {}),
+            version_number: res.section.version_number ?? prev[sectionId]?.version_number ?? null,
+          },
+        }));
+        setSyncStatus('Section saved & versioned.');
+      } catch {
+        // Legacy fallback: stitch all sections and save the whole document.
+        try {
+          const stitchedMarkdown = stitchSectionsToPRD(updatedSections);
+          setPrdMarkdown(stitchedMarkdown);
+          setPrdMarkdownDisplay(stitchedMarkdown);
+          await api.updateProjectState(projectId, { generated_prd: stitchedMarkdown });
+          setSyncStatus('Manual changes saved & synced.');
+        } catch (err) {
+          handleError('Failed to save manual edits to the database.', err);
+          setSyncStatus('Failed to sync manual changes with server.');
+        }
       }
     }
 
-    // 4. Reset editing state
+    // 3. Reset editing state
     setEditingSectionId(null);
+  };
+
+  const loadSectionLocks = async (projId: string) => {
+    try {
+      const payload = await api.getPrdSections(projId);
+      const map: Record<string, PrdSectionLockState> = {};
+      for (const s of payload.sections) {
+        map[s.section_key] = {
+          is_locked: s.is_locked,
+          locked_by: s.locked_by,
+          review_status: s.review_status,
+          content_source: s.content_source,
+          ai_generatable: s.ai_generatable,
+          version_number: s.version_number ?? null,
+        };
+      }
+      setSectionLocks(map);
+    } catch {
+      // Cosmetic metadata — never block project loading on it.
+    }
+  };
+
+  const handleToggleSectionLock = async (sectionId: string) => {
+    if (!projectId) return;
+    const current = sectionLocks[sectionId];
+    const wasLocked = current?.is_locked ?? false;
+    // Optimistic update
+    setSectionLocks(prev => ({
+      ...prev,
+      [sectionId]: {
+        ...(prev[sectionId] ?? {
+          review_status: 'draft',
+          content_source: 'ai',
+          ai_generatable: true,
+        }),
+        is_locked: !wasLocked,
+        locked_by: wasLocked ? null : 'user',
+      },
+    }));
+    setSyncStatus(wasLocked ? 'Unlocking PRD part...' : 'Locking PRD part...');
+    try {
+      if (wasLocked) {
+        await api.unlockPrdSection(projectId, sectionId);
+        setSyncStatus('PRD part unlocked — AI can regenerate it again.');
+      } else {
+        await api.lockPrdSection(projectId, sectionId);
+        setSyncStatus('PRD part locked — protected from edits and AI regeneration.');
+      }
+    } catch (err) {
+      // Revert on failure
+      setSectionLocks(prev => ({
+        ...prev,
+        [sectionId]: { ...(prev[sectionId] as PrdSectionLockState), is_locked: wasLocked },
+      }));
+      handleError(
+        wasLocked ? 'Failed to unlock the PRD part.' : 'Failed to lock the PRD part.',
+        err,
+      );
+      setSyncStatus('Lock action failed.');
+    }
   };
 
   // Legacy helper (kept for parity): clears the requirement-engine domain state.
@@ -329,6 +419,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     setVersionHistory([]);
     setSyncStatus('Switched project. Loading...');
     setSections([]);
+    setSectionLocks({});
     setClarificationAnswers({});
   };
 
@@ -371,5 +462,8 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     setMessages,
     resetProjectState,
     handleSaveSection,
+    loadSectionLocks,
+    handleToggleSectionLock,
+    sectionLocks,
   };
 }

@@ -278,6 +278,63 @@ CREATE INDEX idx_prd_versions_project_id ON prd_versions(project_id);
 CREATE INDEX idx_prd_versions_version_number ON prd_versions(project_id, version_number);
 
 -- ==========================================
+-- 9c. PRD SECTIONS TABLE (PART-LEVEL PRD EDITING / LOCKING / VERSIONING)
+-- ==========================================
+-- The PRD as a COLLECTION of editable, lockable, versioned PARTS (the nine
+-- preview parts). section_key matches the frontend parsePRDToSections ids
+-- ('title', 'stakeholders', 'version_history', 'reviews', 'contents',
+-- 'business_overview', 'product_scope', 'tech_ops', 'appendix').
+-- content_source: 'template' | 'ai' | 'human' — who owns the content.
+-- ai_generatable FALSE => the Architect agent never regenerates the part.
+-- review_status: 'draft' | 'satisfied' | 'approved'.
+-- Lock columns follow the same pattern as every other artifact table.
+CREATE TABLE prd_sections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    section_key VARCHAR(100) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    section_order INT NOT NULL DEFAULT 0,
+    content_source VARCHAR(20) NOT NULL DEFAULT 'ai',
+    ai_generatable BOOLEAN NOT NULL DEFAULT TRUE,
+    review_status VARCHAR(30) NOT NULL DEFAULT 'draft',
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_prd_sections_project_key UNIQUE (project_id, section_key)
+);
+
+CREATE INDEX idx_prd_sections_project_id ON prd_sections(project_id);
+
+CREATE TRIGGER handle_updated_at_prd_sections
+    BEFORE UPDATE ON prd_sections
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+-- ==========================================
+-- 9d. PRD SECTION VERSIONS TABLE (APPEND-ONLY PER-PART HISTORY)
+-- ==========================================
+-- Immutable per-section version history. Every content change (manual edit,
+-- revert, or an AI regeneration that actually changed the content) inserts a
+-- new row. Nothing is ever overwritten or deleted. The current text is
+-- materialized on prd_sections.content for fast reads.
+CREATE TABLE prd_section_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    section_id UUID NOT NULL REFERENCES prd_sections(id) ON DELETE CASCADE,
+    version_number INT NOT NULL,
+    content TEXT NOT NULL,
+    changed_by VARCHAR(100) NOT NULL DEFAULT 'user',
+    change_summary TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_prd_section_versions_section_version UNIQUE (section_id, version_number)
+);
+
+CREATE INDEX idx_prd_section_versions_section_id ON prd_section_versions(section_id);
+
+-- ==========================================
 -- 10. CONVERSATION MESSAGES TABLE
 -- ==========================================
 -- Dedicated table for persisting every conversation message per project.

@@ -8,7 +8,7 @@
 
 </div>
 
-Agentic AI turns plain-English banking product briefs into **audited, versioned, engineering-ready requirements**. You describe a feature in the chat; a LangGraph workflow of specialist agents (Router, Matcher, Gatherer, Auditor, Architect) runs **fully locally** against a model served by [LM Studio](https://lmstudio.ai), then persists only the changes you confirm to a PostgreSQL database — with per-artifact locking along the way.
+Agentic AI turns plain-English banking product briefs into **audited, versioned, engineering-ready requirements**. You describe a feature in the chat — or upload an existing brief / BRD document (DOCX, PDF, Markdown, TXT) into the project's knowledge base; a LangGraph workflow of specialist agents (Router, Matcher, Gatherer, Auditor, Architect) runs **fully locally** against a model served by [LM Studio](https://lmstudio.ai), then persists only the changes you confirm to a PostgreSQL database — with per-artifact locking along the way.
 
 > [!IMPORTANT]
 > This project **does not** use Gemini or any cloud LLM API key. All inference happens 100% locally through LM Studio. There is **no** `.env.local` and no `GEMINI_API_KEY` setup — backend configuration lives in [`backend/.env`](backend/.env.example).
@@ -21,10 +21,14 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 - **Local-first inference** — OpenAI-compatible calls to `http://localhost:1234/v1`; no API keys, no cloud dependency
 - **7-point banking compliance audit** — the Auditor validates against a mandatory banking checklist and raises clarification questions when coverage is incomplete
 - **Automated PRD + Mermaid diagrams** — the Architect synthesizes a full Product Requirements Document and flow diagrams
+- **Document knowledge base & extraction** — upload DOCX / PDF / Markdown / TXT briefs (≤ `MAX_UPLOAD_MB`); they are converted to canonical markdown, then an explicit, user-triggered extraction feeds them through the Gatherer (one pass, or sequential chunks with overlap + SSE progress) into a **single staged pending action** — nothing is written until you confirm
+- **Server-side PRD export** — the generated LaTeX PRD (`template-krungsrinimble.tex`) downloads as **DOCX** (native `python-docx` renderer) and **PDF** (headless LibreOffice, with a Tectonic fallback), so PDF and Word output always match
 - **Version snapshot ledger** — every accepted state bump is an immutable, versioned PRD record with full history
 - **Human-in-the-loop** — LLM changes are staged as *pending actions*; you confirm or cancel before anything is written to the database
+- **Workflow Stop button** — an in-flight `process-requirements` run can be cancelled server-side (`POST /api/process-requirements/cancel`); partial work is discarded, never persisted
 - **Generic artifact locking** — lock/unlock projects, epics, requirements, user stories, acceptance criteria, clarification questions, and PRD documents; optimistic UI with automatic rollback
 - **Real-time updates** — Server-Sent Events push state changes to the dashboard instead of polling
+- **Rate limiting** — in-process sliding-window limiter guards the LLM-facing endpoints (chat, workflow, document extraction) with per-IP 429s (Finding #39)
 - **LM Studio health check & graceful degradation** — the backend probes the local gateway at startup and on every `/api/health` call; the chat header shows an **LLM Offline** pill when the local server is down (auto-refreshing, no restart needed) instead of failing with opaque 503s (Finding #40)
 - **In-app Postgres Schema Explorer** — DDL / table explorer rendered from the live [`backend/init.sql`](backend/init.sql)
 
@@ -44,7 +48,7 @@ flowchart LR
     end
 
     subgraph Backend["FastAPI — 127.0.0.1:8000"]
-        ROUTERS["REST routers · chat / projects<br/>requirements / lock / events"]
+        ROUTERS["REST routers · chat / projects<br/>requirements / documents / lock / events"]
         WF["LangGraph prd_workflow<br/>Router → Matcher → Gatherer<br/>on-demand: Auditor · Architect"]
         LOCKSRV["LockService"]
         ESM["EventManager<br/>(in-memory pub/sub)"]
@@ -81,8 +85,8 @@ flowchart LR
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | React 19 · TypeScript · Vite 6 · Tailwind CSS 4 · Motion · lucide-react · axios · docx |
-| Backend | Python 3.12+ (developed on 3.14) · FastAPI · uvicorn · SQLAlchemy 2 (async) · Alembic · Pydantic v2 |
+| Frontend | React 19 · TypeScript · Vite 6 · Tailwind CSS 4 · Motion · lucide-react · axios |
+| Backend | Python 3.12+ (developed on 3.14) · FastAPI · uvicorn · SQLAlchemy 2 (async) · Alembic · Pydantic v2 · python-docx / pypdf / mammoth (document ingestion) |
 | AI orchestration | LangGraph · LangChain · LangChain-OpenAI client (pointed at LM Studio) |
 | Inference | **LM Studio** — local OpenAI-compatible server (`http://localhost:1234/v1`), e.g. `qwen3.5-9b-instruct` |
 | Database | Supabase PostgreSQL (transaction pooler compatible) · SQLite fallback via `sqlite+aiosqlite:///app.db` |
@@ -93,26 +97,40 @@ flowchart LR
 ```
 agenticdia/
 ├── index.html                  # Vite entry HTML
-├── package.json                # npm scripts: dev / build / preview / lint / clean
+├── package.json                # npm scripts: dev / build / preview / lint / clean / schema:*
 ├── vite.config.ts              # React + Tailwind plugins, /api proxy → :8000
 ├── tsconfig.json
+├── scripts/
+│   └── parse_check.ts          # tsx harness inspecting the parsed init.sql DDL
 ├── src/
 │   ├── main.tsx                # React root
 │   ├── App.tsx                 # Agent workspace ↔ Schema Explorer shell
 │   ├── index.css
-│   ├── data.ts                 # Initial datasets + table schemas for Explorer
+│   ├── api/                    # Typed HTTP client (client.ts / types.ts / transforms.ts)
+│   ├── hooks/                  # useChat · useProjects · useProjectState · useProjectSync
+│   │                           # useRequirementStore · useDocuments · useArtifactLocks
+│   │                           # useLmStudioHealth · useWorkspaceUi
+│   ├── schema/                 # DDL parser + annotations for the Schema Explorer
+│   ├── utils/                  # markdown helpers
+│   ├── data.ts                 # TABLES derived from init.sql at build time (?raw import)
 │   └── components/
 │       ├── Dashboard.tsx       # Multi-agent requirements workspace (SSE, locks, PRD)
-│       ├── ConfirmationPanel.tsx
-│       └── Toast.tsx
+│       ├── ChatPanel.tsx       # Agent chat · LLM-health pill · Stop button
+│       ├── DocumentLibrary.tsx # Knowledge-base uploads + requirement extraction
+│       ├── PRDEditor.tsx       # LaTeX/markdown PRD editor + PDF/DOCX export
+│       ├── VersionHistory.tsx  # Immutable PRD version ledger
+│       ├── ConfirmationPanel.tsx / ConfirmModal.tsx / NewProjectModal.tsx
+│       ├── MarkdownRenderer.tsx / ArchitectureFlows.tsx / Toast.tsx
+│       └── schema/             # SchemaExplorer · DDLViewer · SnapshotLedger · AuditChecklist
 ├── backend/
 │   ├── .env.example            # ← copy to backend/.env
 │   ├── requirements.txt        # Python dependencies
 │   ├── alembic.ini
-│   ├── alembic/                # Versioned migrations (0001 initial, 0002 rename)
+│   ├── alembic/                # Migrations 0001 initial · 0002 locks rename · 0003 pinned · 0004 uploaded_documents
 │   ├── init.sql                # Full PostgreSQL DDL (drives the Schema Explorer)
+│   ├── check_schema_drift.py   # init.sql ↔ models.py ↔ src/data.ts drift harness
 │   ├── test_sse.py             # End-to-end SSE stream test
-│   ├── tests/                  # pytest unit tests (merge service, etc.)
+│   ├── tests/                  # pytest suite (documents, latex, prd filler, rate limit, …)
 │   └── app/
 │       ├── main.py             # FastAPI app, CORS, router registration, lifespan
 │       ├── config.py           # pydantic-settings (reads backend/.env)
@@ -120,17 +138,28 @@ agenticdia/
 │       ├── models.py           # SQLAlchemy ORM models
 │       ├── schemas.py          # Request/response Pydantic schemas
 │       ├── repository.py       # Data-access layer
+│       ├── repositories/       # Per-entity repositories (requirement_state, documents, …)
 │       ├── migrations.py       # Startup Alembic runner + default user seed
 │       ├── llm_client.py       # Direct LM Studio HTTP client (strict JSON mode)
+│       ├── llm_factory.py      # Shared LangChain ChatOpenAI factory (agents + services)
 │       ├── llm_utils.py        # Structured-output helpers
 │       ├── agents.py           # LangGraph nodes + compiled prd_workflow graph
 │       ├── semantic_service.py # Workflow router / intent / matcher agents
 │       ├── merge_service.py    # User story reconciliation (unit-testable core)
+│       ├── document_processor.py # Upload → markdown routing + extraction chunk planning
+│       ├── prd_filler.py       # LaTeX template filling for PRD export
+│       ├── latex_service.py    # LaTeX → PDF / DOCX conversion pipeline
+│       ├── latex_docx_native.py# Native python-docx LaTeX renderer
+│       ├── rate_limit.py       # In-process sliding-window limiter (Finding #39)
+│       ├── input_validation.py # MAX_CONTEXT_TOKENS budget guards (413 on oversized payloads)
+│       ├── workflow_cancellation.py # Server-side Stop support for the workflow
 │       ├── lock_service.py     # Generic artifact lock/unlock engine
 │       ├── event_manager.py    # In-memory SSE pub/sub
 │       ├── prompt_loader.py    # Loads prompts from app/prompts/*.md
-│       ├── prompts/            # gatherer / auditor / architect / router / matcher / ...
-│       └── routes/             # chat.py projects.py requirements.py lock.py events.py
+│       ├── prompts/            # gatherer / auditor / architect / router / matcher / …
+│       │                       # + template-krungsrinimble.tex (PRD template)
+│       └── routes/             # chat.py projects.py requirements.py documents.py
+│                               # lock.py events.py
 └── venv/                       # Local Python virtual environment
 ```
 
@@ -261,14 +290,22 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated browser origins allowed by CORS |
 | `MAX_CONTEXT_TOKENS` | `8192` | Total context budget injected into every system prompt (MacBook-memory-safe); incoming `/api/chat` and workflow payloads exceeding this limit are rejected with HTTP 413 | 
 | `TEMPERATURE` | `0.0` | Sampling temperature for all agent calls |
+| `LM_STUDIO_DISABLE_THINKING` | `true` | Sends `enable_thinking: false` to Qwen3.x reasoning models so structured-JSON generation (PRD / audit) never exhausts `max_tokens` on chain-of-thought |
+| `MAX_UPLOAD_MB` | `25` | Document upload size gate — the **only** size limit; the full converted markdown is always persisted regardless of size |
+| `DOCUMENT_BUDGET_FRACTION` | `0.6` | Fraction of `MAX_CONTEXT_TOKENS` reserved per document-extraction chunk |
+| `DOCUMENT_CHUNK_SIZE` / `DOCUMENT_CHUNK_OVERLAP` | `2500` / `250` | Token size of one extraction chunk and its ~10% overlap (keeps headings from being clipped) |
+| `MAX_DOCUMENT_CHUNKS` | `30` | Hard ceiling on gatherer passes per document extraction; beyond this the extraction is refused with HTTP 413 |
 | `RATE_LIMIT_ENABLED` | `true` | Master switch for in-process sliding-window rate limiting on LLM-facing endpoints |
 | `RATE_LIMIT_CHAT_LIMIT` / `RATE_LIMIT_CHAT_WINDOW` | `30` / `60` | Max `/api/chat` requests per client IP per window (seconds) |
 | `RATE_LIMIT_WORKFLOW_LIMIT` / `RATE_LIMIT_WORKFLOW_WINDOW` | `60` / `60` | Max workflow-endpoint requests (`process-requirements`, `workflow-router`, `intent-detector`, `requirement-matcher`) per client IP per window (seconds) |
 | `RATE_LIMIT_STORE` | `in-process` | Limiter backend. Only `in-process` exists today, and it **requires a single uvicorn worker** — the app refuses to boot with `--workers N` so the 429 budget can never silently scale by worker count |
 | `RATE_LIMIT_ALLOW_MULTI_PROCESS_IN_PROCESS` | `false` | Explicit opt-out: run N workers with the in-process store (each worker gets an independent budget — weaker posture; the app warns loudly at startup) |
+| `SSE_HISTORY_BUFFER_SIZE` | `1000` | Per-project ring buffer replayed to reconnecting SSE clients via `Last-Event-ID` |
+| `SSE_ALLOW_MULTI_PROCESS_IN_PROCESS` | `false` | Explicit opt-out: run N workers with the in-process SSE bus (broken/duplicate event delivery by construction — not recommended) |
 | `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_IPS` | `false` / *(empty)* | Behind a reverse proxy, trust `X-Forwarded-For`/`Forwarded` client IPs **only from your own proxy IPs**, so every caller keeps its own rate-limit bucket |
 | `DEBUG` | `false` | Enables uvicorn `--reload` and SQL echo |
 | `APP_NAME` | `Enterprise Requirements Architecture Core` | Display name used in health/docs |
+
 ---
 
 ## 🤖 Multi-Agent Pipeline
@@ -323,8 +360,9 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 1. Open **http://localhost:3000**.
 2. In the **Agent Workspace**, create a project (or pick the seeded one).
 3. Type a feature brief in the chat (e.g. *"Add a PromptPay real-time merchant settlement flow"*). The Router + Matcher classify it and the **Gatherer** produces user stories. Then run the **Auditor** to validate compliance and **Generate PRD** to have the Architect draft the document.
-4. Review the result in the **ConfirmationPanel** — accept (`confirm`) or reject (`cancel`).
-5. Use the **lock** buttons on any artifact to freeze it. The Schema Explorer tab visualizes the live PostgreSQL schema.
+4. Alternatively, upload an existing brief (DOCX / PDF / MD / TXT) in the **Document Library** and hit **Process** — the extraction runs through the Gatherer and lands as a single staged pending action to confirm.
+5. Review the result in the **ConfirmationPanel** — accept (`confirm`) or reject (`cancel`).
+6. Use the **lock** buttons on any artifact to freeze it. The Schema Explorer tab visualizes the live PostgreSQL schema.
 
 ## 🔒 Human-in-the-Loop & Locking
 
@@ -353,8 +391,10 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/projects` | List all projects |
+| `GET` | `/api/projects/search?q=...` | Search projects by name/description |
 | `POST` | `/api/projects` | Create a project (`ProjectCreate`: `name`, `description`, `industry_standard`) |
 | `PUT` | `/api/projects/{project_id}` | Rename / update a project |
+| `PUT` | `/api/projects/{project_id}/pin` | Toggle the pinned (quick-access) flag |
 | `DELETE` | `/api/projects/{project_id}` | Delete a project |
 | `GET` | `/api/project/{project_id}` | Load the centralized **requirement state** (or defaults if none exists) |
 | `PUT` | `/api/project/{project_id}` | Directly persist manual edits to the requirement state (e.g. PRD edits) |
@@ -374,6 +414,7 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/process-requirements` | Run the full LangGraph pipeline (`ProcessRequirementsRequest`); returns routed workflow, detected intent, structured requirements, audit result, PRD + diagram, and a pending-action id |
+| `POST` | `/api/process-requirements/cancel?project_id=...` | Cancel an in-flight workflow run server-side (Stop button); returns `{"status": "cancelled"}` when a live task was stopped |
 | `POST` | `/api/workflow-router` | Classify a message → `CHAT / QUESTION / COMMAND / REQUIREMENT` |
 | `POST` | `/api/intent-detector` | Detect intent → `GENERAL_CHAT` or `REQUIREMENT_REQUEST` |
 | `POST` | `/api/requirement-matcher` | Match a message to an existing story and recommend `NEW / UPDATE / DELETE / CLARIFY` |
@@ -387,10 +428,28 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `POST` | `/api/prd/export/{project_id}` | Generate and persist a new immutable PRD version (LaTeX, following `template-krungsrinimble.tex`) |
 | `POST` | `/api/project/{project_id}/export/pdf` | Export the supplied LaTeX PRD as a downloadable PDF rendered from the same Word document via headless LibreOffice (Tectonic fallback) |
 | `POST` | `/api/project/{project_id}/export/docx` | Convert the supplied LaTeX PRD to a downloadable Word document via the native renderer (Pandoc fallback) |
+| `POST` | `/api/prd/convert` | Convert LaTeX PRD source → markdown preview (`{latex_source}`) |
 | `GET` | `/api/prd/template` | Authoritative PRD templates (`template_latex` + markdown preview skeleton) |
 | `GET` | `/api/project/{project_id}/prd-versions` | List all PRD versions |
 | `GET` | `/api/project/{project_id}/prd-versions/latest` | Latest PRD version |
 | `GET` | `/api/project/{project_id}/prd-versions/{version_number}` | A specific PRD version |
+| `GET` | `/api/project/{project_id}/prd/sections` | List the nine editable PRD parts (seeds them on first access) |
+| `GET` | `/api/project/{project_id}/prd/sections/{section_key}` | Fetch one PRD part (content + lock + ownership + review metadata) |
+| `PATCH` | `/api/project/{project_id}/prd/sections/{section_key}` | Edit ONE PRD part — appends an immutable per-part version and re-stitches the document |
+| `GET` | `/api/project/{project_id}/prd/sections/{section_key}/versions` | Per-part version history (append-only, newest first) |
+| `POST` | `/api/project/{project_id}/prd/sections/{section_key}/revert/{version_number}` | Restore an old part version as a NEW version row (never overwrites history) |
+| `POST` | `/api/project/{project_id}/prd/sections/{section_key}/lock` | Lock ONE PRD part — blocks edits AND excludes it from AI regeneration |
+| `POST` | `/api/project/{project_id}/prd/sections/{section_key}/unlock` | Unlock ONE PRD part |
+
+> **Part-level PRD editing** — a PRD is stored as a COLLECTION of nine editable,
+> lockable, versioned parts (cover, stakeholders, version history, reviews,
+> contents, business & strategic overview, product scope, technical &
+> operational, appendix — the same parts the preview renders). Each part is
+> independently edited (`prd_sections`), lockable via the generic
+> `LockService` (`prd_section` artifact type), and never lost: every edit or
+> regeneration inserts an append-only row in `prd_section_versions`. Human-owned
+> sections (`ai_generatable=false`, e.g. Reviews) and user-satisfied / locked
+> sections survive every Architect regeneration untouched.
 
 > **Export toolchain** — DOCX exports render the generated LaTeX natively via
 > `python-docx` (vendored Pandoc under `.tools/` as fallback). PDF exports
@@ -404,6 +463,15 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 > clone) are staged into the LibreOffice profile on every conversion, because
 > the macOS headless build cannot see system fonts. Point `TECTONIC_BIN` /
 > `PANDOC_BIN` at your own installs to override.
+
+### Documents (Knowledge Base)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/project/{project_id}/documents/upload` | Upload a `.docx` / `.pdf` / `.md` / `.txt` file (multipart `file`, ≤ `MAX_UPLOAD_MB`) into the project's knowledge base; it is converted to canonical markdown. **Stores source material only — no requirements are created.** A scanned/no-text PDF is kept as a `failed` record with an explicit needs-OCR message (400 bad format, 413 oversized, 422 unreadable PDF) |
+| `GET` | `/api/project/{project_id}/documents` | List the project's uploaded documents (metadata, newest first) |
+| `GET` | `/api/project/{project_id}/documents/{document_id}` | Full canonical markdown for one document (never truncated) |
+| `POST` | `/api/project/{project_id}/documents/{document_id}/process` | Explicit, user-triggered extraction: feeds the document through the Gatherer in one pass (if it fits the document budget) or sequential overlapping chunks (SSE `document_extraction_progress` events), de-duplicates across chunks, and stages **one** `INSERT_CHUNKED_REQUIREMENTS` pending action — applied atomically with a single version bump on confirm (400 on failed/OCR doc, 413 too large, 502 gatherer failure) |
 
 ### Locking & Pending Actions
 
@@ -470,8 +538,8 @@ npm run schema:parse   # tsx scripts/parse_check.ts  (inspect the parsed DDL)
 The harness compares `init.sql` against `backend/app/models.py` (SQLAlchemy
 metadata) and against the `INITIAL_*` / `*Row` seed data in `src/data.ts`,
 reporting — and exiting non-zero on — any table or column that exists on only
-one side. `requirement_states` and `pending_actions` are intentionally
-provisioned by Alembic migrations and are allowlisted.
+one side. `requirement_states`, `pending_actions`, and `uploaded_documents`
+are intentionally provisioned by Alembic migrations and are allowlisted.
 
 > ⚠️ **Known pre-existing backend drift.** The harness currently flags that
 > `models.py` names some columns differently than `init.sql`: `audit_results`
@@ -496,6 +564,7 @@ provisioned by Alembic migrations and are allowlisted.
 | `requirement_states` | Centralized per-project JSON state (created by migrations) |
 | `pending_actions` | Human-in-the-loop staged changes (created by migrations) |
 | `conversation_messages` | Persistent chat history per project |
+| `uploaded_documents` | Project knowledge base: uploaded DOCX/PDF/MD/TXT briefs + their converted canonical markdown (created by migrations) |
 | `artifact_event_logs` | **Append-only** audit trail of `CREATE / UPDATE / DELETE / ARCHIVE / LOCK / UNLOCK` |
 
 > **Supabase note:** the engine targets the transaction pooler (port `6543`), uses minimal SQLAlchemy pooling, `pool_pre_ping`, and disables the statement cache for PgBouncer compatibility. On SQLite fallback, the GUID type degrades to `CHAR(36)`.

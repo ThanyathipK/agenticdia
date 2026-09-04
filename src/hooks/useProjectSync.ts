@@ -81,6 +81,9 @@ export function useProjectSync(
         // Load conversation history — always from Supabase, in chronological order
         store.setMessages(toChatMessages(payload));
 
+        // Load per-part PRD section lock/ownership metadata (non-blocking).
+        store.loadSectionLocks(projId);
+
         store.setSyncStatus('Synced with Supabase Cloud');
       }
     } catch (err) {
@@ -210,6 +213,9 @@ export function useProjectSync(
           } catch (err) {
             handleWarning('Could not load pending actions.', err);
           }
+
+          // 8. Sync per-part PRD section lock/ownership metadata (non-blocking)
+          if (isSubscribed) store.loadSectionLocks(projectId);
 
           store.setSyncStatus('Synced via live updates');
         }

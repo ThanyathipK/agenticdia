@@ -118,3 +118,32 @@ async def test_results_keep_pinned_first_ordering(db_session):
 
     assert [p["id"] for p in results] == [pinned, unpinned]
     assert results[0]["is_pinned"] is True
+
+
+@pytest.mark.asyncio
+async def test_message_match_returns_snippet_centered_on_term(db_session):
+    # Message match -> the project name has nothing to highlight, so the
+    # snippet must surface the exact message excerpt for the UI to highlight.
+    pid = await _create_project(db_session, "Onboarding Flow")
+    await _add_message(
+        db_session, pid, "assistant",
+        "The settlement engine retries failed transfers up to three times.",
+    )
+
+    results = await ProjectRepository.search(db_session, "retries")
+
+    assert results[0]["id"] == pid
+    snippet = results[0].get("match_snippet", "")
+    assert "retries" in snippet.lower()
+
+
+@pytest.mark.asyncio
+async def test_name_match_omits_snippet_when_no_messages(db_session):
+    # When a project matches purely via its name, there is no message excerpt,
+    # so the caller must not receive a match_snippet field at all.
+    pid = await _create_project(db_session, "Empty Chat Project")
+
+    results = await ProjectRepository.search(db_session, "empty chat")
+
+    assert results[0]["id"] == pid
+    assert ("match_snippet" not in results[0]) or (results[0]["match_snippet"] is None)

@@ -17,6 +17,7 @@ Product intent enforced here (see also ``app/document_processor.py``):
 Alembic migration ``0004`` provisions the table; ``DocumentRepository`` owns
 persistence; serialization lives in ``repositories/base.py``.
 """
+import asyncio
 import io
 import logging
 from datetime import datetime, timedelta, timezone
@@ -254,8 +255,14 @@ async def upload_document(
 
     status_value = "processed"
     error_message = None
+    # CPU-heavy PDF/DOCX parsing (pypdf page extraction / mammoth XML walking)
+    # plus the full-document tiktoken BPE count are blocking, potentially
+    # multi-second operations for large uploads. Running them directly on the
+    # event loop froze EVERY concurrent request (SSE heartbeats, chat, other
+    # uploads) for the whole conversion, so they are offloaded to the default
+    # thread pool like the LaTeX export pipeline already does.
     try:
-        markdown = _convert_to_markdown(raw, fmt["original_format"])
+        markdown = await asyncio.to_thread(_convert_to_markdown, raw, fmt["original_format"])
     except HTTPException as exc:
         # A scanned/no-text PDF keeps a traceable 'failed' record and surfaces an
         # explicit, non-silent 'needs-OCR' message. All other conversion errors
@@ -270,7 +277,7 @@ async def upload_document(
         else:
             raise
 
-    token_count = count_tokens(markdown)
+    token_count = await asyncio.to_thread(count_tokens, markdown)
     doc = await DocumentRepository.create(
         str(project_id),
         {
