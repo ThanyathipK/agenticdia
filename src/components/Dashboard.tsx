@@ -123,7 +123,8 @@ export default function Dashboard() {
   // Sidebar projects to render. Matching (project names AND conversation
   // message content) happens server-side via GET /api/projects/search — the
   // hook's debounced search effect swaps `projects` for the matching subset.
-  // Only the pinned-first presentation ordering is applied here.
+  // Pinned chats sort first; the list below renders them as two clearly
+  // separated sections ("Pinned" vs "Recent Projects") instead of one blend.
   const visibleProjects = [...projects].sort((a, b) => Number(!!b.is_pinned) - Number(!!a.is_pinned));
 
   return (
@@ -214,12 +215,8 @@ export default function Dashboard() {
           )}
         </div>
 
-        {expanded && (
-          <div className="px-4 pt-4 pb-1.5 text-[11px] font-bold tracking-wide uppercase text-on-surface-variant/70">
-            Recent Projects
-          </div>
-        )}
-
+        {/* Section headers ("Pinned" / "Recent Projects") render inside the
+            scrollable list below, directly above each group of chats. */}
         <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
           {projects.length === 0 && expanded && (
             <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">No projects yet</div>
@@ -229,9 +226,42 @@ export default function Dashboard() {
               No projects or messages matching &quot;{projectSearchQuery.trim()}&quot;
             </div>
           )}
-          {visibleProjects.map(p => {
+          {visibleProjects.map((p, index) => {
             const isActive = projectId === p.id;
-            return (
+            // Group boundaries: the first pinned chat opens the "Pinned"
+            // section and the first unpinned chat opens "Recent Projects", so
+            // pinned and unpinned chats stay visually separated instead of
+            // blending into a single list. Collapsed mode (icons only) falls
+            // back to a thin divider between the two groups.
+            const prev = index > 0 ? visibleProjects[index - 1] : null;
+            const startsPinnedGroup = !!p.is_pinned && (!prev || !prev.is_pinned);
+            const startsUnpinnedGroup = !p.is_pinned && (!prev || !!prev.is_pinned);
+            return [
+              expanded && startsPinnedGroup && (
+                <div
+                  key={`${p.id}-pinned-header`}
+                  className="px-2.5 pt-4 pb-1.5 flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase text-on-surface-variant/70"
+                >
+                  <Pin className="w-3 h-3 text-primary shrink-0" />
+                  Pinned
+                </div>
+              ),
+              startsUnpinnedGroup && index > 0 && (
+                <div
+                  key={`${p.id}-group-divider`}
+                  className="mx-1 mt-2 border-t border-outline/70"
+                  aria-hidden="true"
+                />
+              ),
+              expanded && startsUnpinnedGroup && (
+                <div
+                  key={`${p.id}-recent-header`}
+                  className="px-2.5 pt-2 pb-1.5 flex items-center gap-1.5 text-[11px] font-bold tracking-wide uppercase text-on-surface-variant/70"
+                >
+                  <MessageSquare className="w-3 h-3 shrink-0" />
+                  Recent Projects
+                </div>
+              ),
               <div key={p.id} className="relative group">
                 {renameProjectId === p.id ? (
                   <div className="flex items-center gap-1 px-2 py-1">
@@ -340,8 +370,8 @@ export default function Dashboard() {
                     </span>
                   </div>
                 )}
-              </div>
-            );
+              </div>,
+            ];
           })}
         </div>
 

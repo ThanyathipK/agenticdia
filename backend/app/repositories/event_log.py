@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ArtifactEventLogModel
@@ -168,17 +168,3 @@ class ArtifactEventLogRepository:
         result = await session.execute(stmt)
         events = result.scalars().all()
         return [serialize_event_log(e) for e in events]
-
-    @staticmethod
-    async def count_by_artifact(
-        artifact_type: str,
-        artifact_id: str,
-        session: AsyncSession
-    ) -> int:
-        """Count total events for a specific artifact."""
-        stmt = select(func.count()).select_from(ArtifactEventLogModel).where(
-            ArtifactEventLogModel.artifact_type == artifact_type,
-            ArtifactEventLogModel.artifact_id == str(artifact_id)
-        )
-        result = await session.execute(stmt)
-        return result.scalar() or 0

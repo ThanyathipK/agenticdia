@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Optional, Dict, Any, Union
 from uuid import UUID
-from datetime import datetime
 
 # ==========================================
 # 1. BASE DB TRANSACTION SCHEMAS
@@ -40,26 +39,8 @@ class UserAnswerSubmit(BaseModel):
 
 
 # ==========================================
-# 2. LOCAL LLM STRUCTURED OUTPUTS (JSON MODE)
+# 2. CHAT SCHEMAS
 # ==========================================
-
-class CheckResultItem(BaseModel):
-    """Individual rule verification structure."""
-    rule: str = Field(..., description="Unique code identifier for the rule (e.g. MFA_FALLSAFE, UUID_INTEGRITY).")
-    message: str = Field(..., description="Descriptive validation results of rule analysis.")
-
-class LLMStructuredOutput(BaseModel):
-    """
-    Deterministic schema driving JSON-mode responses from local models.
-    Guarantees that local LLMs output compliant structures for parsed user stories.
-    """
-    is_valid: bool = Field(..., description="Whether the analyzed requirement complies with target regulatory rules.")
-    passed_checks: List[CheckResultItem] = Field(default_factory=list, description="Validated and approved rules.")
-    failed_checks: List[CheckResultItem] = Field(default_factory=list, description="Rules violating strict compliance specs.")
-    suggested_questions: List[str] = Field(
-        default_factory=list, 
-        description="Clarification queries generated dynamically to resolve ambiguities."
-    )
 
 class ChatMessage(BaseModel):
     """Basic structural model for conversations."""
@@ -110,12 +91,6 @@ class RequirementIntentDetectionResult(BaseModel):
     reasoning: Optional[str] = Field(default="", description="Brief reasoning explaining the intent classification.")
 
 
-class GeneralChatResponse(BaseModel):
-    """Schema for general chat response that does NOT modify any project artifacts."""
-    message: str = Field(..., description="Natural language conversational response from the LLM.")
-    intent: str = Field(default="GENERAL_CHAT", description="Always GENERAL_CHAT for this response type.")
-
-
 # ==========================================
 # 5. WORKFLOW ROUTING SCHEMA
 # ==========================================
@@ -136,24 +111,6 @@ class RequirementMatcherResult(BaseModel):
     action: str = Field(..., description="Action recommendation: NEW, UPDATE, DELETE, or CLARIFY")
     status: Optional[str] = Field(default="MATCHED", description="Status: MATCHED, AMBIGUOUS, or LOW_CONFIDENCE")
     candidates: Optional[List[str]] = Field(default=None, description="List of candidate requirement IDs if ambiguous.")
-
-
-# ==========================================
-# 7. PENDING ACTION SCHEMA
-# ==========================================
-
-class PendingAction(BaseModel):
-    project_id: str
-    action_type: str
-    target_requirement_id: Optional[str] = None
-    original_user_message: str
-    proposed_changes: Dict[str, Any]
-    affected_user_story_ids: List[str]
-    affected_acceptance_criteria_ids: List[str]
-    workflow_stage: str
-    created_at: datetime
-    expires_at: datetime
-    status: str = "WAITING_CONFIRMATION"
 
 
 # ==========================================

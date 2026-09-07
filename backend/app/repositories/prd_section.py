@@ -166,28 +166,6 @@ class PRDSectionRepository:
         return serialize_prd_section(section, current_version=current_version)
 
     @staticmethod
-    async def update_review_status(
-        section_id: str,
-        project_id: str,
-        review_status: str,
-        session: AsyncSession,
-    ) -> Optional[Dict[str, Any]]:
-        """Update only the review status ('draft' | 'satisfied' | 'approved')."""
-        sid = as_uuid(section_id)
-        pid = as_uuid(project_id)
-        stmt = select(PRDSectionModel).where(
-            PRDSectionModel.id == sid, PRDSectionModel.project_id == pid
-        )
-        result = await session.execute(stmt)
-        section = result.scalar_one_or_none()
-        if not section:
-            return None
-        section.review_status = review_status
-        await session.flush()
-        await session.refresh(section)
-        return serialize_prd_section(section)
-
-    @staticmethod
     async def delete(id_val: str, project_id: str, session: AsyncSession) -> bool:
         """Delete a section row (used by tests; production flows never delete)."""
         sid = as_uuid(id_val)

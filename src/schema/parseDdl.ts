@@ -2,12 +2,11 @@
 // parseDdl.ts — lightweight, dependency-free parser for the Postgres DDL used
 // by this repo (backend/init.sql).
 //
-// Why this exists: the Schema Explorer previously carried a hand-maintained
-// copy of the schema (`TABLES` in src/data.ts) that could drift from the real
-// DDL. To make backend/init.sql the single source of truth, this parser derives
-// the table/column/index/relation structure directly from that DDL at runtime
-// (imported via Vite's `?raw`), so the explorer can never display a schema that
-// differs from what the backend provisions.
+// Why this exists: it derives the table/column/index/relation structure
+// directly from the real DDL, so tooling (see `scripts/parse_check.ts`,
+// run via `npm run schema:parse`) can validate the parsed structure against
+// backend/init.sql instead of maintaining a hand-written copy that could
+// drift from what the backend provisions.
 //
 // Scoped conventions (matching init.sql):
 //   - `CREATE TABLE <name> ( <one column per line> );`

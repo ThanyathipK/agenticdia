@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """Schema drift harness.
 
-backend/init.sql is the canonical schema for this repo — it drives the in-app
-Schema Explorer (the frontend derives `TABLES` from it at runtime). This script
-verifies that there is exactly one source of truth and reports any divergence:
+backend/init.sql is the canonical schema for this repo. This script verifies
+that there is exactly one source of truth and reports any divergence:
 
   1. init.sql  vs  backend/app/models.py (SQLAlchemy metadata)
        - tables present on only one side
        - per-table columns present on only one side
        - nullability mismatches (reported for information; no fail by default)
-  2. init.sql  vs  src/data.ts
-       - `TABLES` must be DERIVED from init.sql (parseDdl(initSqlText)),
-         i.e. no hand-maintained schema literal may remain
-       - every `*Row` / `INITIAL_*` seed field must be a column declared in
-         init.sql (flags seed data that no longer maps to the real schema)
-  3. Alembic migrations are cross-checked against init.sql table list.
+  2. Alembic migrations are cross-checked against init.sql table list.
 
 Documented, intentional deviations are allowlisted (e.g. `requirement_states`
 and `pending_actions` are provisioned by Alembic migrations at startup and are
@@ -34,31 +28,13 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND = os.path.join(ROOT, "backend")
-SRC = os.path.join(ROOT, "src")
 INIT_SQL = os.path.join(BACKEND, "init.sql")
-DATA_TS = os.path.join(SRC, "data.ts")
 
 # Tables intentionally absent from init.sql but provisioned by Alembic at startup.
 DOCUMENTED_MODEL_ONLY_TABLES = {
     "requirement_states",
     "pending_actions",
     "uploaded_documents",
-}
-
-# INITIAL_* constant name in src/data.ts  ->  table name in init.sql
-INITIAL_TO_TABLE = {
-    "INITIAL_USERS": "users",
-    "INITIAL_PROJECTS": "projects",
-    "INITIAL_EPICS": "epics",
-    "INITIAL_REQUIREMENTS": "requirements",
-    "INITIAL_USER_STORIES": "user_stories",
-    "INITIAL_ACCEPTANCE_CRITERIA": "acceptance_criteria",
-    "INITIAL_AUDIT_RESULTS": "audit_results",
-    "INITIAL_QUESTIONS": "clarification_questions",
-    "INITIAL_PRD_DOCS": "prd_documents",
-    "INITIAL_PRD_VERSIONS": "prd_versions",
-    "INITIAL_CONVERSATION_MESSAGES": "conversation_messages",
-    "INITIAL_ARTIFACT_EVENT_LOGS": "artifact_event_logs",
 }
 
 
@@ -120,31 +96,6 @@ def load_model_metadata() -> dict:
         tables[name] = {"columns": cols, "order": order}
     return tables
 
-def parse_frontend_seed(data_ts: str) -> dict:
-    """Collect every field referenced by INITIAL_* seed rows and *Row types."""
-    result = {}
-    for const, table in INITIAL_TO_TABLE.items():
-        fields = set()
-        # Row type: `export type XRow = { ... }`
-        row_type = const[len("INITIAL_"):]
-        type_pat = re.compile(
-            r"export\s+type\s+%s\s*=\s*\{(.*?)\n\}" % re.escape(row_type), re.S
-        )
-        tm = type_pat.search(data_ts)
-        if tm:
-            fields |= set(re.findall(r"^\s*([A-Za-z_][\w]*)\s*:", tm.group(1), re.M))
-        # Seed rows: `export const INITIAL_X: XRow[] = [ {...}, ... ];`
-        seed_pat = re.compile(
-            r"export\s+const\s+%s[^=]*=\s*\[(.*?)\n\];" % re.escape(const), re.S
-        )
-        sm = seed_pat.search(data_ts)
-        if sm:
-            # Strip JSON.stringify({ ... }) snapshot bodies (not real columns).
-            body = re.sub(r"JSON\.stringify\(\{.*?\}\)", "", sm.group(1), flags=re.S)
-            fields |= set(re.findall(r"^\s*([A-Za-z_][\w]*)\s*:", body, re.M))
-        result[table] = sorted(f for f in fields if f != "id")
-    return result
-
 
 def compare_tables(sql_tables, model_tables, documented_set):
     problems = []
@@ -180,33 +131,19 @@ def compare_tables(sql_tables, model_tables, documented_set):
     return problems, notes
 
 
-def compare_frontend(sql_tables, seed):
-    problems = []
-    for table, fields in sorted(seed.items()):
-        if table not in sql_tables:
-            problems.append(f"[DRIFT] frontend seed targets table not in init.sql: {table}")
-            continue
-        valid = set(sql_tables[table]["columns"])
-        for f in sorted(set(fields) - valid):
-            problems.append(
-                f"[DRIFT] src/data.ts field `{table}.{f}` is not a column in init.sql"
-            )
-    return problems
-
-
 def main() -> int:
     print("=" * 72)
     print("Schema drift harness  (canonical source: backend/init.sql)")
     print("=" * 72)
 
     sql_tables = parse_init_sql(INIT_SQL)
-    print(f"\n[1/3] init.sql parsed: {len(sql_tables)} tables -> {', '.join(sorted(sql_tables))}")
+    print(f"\n[1/2] init.sql parsed: {len(sql_tables)} tables -> {', '.join(sorted(sql_tables))}")
 
     problems = []
     notes = []
 
     # -- models.py comparison ------------------------------------------------
-    print("\n[2/3] Comparing init.sql vs backend/app/models.py ...")
+    print("\n[2/2] Comparing init.sql vs backend/app/models.py ...")
     try:
         model_tables = load_model_metadata()
         print(f"      models.py metadata: {len(model_tables)} tables")
@@ -221,22 +158,6 @@ def main() -> int:
         print(f"      ! could not introspect models.py: {exc}")
         problems.append("[DRIFT] models.py could not be introspected; cannot verify")
 
-    # -- frontend comparison ------------------------------------------------
-    print("\n[3/3] Comparing init.sql vs src/data.ts ...")
-    data_ts = open(DATA_TS, encoding="utf-8").read()
-    if "parseDdl(initSqlText)" not in data_ts:
-        problems.append(
-            "[DRIFT] src/data.ts TABLES is not derived from init.sql "
-            "(expected `parseDdl(initSqlText)`); a hand-maintained schema may have returned."
-        )
-    else:
-        print("      OK: src/data.ts TABLES is derived from init.sql (parseDdl).")
-    seed = parse_frontend_seed(data_ts)
-    frontend_problems = compare_frontend(sql_tables, seed)
-    problems.extend(frontend_problems)
-    for line in frontend_problems:
-        print("     ", line)
-
     # -- summary -------------------------------------------------------------
     print("\n" + "=" * 72)
     if problems:
@@ -248,7 +169,7 @@ def main() -> int:
     print(f"No drift found. {len(notes)} informational note(s).")
     for n in notes:
         print("  -", n)
-    print("\nSingle source of truth verified: backend/init.sql == models.py == frontend data.")
+    print("\nSingle source of truth verified: backend/init.sql == models.py.")
     return 0
 
 

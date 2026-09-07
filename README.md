@@ -30,7 +30,6 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 - **Real-time updates** — Server-Sent Events push state changes to the dashboard instead of polling
 - **Rate limiting** — in-process sliding-window limiter guards the LLM-facing endpoints (chat, workflow, document extraction) with per-IP 429s (Finding #39)
 - **LM Studio health check & graceful degradation** — the backend probes the local gateway at startup and on every `/api/health` call; the chat header shows an **LLM Offline** pill when the local server is down (auto-refreshing, no restart needed) instead of failing with opaque 503s (Finding #40)
-- **In-app Postgres Schema Explorer** — DDL / table explorer rendered from the live [`backend/init.sql`](backend/init.sql)
 
 ---
 
@@ -39,7 +38,7 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 ```mermaid
 flowchart LR
     subgraph Browser["Browser — localhost:3000"]
-        UI["React 19 SPA · Dashboard + Schema Explorer"]
+        UI["React 19 SPA · Multi-Agent Requirements Dashboard"]
         SSE_C["EventSource client<br/>/api/project/{id}/sse"]
     end
 
@@ -104,15 +103,14 @@ agenticdia/
 │   └── parse_check.ts          # tsx harness inspecting the parsed init.sql DDL
 ├── src/
 │   ├── main.tsx                # React root
-│   ├── App.tsx                 # Agent workspace ↔ Schema Explorer shell
+│   ├── App.tsx                 # App shell (navbar + workspace)
 │   ├── index.css
 │   ├── api/                    # Typed HTTP client (client.ts / types.ts / transforms.ts)
 │   ├── hooks/                  # useChat · useProjects · useProjectState · useProjectSync
 │   │                           # useRequirementStore · useDocuments · useArtifactLocks
 │   │                           # useLmStudioHealth · useWorkspaceUi
-│   ├── schema/                 # DDL parser + annotations for the Schema Explorer
+│   ├── schema/                 # DDL parser (npm run schema:parse self-check tool)
 │   ├── utils/                  # markdown helpers
-│   ├── data.ts                 # TABLES derived from init.sql at build time (?raw import)
 │   └── components/
 │       ├── Dashboard.tsx       # Multi-agent requirements workspace (SSE, locks, PRD)
 │       ├── ChatPanel.tsx       # Agent chat · LLM-health pill · Stop button
@@ -121,14 +119,13 @@ agenticdia/
 │       ├── VersionHistory.tsx  # Immutable PRD version ledger
 │       ├── ConfirmationPanel.tsx / ConfirmModal.tsx / NewProjectModal.tsx
 │       ├── MarkdownRenderer.tsx / ArchitectureFlows.tsx / Toast.tsx
-│       └── schema/             # SchemaExplorer · DDLViewer · SnapshotLedger · AuditChecklist
 ├── backend/
 │   ├── .env.example            # ← copy to backend/.env
 │   ├── requirements.txt        # Python dependencies
 │   ├── alembic.ini
 │   ├── alembic/                # Migrations 0001 initial · 0002 locks rename · 0003 pinned · 0004 uploaded_documents
-│   ├── init.sql                # Full PostgreSQL DDL (drives the Schema Explorer)
-│   ├── check_schema_drift.py   # init.sql ↔ models.py ↔ src/data.ts drift harness
+│   ├── init.sql                # Full PostgreSQL reference DDL
+│   ├── check_schema_drift.py   # init.sql ↔ models.py drift harness
 │   ├── test_sse.py             # End-to-end SSE stream test
 │   ├── tests/                  # pytest suite (documents, latex, prd filler, rate limit, …)
 │   └── app/
@@ -137,7 +134,6 @@ agenticdia/
 │       ├── database.py         # Async SQLAlchemy engine / session factory
 │       ├── models.py           # SQLAlchemy ORM models
 │       ├── schemas.py          # Request/response Pydantic schemas
-│       ├── repository.py       # Data-access layer
 │       ├── repositories/       # Per-entity repositories (requirement_state, documents, …)
 │       ├── migrations.py       # Startup Alembic runner + default user seed
 │       ├── llm_client.py       # Direct LM Studio HTTP client (strict JSON mode)
@@ -362,7 +358,7 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 3. Type a feature brief in the chat (e.g. *"Add a PromptPay real-time merchant settlement flow"*). The Router + Matcher classify it and the **Gatherer** produces user stories. Then run the **Auditor** to validate compliance and **Generate PRD** to have the Architect draft the document.
 4. Alternatively, upload an existing brief (DOCX / PDF / MD / TXT) in the **Document Library** and hit **Process** — the extraction runs through the Gatherer and lands as a single staged pending action to confirm.
 5. Review the result in the **ConfirmationPanel** — accept (`confirm`) or reject (`cancel`).
-6. Use the **lock** buttons on any artifact to freeze it. The Schema Explorer tab visualizes the live PostgreSQL schema.
+6. Use the **lock** buttons on any artifact to freeze it.
 
 ## 🔒 Human-in-the-Loop & Locking
 
@@ -516,17 +512,14 @@ curl -X POST "http://localhost:3000/api/confirm-action/<action-id>?project_id=00
 
 ## 🗄️ Database Schema
 
-Tables are provisioned by **Alembic migrations that run automatically at backend startup** (see [`backend/app/migrations.py`](backend/app/migrations.py)). The full PostgreSQL reference DDL lives in [`backend/init.sql`](backend/init.sql) and drives the in-app Schema Explorer.
+Tables are provisioned by **Alembic migrations that run automatically at backend startup** (see [`backend/app/migrations.py`](backend/app/migrations.py)). The full PostgreSQL reference DDL lives in [`backend/init.sql`](backend/init.sql).
 
 ### Single source of truth & drift checking
 
-`backend/init.sql` is the **canonical schema** for the Schema Explorer. The
-frontend no longer keeps a hand-maintained copy of the tables/columns/indexes:
-`src/data.ts` derives `TABLES` from `init.sql` at build time (Vite `?raw`
-import) via the parser in `src/schema/parseDdl.ts`, then merges the
-human-authored descriptions / banking context from `src/schema/annotations.ts`.
-This guarantees the explorer can never display a schema that drifted from the
-deployed DDL.
+`backend/init.sql` is the **canonical schema** for the project. The
+`src/schema/parseDdl.ts` parser derives the table/column/index/relation
+structure directly from that DDL, and `scripts/parse_check.ts`
+(`npm run schema:parse`) uses it to inspect the parsed structure.
 
 Run the drift harness to verify there is exactly one source of truth:
 
@@ -536,17 +529,10 @@ npm run schema:parse   # tsx scripts/parse_check.ts  (inspect the parsed DDL)
 ```
 
 The harness compares `init.sql` against `backend/app/models.py` (SQLAlchemy
-metadata) and against the `INITIAL_*` / `*Row` seed data in `src/data.ts`,
-reporting — and exiting non-zero on — any table or column that exists on only
-one side. `requirement_states`, `pending_actions`, and `uploaded_documents`
-are intentionally provisioned by Alembic migrations and are allowlisted.
-
-> ⚠️ **Known pre-existing backend drift.** The harness currently flags that
-> `models.py` names some columns differently than `init.sql`: `audit_results`
-> (`version_reviewed` vs `audit_version_reviewed`) and `prd_documents`
-> (`markdown_content`/`mermaid_graph` vs `prd_markdown`/`mermaid_diagram`).
-> The frontend follows `init.sql`. Reconcile `models.py` (plus its repositories
-> / serializers) with `init.sql` to clear the drift.
+metadata), reporting — and exiting non-zero on — any table or column that
+exists on only one side. `requirement_states`, `pending_actions`, and
+`uploaded_documents` are intentionally provisioned by Alembic migrations and
+are allowlisted.
 
 
 | Table | Purpose |

@@ -1145,8 +1145,3 @@ def prd_to_markdown(source: str) -> str:
         if not out_path.exists():
             raise RuntimeError("Pandoc finished but produced no markdown preview.")
         return _normalize_pandoc_gfm(out_path.read_text(encoding="utf-8"))
-
-
-def latex_available() -> bool:
-    """True when the LaTeX export toolchain is reachable."""
-    return bool(tectonic_bin()) and bool(pandoc_bin())

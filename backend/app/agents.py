@@ -4,15 +4,11 @@ from typing import TypedDict, Dict, Any, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-try:
-    from langchain.output_parsers import OutputFixingParser
-except ImportError:
-    OutputFixingParser = None
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
 from app.schemas import GatheredRequirements
-from app.prompt_loader import load_prompt, _PromptProxy
+from app.prompt_loader import load_prompt
 from app.llm_factory import llm, parser
 from app.llm_utils import invoke_llm_structured
 from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
@@ -28,13 +24,6 @@ from app.semantic_service import (
 # Set up logging configuration for the multi-agent framework
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app.agents")
-
-# ==========================================
-# SYSTEM PROMPTS (LOADED DYNAMICALLY VIA PROMPT LOADER)
-# ==========================================
-GATHERER_PROMPT = _PromptProxy("gatherer")
-AUDITOR_PROMPT = _PromptProxy("auditor")
-ARCHITECT_PROMPT = _PromptProxy("architect")
 
 # ==========================================
 # STATE MANAGEMENT
@@ -119,55 +108,6 @@ async def get_or_init_requirement_state(project_id: str, session: Optional[Async
 # ==========================================
 # GRAPH NODES (THE AGENTS)
 # ==========================================
-
-def _llm_content_length(raw) -> int:
-    """Return the character length of a likely LLM payload without rendering it."""
-    if isinstance(raw, str):
-        return len(raw)
-    if raw is None:
-        return 0
-    try:
-        return len(list(raw))
-    except TypeError:
-        return 0
-
-
-def extract_content_from_response(response) -> str:
-    """Robustly extracts content from ChatOpenAI response.
-
-    Logging is intentionally conservative here: the full response object
-    (repr, content, additional_kwargs and response_metadata) is never written
-    to the logs because it is noisy and may leak sensitive data such as PII or
-    project details embedded in LLM output. Only a short, non-sensitive summary
-    is emitted, and only at DEBUG level.
-    """
-    # 1. Log a concise, redacted summary of the response (no payload data).
-    logger.debug(
-        "Received LLM response of type '%s' (top-level content: %d chars).",
-        type(response).__name__,
-        _llm_content_length(getattr(response, "content", None)),
-    )
-
-    # 2. Extract content
-    content = ""
-    if hasattr(response, "content") and isinstance(response.content, str) and response.content.strip():
-        content = response.content
-    elif hasattr(response, "additional_kwargs"):
-        if "content" in response.additional_kwargs:
-            content = response.additional_kwargs["content"]
-        # Handle reasoning models (if reasoning_content is present, look for the final answer)
-        if "reasoning_content" in response.additional_kwargs:
-            logger.debug("Reasoning mode detected.")
-            # If main content is empty, check if final answer is in another field or mixed in
-            if not content:
-                content = response.additional_kwargs.get("final_answer", "")
-    elif hasattr(response, "response_metadata") and "content" in response.response_metadata:
-         content = response.response_metadata["content"]
-
-    # Log only the length of the extracted content, never the content itself.
-    logger.debug("Extracted LLM content of %d chars.", _llm_content_length(content))
-    return content
-
 
 async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     """

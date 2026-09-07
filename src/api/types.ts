@@ -222,11 +222,6 @@ export interface ArtifactLockResponse {
   artifact: ArtifactLockMetadata | Record<string, unknown>;
 }
 
-export interface RequirementLockResponse {
-  status: string;
-  requirement: RequirementPayload;
-}
-
 // ----------------------------------------------------------------------------
 // Health probe (`GET /api/health`)
 // ----------------------------------------------------------------------------
@@ -354,14 +349,4 @@ export interface PrdSectionUpdateResponse {
   section: PrdSectionPayload;
   /** Full PRD markdown stitched from ALL parts after the edit. */
   document_markdown: string;
-}
-
-export interface PrdSectionVersionPayload {
-  id: string;
-  section_id: string;
-  version_number: number;
-  content: string;
-  changed_by: string;
-  change_summary?: string | null;
-  created_at: string;
 }

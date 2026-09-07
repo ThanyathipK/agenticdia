@@ -29,9 +29,7 @@ def build_llm(max_tokens: int = 3000) -> ChatOpenAI:
     """Construct the shared ChatOpenAI client from app.config settings.
 
     ``max_tokens`` defaults to the 3000 structured-output budget shared by the
-    gatherer/auditor nodes. PRD generation needs a larger allowance (a LaTeX
-    document body is several thousand tokens), so callers that compile whole
-    documents pass an explicit override - see ``build_prd_llm``.
+    gatherer/auditor nodes.
 
     Exposed as a function so tests and callers can build/replace the client
     without recreating module state by hand.
@@ -58,18 +56,6 @@ def build_llm(max_tokens: int = 3000) -> ChatOpenAI:
         }
 
     return ChatOpenAI(**kwargs)
-
-
-def build_prd_llm() -> ChatOpenAI:
-    """Dedicated LLM for PRD document generation.
-
-    The default 3000-token budget cannot hold a LaTeX document body (several
-    thousand tokens once JSON-escaped), so responses were being truncated
-    mid-document and the JSON parse failed - which surfaced to users as "cannot
-    generate PRD". This variant raises the ceiling while staying inside the
-    8192-token context window once the template body prompt is subtracted.
-    """
-    return build_llm(max_tokens=4096)
 
 
 # Json Output Parser for strict structured JSON outputs

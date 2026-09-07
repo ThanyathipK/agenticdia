@@ -444,25 +444,6 @@ class LockService:
         return LockService._serialize_lock_metadata(artifact, config, artifact_type)
 
     @staticmethod
-    async def check_is_locked(artifact_type: str, artifact_id: str, session: AsyncSession) -> bool:
-        """
-        Quick check if an artifact is locked.
-        Returns True if locked, False otherwise.
-        """
-        if artifact_type not in LockService.ARTIFACT_CONFIG:
-            raise ValueError(f"Unsupported artifact type: {artifact_type}")
-
-        config = LockService.ARTIFACT_CONFIG[artifact_type]
-        model = config["model"]
-        id_field = config["id_field"]
-        lock_field = config["lock_field"]
-
-        stmt = select(getattr(model, lock_field)).where(getattr(model, id_field) == artifact_id)
-        result = await session.execute(stmt)
-        is_locked = result.scalar_one_or_none()
-        return bool(is_locked) if is_locked is not None else False
-
-    @staticmethod
     def _serialize_lock_metadata(artifact: Any, config: Dict[str, str], artifact_type: str) -> Dict[str, Any]:
         """Serialize lock metadata from an artifact model."""
         return {

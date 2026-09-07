@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.llm_factory import llm
 from app.schemas import RequirementIntentDetectionResult, WorkflowRoutingResult, RequirementMatcherResult
-from app.prompt_loader import load_prompt, _PromptProxy
+from app.prompt_loader import load_prompt
 from app.llm_utils import invoke_llm_structured
 
 logger = logging.getLogger("app.semantic_service")
@@ -21,10 +21,6 @@ class SemanticChange(BaseModel):
 
 class SemanticChangeDetectionResult(BaseModel):
     changes: List[SemanticChange] = Field(..., description="List of all detected changes")
-
-SEMANTIC_CHANGE_DETECTION_PROMPT = _PromptProxy("semantic")
-REQUIREMENT_INTENT_DETECTION_PROMPT = _PromptProxy("intent")
-REQUIREMENT_MATCHER_PROMPT = _PromptProxy("matcher")
 
 
 async def detect_semantic_changes(raw_input: str, current_stories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
