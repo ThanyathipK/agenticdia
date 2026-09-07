@@ -27,7 +27,6 @@ from app.models import (
     ProjectModel,
     RequirementModel,
     UserStoryModel,
-    VersionHistoryModel,
 )
 
 
@@ -92,7 +91,6 @@ def serialize_requirement(req: RequirementModel) -> Dict[str, Any]:
         "requirement_code": req.requirement_code,
         "title": req.title,
         "description": req.description,
-        "priority": req.priority,
         "status": req.status,
         "is_locked": bool(req.is_locked) if req.is_locked is not None else False,
         "locked_by": req.locked_by,
@@ -206,7 +204,6 @@ def serialize_prd_version(v: PRDVersionModel) -> Dict[str, Any]:
         "project_id": str(v.project_id),
         "version_number": v.version_number,
         "generated_prd": v.generated_prd,
-        "generated_diagram": v.generated_diagram,
         "generated_by": v.generated_by,
         "created_at": dt_iso(v.created_at),
     }
@@ -253,24 +250,10 @@ def serialize_prd_section_version(v: PRDSectionVersionModel) -> Dict[str, Any]:
     }
 
 
-def serialize_version_history(vh: VersionHistoryModel) -> Dict[str, Any]:
-    """Serialize a VersionHistoryModel into its public dict representation."""
-    return {
-        "id": str(vh.id),
-        "project_id": str(vh.project_id),
-        "version": vh.version,
-        "timestamp": vh.timestamp,
-        "author": vh.author,
-        "description": vh.description,
-        "requirements_snapshot": vh.requirements_snapshot,
-    }
-
-
 def serialize_conversation_message(m: ConversationMessageModel) -> Dict[str, Any]:
     """Serialize a ConversationMessageModel into its public dict repr."""
     return {
         "id": str(m.id),
-        "conversation_id": str(m.conversation_id),
         "project_id": str(m.project_id),
         "role": m.role,
         "message": m.message,

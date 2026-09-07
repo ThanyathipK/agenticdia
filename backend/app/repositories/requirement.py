@@ -38,7 +38,6 @@ class RequirementRepository:
             requirement_code=data.get("requirement_code", "REQ-000"),
             title=data.get("title", "Untitled Requirement"),
             description=data.get("description"),
-            priority=data.get("priority"),
             status=data.get("status", "active"),
             is_locked=False,
             locked_by=None,
@@ -85,7 +84,6 @@ class RequirementRepository:
                 )
             if "title" in updates: req.title = updates["title"]
             if "description" in updates: req.description = updates["description"]
-            if "priority" in updates: req.priority = updates["priority"]
             if "status" in updates: req.status = updates["status"]
             await session.flush()
             await session.refresh(req)

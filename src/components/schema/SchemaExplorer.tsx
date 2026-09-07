@@ -247,7 +247,6 @@ export default function SchemaExplorer({
         requirement_code: 'REQ-NEW-' + Math.floor(100 + Math.random() * 900),
         title: reqForm.epicName,
         description: '',
-        priority: 'Medium',
         status: 'active',
         version: 1,
         is_locked: false,
@@ -257,7 +256,7 @@ export default function SchemaExplorer({
         created_at: nowTimestamp
       };
       setRequirements([newRow, ...requirements]);
-      simulatedSql = `INSERT INTO requirements (id, project_id, epic_id, requirement_code, title, description, priority, status, version, created_at)\nVALUES ('${newId}', '${reqForm.projectId}', NULL, 'REQ-NEW-${Math.floor(100 + Math.random() * 900)}', '${reqForm.epicName}', '', 'Medium', 'active', 1, NOW());`;
+      simulatedSql = `INSERT INTO requirements (id, project_id, epic_id, requirement_code, title, description, status, version, created_at)\nVALUES ('${newId}', '${reqForm.projectId}', NULL, 'REQ-NEW-${Math.floor(100 + Math.random() * 900)}', '${reqForm.epicName}', '', 'active', 1, NOW());`;
       setReqForm(prev => ({ ...prev, epicName: '' }));
 } else if (selectedTableName === 'user_stories') {
       if (!storyForm.storyTitle || !storyForm.asA || !storyForm.iWantTo || !storyForm.soThat) {

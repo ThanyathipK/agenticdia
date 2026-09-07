@@ -40,6 +40,7 @@ import { ConfirmationPanel } from './ConfirmationPanel';
 import { DocumentLibrary } from './DocumentLibrary';
 import { NewProjectModal } from './NewProjectModal';
 import { ConfirmModal } from './ConfirmModal';
+import { Tooltip, TooltipBubble } from './Tooltip';
 import { highlightMatch } from '../utils/highlight';
 
 export default function Dashboard() {
@@ -143,36 +144,42 @@ export default function Dashboard() {
             <div className="w-6.5 h-6.5 rounded-lg bg-primary flex items-center justify-center text-on-primary text-[10px] font-bold shrink-0">Ai</div>
             <span className="text-[13px] font-bold text-on-surface whitespace-nowrap">Agentic-AI</span>
           </div>
-          <button
-            className="w-8 h-8 rounded-xl border border-outline bg-surface flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
-            onClick={() => setHistoryCollapsed((v: boolean) => !v)}
-            title="Collapse/Expand history panel"
-          >
-            <PanelLeft className="w-4 h-4" />
-          </button>
+          <Tooltip label={expanded ? 'Hide sidebar' : 'Show sidebar'} side="right">
+            <button
+              className="w-8 h-8 rounded-xl border border-outline bg-surface flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+              onClick={() => setHistoryCollapsed((v: boolean) => !v)}
+              aria-label={expanded ? 'Hide sidebar' : 'Show sidebar'}
+            >
+              <PanelLeft className="w-4 h-4" />
+            </button>
+          </Tooltip>
         </div>
 
         <div className="px-2">
-          <button
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${collapsed ? 'justify-center' : ''}`}
-            title="New Project"
-            onClick={() => setIsCreateModalOpen(true)}
-          >
-            <Plus className="w-4 h-4 shrink-0" />
-            {expanded && <span>New Project</span>}
-          </button>
-          <button
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${collapsed ? 'justify-center' : ''} ${
-              isSearchOpen || projectSearchQuery
-                ? 'bg-primary/10 text-primary'
-                : 'text-on-surface-variant hover:bg-primary/10 hover:text-primary'
-            }`}
-            title="Search Projects"
-            onClick={handleToggleProjectSearch}
-          >
-            <Search className="w-4 h-4 shrink-0" />
-            {expanded && <span>Search Projects</span>}
-          </button>
+          <Tooltip label="New Project" side="right" className="w-full">
+            <button
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${collapsed ? 'justify-center' : ''}`}
+              aria-label="New Project"
+              onClick={() => setIsCreateModalOpen(true)}
+            >
+              <Plus className="w-4 h-4 shrink-0" />
+              {expanded && <span>New Project</span>}
+            </button>
+          </Tooltip>
+          <Tooltip label="Search Projects" side="right" className="w-full">
+            <button
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${collapsed ? 'justify-center' : ''} ${
+                isSearchOpen || projectSearchQuery
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-on-surface-variant hover:bg-primary/10 hover:text-primary'
+              }`}
+              aria-label="Search Projects"
+              onClick={handleToggleProjectSearch}
+            >
+              <Search className="w-4 h-4 shrink-0" />
+              {expanded && <span>Search Projects</span>}
+            </button>
+          </Tooltip>
           {isSearchOpen && expanded && (
             <div className="relative flex items-center mt-1">
               <Search className="absolute left-2.5 w-3.5 h-3.5 text-on-surface-variant pointer-events-none" />
@@ -196,10 +203,11 @@ export default function Dashboard() {
                     setProjectSearchQuery('');
                     searchInputRef.current?.focus();
                   }}
-                  className="absolute right-1.5 p-0.5 text-slate-400 hover:text-slate-600 rounded"
-                  title="Clear search"
+                  className="group/tt absolute right-1.5 p-0.5 text-slate-400 hover:text-slate-600 rounded"
+                  aria-label="Clear search"
                 >
                   <XCircle className="w-3.5 h-3.5" />
+                  <TooltipBubble label="Clear search" side="bottom" />
                 </button>
               )}
             </div>
@@ -239,18 +247,24 @@ export default function Dashboard() {
                       autoFocus
                       onClick={(e) => e.stopPropagation()}
                     />
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleRenameProject(p.id, renameProjectName); }}
-                      className="p-1 text-emerald-600 hover:bg-emerald-50 rounded"
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setRenameProjectId(null); }}
-                      className="p-1 text-slate-400 hover:bg-slate-100 rounded"
-                    >
-                      <XCircle className="w-3.5 h-3.5" />
-                    </button>
+                    <Tooltip label="Confirm rename" side="left">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleRenameProject(p.id, renameProjectName); }}
+                        className="p-1 text-emerald-600 hover:bg-emerald-50 rounded"
+                        aria-label="Confirm rename"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip label="Cancel rename" side="left">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setRenameProjectId(null); }}
+                        className="p-1 text-slate-400 hover:bg-slate-100 rounded"
+                        aria-label="Cancel rename"
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                      </button>
+                    </Tooltip>
                   </div>
                 ) : (
                   <button
@@ -274,39 +288,45 @@ export default function Dashboard() {
                       <>
                         <span className="truncate flex-1 text-left">{highlightMatch(p.name, projectSearchQuery)}</span>
                         <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 shrink-0">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleTogglePin(p.id);
-                            }}
-                            className={`p-1 rounded-lg transition-colors ${p.is_pinned ? 'text-primary hover:bg-primary/10' : 'text-slate-400 hover:text-primary hover:bg-primary/10'}`}
-                            title={p.is_pinned ? 'Unpin' : 'Pin'}
-                          >
-                            {p.is_pinned
-                              ? <Pin className="w-3 h-3" />
-                              : <PinOff className="w-3 h-3" />}
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRenameProjectId(p.id);
-                              setRenameProjectName(p.name);
-                            }}
-                            className="p-1 text-slate-400 hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
-                            title="Rename"
-                          >
-                            <Pencil className="w-3 h-3" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setProjectPendingDelete(p.id);
-                            }}
-                            className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                            title="Delete"
-                          >
-                            <XCircle className="w-3 h-3" />
-                          </button>
+                          <Tooltip label={p.is_pinned ? 'Unpin' : 'Pin'} side="left">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleTogglePin(p.id);
+                              }}
+                              className={`p-1 rounded-lg transition-colors ${p.is_pinned ? 'text-primary hover:bg-primary/10' : 'text-slate-400 hover:text-primary hover:bg-primary/10'}`}
+                              aria-label={p.is_pinned ? 'Unpin' : 'Pin'}
+                            >
+                              {p.is_pinned
+                                ? <Pin className="w-3 h-3" />
+                                : <PinOff className="w-3 h-3" />}
+                            </button>
+                          </Tooltip>
+                          <Tooltip label="Rename" side="left">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRenameProjectId(p.id);
+                                setRenameProjectName(p.name);
+                              }}
+                              className="p-1 text-slate-400 hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
+                              aria-label="Rename"
+                            >
+                              <Pencil className="w-3 h-3" />
+                            </button>
+                          </Tooltip>
+                          <Tooltip label="Delete" side="left">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setProjectPendingDelete(p.id);
+                              }}
+                              className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                              aria-label="Delete"
+                            >
+                              <XCircle className="w-3 h-3" />
+                            </button>
+                          </Tooltip>
                         </div>
                       </>
                     )}
@@ -384,12 +404,12 @@ export default function Dashboard() {
           The sidebar itself is re-positioned as an overlay by #project-sidebar.mobile-open. */}
       <button
         type="button"
-        className={`fixed ${mobileSidebarOpen ? 'left-[292px]' : 'left-3'} top-[76px] z-30 w-9 h-9 rounded-xl bg-white border border-outline shadow-md flex items-center justify-center text-on-surface hover:bg-primary/10 hover:text-primary transition-colors lg:hidden`}
+        className={`group/tt fixed ${mobileSidebarOpen ? 'left-[292px]' : 'left-3'} top-[76px] z-30 w-9 h-9 rounded-xl bg-white border border-outline shadow-md flex items-center justify-center text-on-surface hover:bg-primary/10 hover:text-primary transition-colors lg:hidden`}
         onClick={() => setMobileSidebarOpen((v) => !v)}
         aria-label={mobileSidebarOpen ? 'Close project sidebar' : 'Open project sidebar'}
-        title={mobileSidebarOpen ? 'Close sidebar' : 'Projects'}
       >
         {mobileSidebarOpen ? <XCircle className="w-4.5 h-4.5" /> : <Menu className="w-4.5 h-4.5" />}
+        <TooltipBubble label={mobileSidebarOpen ? 'Close sidebar' : 'Open sidebar'} side="bottom" />
       </button>
       {mobileSidebarOpen && (
         <div
@@ -416,60 +436,75 @@ export default function Dashboard() {
           {/* Tabs bar */}
           <div className="min-h-13 bg-glass-bg border-b border-outline flex flex-wrap items-center px-4 md:px-6 justify-between gap-2 shrink-0 select-none">
             <div className="flex bg-black/5 rounded-full p-1 h-9.5 border border-black/5">
-              <button 
-                onClick={() => setActiveTab('prd')}
-                className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
-                  activeTab === 'prd' 
-                    ? 'bg-primary text-on-primary shadow-sm' 
-                    : 'text-on-surface-variant hover:text-on-surface'
-                }`}
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">PRD Document</span>
-              </button>
+              <Tooltip label="PRD Document" side="bottom" className="h-full">
+                <button
+                  onClick={() => setActiveTab('prd')}
+                  aria-label="PRD Document tab"
+                  className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
+                    activeTab === 'prd'
+                      ? 'bg-primary text-on-primary shadow-sm'
+                      : 'text-on-surface-variant hover:text-on-surface'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">PRD Document</span>
+                </button>
+              </Tooltip>
               
-              <button 
-                onClick={() => setActiveTab('flows')}
-                className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
-                  activeTab === 'flows' 
-                    ? 'bg-primary text-on-primary shadow-sm' 
-                    : 'text-on-surface-variant hover:text-on-surface'
-                }`}
-              >
-                <Network className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Architecture Flows</span>
-              </button>
+              <Tooltip label="Architecture Flows" side="bottom" className="h-full">
+                <button
+                  onClick={() => setActiveTab('flows')}
+                  aria-label="Architecture Flows tab"
+                  className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
+                    activeTab === 'flows'
+                      ? 'bg-primary text-on-primary shadow-sm'
+                      : 'text-on-surface-variant hover:text-on-surface'
+                  }`}
+                >
+                  <Network className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Architecture Flows</span>
+                </button>
+              </Tooltip>
               
-              <button 
-                onClick={() => setActiveTab('history')}
-                className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
-                  activeTab === 'history' 
-                    ? 'bg-primary text-on-primary shadow-sm' 
-                    : 'text-on-surface-variant hover:text-on-surface'
-                }`}
-              >
-                <Clock className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Versions & Docs</span>
-              </button>
+              <Tooltip label="Versions & Docs" side="bottom" className="h-full">
+                <button
+                  onClick={() => setActiveTab('history')}
+                  aria-label="Versions and Docs tab"
+                  className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
+                    activeTab === 'history'
+                      ? 'bg-primary text-on-primary shadow-sm'
+                      : 'text-on-surface-variant hover:text-on-surface'
+                  }`}
+                >
+                  <Clock className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Versions & Docs</span>
+                </button>
+              </Tooltip>
             </div>
 
             {/* Quick action buttons */}
             <div className="flex items-center gap-2 no-print shrink-0">
-              <button 
-                onClick={handleDownloadDocx}
-                className="px-3 py-1.5 rounded-xl bg-white border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface transition-all flex items-center gap-1.5 cursor-pointer font-semibold shadow-sm whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5 text-primary" />
-                <span className="hidden md:inline">Export Word (DOCX)</span>
-              </button>
+              <Tooltip label="Export Word (DOCX)" side="bottom">
+                <button
+                  onClick={handleDownloadDocx}
+                  aria-label="Export Word (DOCX)"
+                  className="px-3 py-1.5 rounded-xl bg-white border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface transition-all flex items-center gap-1.5 cursor-pointer font-semibold shadow-sm whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5 text-primary" />
+                  <span className="hidden md:inline">Export Word (DOCX)</span>
+                </button>
+              </Tooltip>
 
-              <button 
-                onClick={handlePrintPDF}
-                className="px-3 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary/15 animate-none whitespace-nowrap"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Export PDF</span>
-              </button>
+              <Tooltip label="Export PDF" side="bottom">
+                <button
+                  onClick={handlePrintPDF}
+                  aria-label="Export PDF"
+                  className="px-3 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary/15 animate-none whitespace-nowrap"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span className="hidden md:inline">Export PDF</span>
+                </button>
+              </Tooltip>
             </div>
           </div>
 

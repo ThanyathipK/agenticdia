@@ -283,10 +283,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     });
   }, [prdMarkdownDisplay, structuredRequirements.user_stories, editingSectionId]);
 
-  // Keep the chat scrolled to the latest message
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isProcessing]);
+  // (Chat auto-scroll moved into ChatPanel — see the note in useChat.ts.)
 
   const handleSaveSection = async (sectionId: string, newContent: string) => {
     // 1. Update the local sections state

@@ -120,7 +120,6 @@ class PRDVersionRepository:
             project_id=pid,
             version_number=next_version,
             generated_prd=data.get("generated_prd", ""),
-            generated_diagram=data.get("generated_diagram", ""),
             generated_by=data.get("generated_by", "automated_agent")
         )
         session.add(version)

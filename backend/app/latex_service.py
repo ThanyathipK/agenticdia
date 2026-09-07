@@ -554,6 +554,89 @@ def _rewrite_command(text: str, command: str, handler) -> str:
         out.append(text[i])
         i += 1
     return "".join(out)
+_TABULAR_ENV_RE = re.compile(
+    r"\\begin\{(tabular|longtable)\}.*?\\end\{\1\}",
+    re.S,
+)
+
+
+def _keep_in_cell_rowbreaks(block: str) -> str:
+    r"""Rewrite top-level in-cell ``\\`` line breaks so pandoc keeps one
+    preview row per template row.
+
+    The Krungsri tables use ``p{}``-style paragraph columns where a ``\\``
+    in the MIDDLE of a row's cell content (``Introduction ... \\
+    Executive Summary & ...``) is a line break inside the cell, while every
+    row-terminating ``\\`` sits at the end of a source line (or is
+    followed by ``\hline`` / ``\cline`` / ``\end`` / ``&``).
+    Pandoc's LaTeX reader treats every top-level ``\\`` as a row
+    terminator, splitting one template row into two broken preview rows, so
+    mid-line ``\\`` must be rewritten to ``\newline`` (pandoc renders
+    it as a ``<br>`` line break inside the cell). Breaks nested in braces
+    (``\shortstack{...}``) are untouched here - the unwrap above rewrites
+    those itself.
+    """
+
+    hline_rules = (chr(92) + "hline", chr(92) + "cline")
+    end_rule = chr(92) + "end{"
+    newline_cmd = chr(92) + "newline"
+    out: list[str] = []
+    i = 0
+    n = len(block)
+    depth = 0
+    while i < n:
+        ch = block[i]
+        if ch == "{":
+            depth += 1
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            out.append(ch)
+            i += 1
+            continue
+        if depth == 0 and block.startswith(chr(92) * 2, i):
+            j = i + 2
+            if j < n and block[j] == "*":
+                j += 1
+            if j < n and block[j] == "[":
+                closer = block.find("]", j + 1)
+                if closer != -1:
+                    j = closer + 1
+            k = j
+            while k < n and block[k] in " \t":
+                k += 1
+            rest = block[k:]
+            at_line_end = k >= n or block[k] in "\r\n"
+            if (
+                at_line_end
+                or rest.startswith(hline_rules)
+                or rest.startswith(end_rule)
+                or rest.startswith("&")
+            ):
+                out.append(block[i:j])  # real row terminator: keep verbatim
+            else:
+                out.append(newline_cmd)  # in-cell break -> <br> in preview
+            i = j
+            continue
+        if ch == chr(92):  # single backslash: control word or escaped char
+            j = i + 1
+            if j < n and block[j].isalpha():
+                while j < n and block[j].isalpha():
+                    j += 1
+                out.append(block[i:j])
+                i = j
+                continue
+            if j < n:
+                out.append(block[i:j + 1])
+                i = j + 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def preprocess_latex_for_pandoc(latex_body: str) -> str:
     """Rewrite Krungsri-template LaTeX into a pandoc-compatible subset.
 
@@ -561,6 +644,9 @@ def preprocess_latex_for_pandoc(latex_body: str) -> str:
       only their content (merged-cell layout is handled by Word later).
     - ``\\shortstack{...}`` and ``\\parbox{w}{...}`` are unwrapped; inner line
       breaks become ``\\newline`` which pandoc renders as real line breaks.
+    - Top-level in-cell ``\\\\`` row breaks (the template's multi-line label
+      cells, e.g. ``Introduction \\&\\\\ Executive Summary``) become
+      ``\\newline`` too, so pandoc keeps one preview row per template row.
     - ``\\prdlbl{...}`` becomes ``\\textbf{...}``, ``\\prdfield{...}`` is unwrapped.
     - Custom ``L{..}``/``R{..}`` columns become ``p{..}``; the definitions and
       conflicts that confuse pandoc (``\\rowcolor``, ``\\cline``, ``\\newcolumntype``,
@@ -597,6 +683,14 @@ def preprocess_latex_for_pandoc(latex_body: str) -> str:
     s = re.sub(r"R\{(\d*\.?\d*cm)\}", r"p{\1}", s)
     s = re.sub(r"(?m)^\s*\\newcolumntype\s*\{.*?$", "", s)
     s = re.sub(r"(?m)^\s*\\renewcommand\s*\{.*?$", "", s)
+
+    # Multi-line template cells: the unwraps above promote ``\\`` line breaks
+    # that lived inside \parbox/\multirow cells to the top level, where
+    # pandoc's reader would mistake them for row terminators and split one
+    # template row into two broken preview rows. Rescan now that the cell
+    # contents sit at the top level (this must run while \hline/\cline are
+    # still present - they mark the real row terminators below).
+    s = _TABULAR_ENV_RE.sub(lambda m: _keep_in_cell_rowbreaks(m.group(0)), s)
 
     # Row colors / partial rules / row-spanning artefacts confuse pandoc.
     s = re.sub(r"\\rowcolor\s*\{[^{}]*\}", "", s)

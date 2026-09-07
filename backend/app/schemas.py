@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Optional, Dict, Any, Union
 from uuid import UUID
 from datetime import datetime
@@ -12,6 +12,20 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., max_length=255, description="Name of core banking system or microservice.")
     description: Optional[str] = Field(None, description="System functional scope details.")
     industry_standard: str = Field("Krungsri Nimble Baseline", description="Target compliance guideline standard.")
+
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_name(cls, value: str) -> str:
+        """Trim surrounding whitespace and reject blank names.
+
+        Duplicate-name detection (see ``ProjectRepository.name_exists``)
+        compares trimmed, lower-cased names, so the stored name is
+        canonicalized here once at the schema boundary.
+        """
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Project name must not be empty.")
+        return stripped
 
 class RequirementState(BaseModel):
     """Schema tracking current locking state and Epic structure attributes."""
@@ -331,7 +345,6 @@ class RequirementDetail(BaseModel):
     requirement_code: str = Field(..., description="Requirement code (e.g. REQ-001).")
     title: str = Field(..., description="Requirement title.")
     description: Optional[str] = Field(None, description="Requirement description.")
-    priority: Optional[str] = Field(None, description="Priority level.")
     status: Optional[str] = Field("active", description="Status: 'active' or 'deleted'.")
     is_locked: Optional[bool] = Field(False, description="Whether locked against edits.")
     locked_by: Optional[str] = Field(None, description="Locking actor.")
@@ -345,7 +358,6 @@ class ConversationMessageResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str = Field(..., description="Message UUID string.")
-    conversation_id: str = Field(..., description="Conversation/thread UUID string.")
     project_id: str = Field(..., description="Project UUID string the message belongs to.")
     role: str = Field(..., description="Message role: 'user' or 'assistant'.")
     message: str = Field(..., description="Raw message text.")
@@ -392,7 +404,6 @@ class PRDVersionResponse(BaseModel):
     project_id: str = Field(..., description="Project UUID string.")
     version_number: int = Field(..., description="Monotonic version number.")
     generated_prd: str = Field("", description="Markdown PRD content for this version.")
-    generated_diagram: str = Field("", description="Mermaid diagram source for this version.")
     generated_by: str = Field("automated_agent", description="Actor that produced the version.")
     created_at: str = Field("", description="ISO8601 creation timestamp.")
 
@@ -575,7 +586,6 @@ class UploadedDocumentResponse(BaseModel):
     original_format: str = Field(..., description="Source format: 'docx' | 'pdf' | 'md' | 'txt'.")
     mime_type: Optional[str] = Field(None, description="Detected MIME type of the upload.")
     content_markdown: Optional[str] = Field(None, description="Canonical converted markdown. Present only when the detail/markdown endpoint is used and the full text is always stored.")
-    original_storage_url: Optional[str] = Field(None, description="Reserved object-storage URL (unused today).")
     file_size_bytes: int = Field(0, description="Uploaded file size in bytes.")
     token_count: int = Field(0, description="Markdown token count measured at ingest via count_tokens.")
     status: str = Field("processed", description="'processed' | 'failed'.")

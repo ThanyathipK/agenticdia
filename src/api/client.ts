@@ -82,6 +82,26 @@ export async function detailFromBlobError(err: unknown): Promise<string | null> 
   }
 }
 
+// Error bodies from JSON endpoints are FastAPI {"detail": ...} payloads: a
+// plain string for 4xx conflicts (e.g. duplicate project name -> 409) or a
+// list of issue objects for 422 validation failures, whose `msg` carries the
+// readable text (Pydantic prefixes nested validator messages with
+// "Value error, " — stripped here). Returns null when nothing usable exists.
+export function detailFromJsonError(err: unknown): string | null {
+  if (!axios.isAxiosError(err)) return null;
+  const detail: unknown = (err.response?.data as { detail?: unknown } | undefined)?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    for (const item of detail) {
+      const msg = (item as { msg?: unknown })?.msg;
+      if (typeof msg === 'string' && msg.trim()) {
+        return msg.replace(/^Value error,\s*/i, '');
+      }
+    }
+  }
+  return null;
+}
+
 export const api = {
   // ---- PRD sections (part-level editing / locking / versioning) ------------
   // The PRD is stored as NINE editable parts; each part is independently

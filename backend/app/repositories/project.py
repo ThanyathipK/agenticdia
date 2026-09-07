@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.lock_service import LockService
@@ -107,6 +107,41 @@ class ProjectRepository:
             serialize_project(p, match_snippet=snippets.get(str(p.id)))
             for p in projects
         ]
+
+    @staticmethod
+    async def name_exists(
+        name: str,
+        session: AsyncSession,
+        exclude_project_id: Optional[str] = None,
+    ) -> bool:
+        """Return ``True`` when a project already uses ``name``.
+
+        The comparison is case-insensitive and whitespace-trimmed on BOTH
+        sides, so ``"Payment Hub"``, ``"payment hub "`` and legacy rows saved
+        without trimming are all treated as the same name. Routes call this
+        before create/rename and translate ``True`` into HTTP 409 Conflict.
+
+        Args:
+            name: Candidate project name (stripped + lower-cased here).
+            session: Active asynchronous database session.
+            exclude_project_id: Optional project UUID string to ignore — used
+                by rename so a project keeps its own name.
+
+        Returns:
+            bool: ``True`` when the normalized name is already taken.
+        """
+        normalized = (name or "").strip().lower()
+        if not normalized:
+            return False
+        stmt = (
+            select(func.count())
+            .select_from(ProjectModel)
+            .where(func.trim(func.lower(ProjectModel.name)) == normalized)
+        )
+        if exclude_project_id is not None:
+            stmt = stmt.where(ProjectModel.id != as_uuid(exclude_project_id))
+        result = await session.execute(stmt)
+        return bool((result.scalar_one() or 0) > 0)
 
     @staticmethod
     async def create_project(project_data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:

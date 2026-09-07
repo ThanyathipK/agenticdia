@@ -354,9 +354,12 @@ class LockService:
             logger.info(f"[UNLOCK] {artifact_type} {artifact_id} is already unlocked.")
             return LockService._serialize_lock_metadata(artifact, config, artifact_type)
 
-        # Authorization check: only the lock owner can unlock the artifact
+        # Authorization check: only the lock owner can unlock the artifact.
+        # A lock with NO recorded owner (e.g. the born-locked ``contents``
+        # section seeded by the system with ``locked_by = NULL``) is not held
+        # by any user, so any requester may clear it.
         locked_by_value = getattr(artifact, locked_by_field)
-        if locked_by_value != unlocked_by:
+        if locked_by_value and locked_by_value != unlocked_by:
             logger.warning(
                 f"[UNLOCK] Denied unlock of {artifact_type} {artifact_id}: "
                 f"locked by {locked_by_value}, attempted by {unlocked_by}"

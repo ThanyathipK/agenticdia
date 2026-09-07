@@ -94,7 +94,6 @@ CREATE TABLE requirements (
     requirement_code VARCHAR(50) NOT NULL,
     title VARCHAR(255) NOT NULL,
     description TEXT,
-    priority VARCHAR(50),
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     version INTEGER NOT NULL DEFAULT 1,
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
@@ -237,27 +236,6 @@ CREATE TRIGGER handle_updated_at_prd_documents
     EXECUTE FUNCTION set_updated_at();
 
 -- ==========================================
--- 9. VERSION HISTORY & SNAPSHOT LEDGER (AUDIT LEDGER)
--- ==========================================
--- Strict audit-trail ledger containing comprehensive historical snapshots of banking requirements.
-CREATE TABLE version_history (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    requirement_id UUID NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
-    version_number INT NOT NULL,
-    changed_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- RESTRICT: Prevent deleting audit author
-    change_description TEXT NOT NULL,
-    state_snapshot JSONB NOT NULL, -- Stores structural state including nested user_stories and criteria
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TRIGGER handle_updated_at_version_history
-    BEFORE UPDATE ON version_history
-    FOR EACH ROW
-    EXECUTE FUNCTION set_updated_at();
-
--- ==========================================
 -- 9b. PRD VERSIONS TABLE (IMMUTABLE VERSION HISTORY)
 -- ==========================================
 -- Dedicated immutable PRD version repository.
@@ -269,7 +247,6 @@ CREATE TABLE prd_versions (
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     version_number INT NOT NULL,
     generated_prd TEXT NOT NULL,
-    generated_diagram TEXT,
     generated_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -341,7 +318,6 @@ CREATE INDEX idx_prd_section_versions_section_id ON prd_section_versions(section
 -- Independent from requirement_states storage.
 CREATE TABLE conversation_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id UUID,
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     role VARCHAR(50) NOT NULL,
     message TEXT NOT NULL,
@@ -351,7 +327,6 @@ CREATE TABLE conversation_messages (
 );
 
 CREATE INDEX idx_conversation_messages_project_id ON conversation_messages(project_id);
-CREATE INDEX idx_conversation_messages_conversation_id ON conversation_messages(conversation_id);
 CREATE INDEX idx_conversation_messages_created_at ON conversation_messages(created_at);
 
 -- ==========================================
@@ -369,9 +344,6 @@ CREATE INDEX idx_audit_results_requirement_id ON audit_results(requirement_id);
 CREATE INDEX idx_clarification_questions_audit_result_id ON clarification_questions(audit_result_id);
 CREATE INDEX idx_clarification_questions_target_user_story_id ON clarification_questions(target_user_story_id);
 CREATE INDEX idx_prd_documents_project_id ON prd_documents(project_id);
-CREATE INDEX idx_version_history_project_id ON version_history(project_id);
-CREATE INDEX idx_version_history_requirement_id ON version_history(requirement_id);
-CREATE INDEX idx_version_history_changed_by_user_id ON version_history(changed_by_user_id);
 
 -- Frequently Queried Status & Categories Indexes (To accelerate dashboard metrics and filter runs)
 CREATE INDEX idx_users_role ON users(role);

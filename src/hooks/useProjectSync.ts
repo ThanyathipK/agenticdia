@@ -81,6 +81,17 @@ export function useProjectSync(
         // Load conversation history — always from Supabase, in chronological order
         store.setMessages(toChatMessages(payload));
 
+        // Load pending human-in-the-loop merge actions (non-blocking). The live
+        // sync below also refreshes them, but loading them here means the first
+        // paint after opening a project is already complete — so the SSE stream
+        // doesn't have to perform an immediate duplicate state fetch.
+        try {
+          const actions = await api.listPendingActions(projId);
+          setPendingActions(actions || []);
+        } catch (err) {
+          handleWarning('Could not load pending actions.', err);
+        }
+
         // Load per-part PRD section lock/ownership metadata (non-blocking).
         store.loadSectionLocks(projId);
 
@@ -229,6 +240,24 @@ export function useProjectSync(
     // Open the Server-Sent Events stream. The backend publishes a change event
     // whenever the project state is mutated, so no periodic polling is needed.
     const source = new EventSource(`/api/project/${projectId}/sse`);
+
+    // Debounce window for event-triggered refreshes. A multi-agent run publishes
+    // bursts of events (per-step saves, PRD section updates, progress frames) in
+    // a few hundred milliseconds; coalescing them into ONE full-state fetch
+    // keeps the UI live without re-downloading the whole project payload (full
+    // PRD markdown + conversation history) once per event.
+    const REFRESH_DEBOUNCE_MS = 350;
+    let refreshTimer: number | undefined;
+
+    const scheduleRefresh = () => {
+      if (!isSubscribed) return;
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        void refreshFromServer();
+      }, REFRESH_DEBOUNCE_MS);
+    };
+
     source.onopen = () => {
       if (isSubscribed) store.setSyncStatus('Live updates connected');
     };
@@ -236,9 +265,11 @@ export function useProjectSync(
       if (!isSubscribed) return;
       try {
         const message = JSON.parse(event.data);
-        // Every server event signals that project state changed; refresh once.
-        if (message && message.event) {
-          refreshFromServer();
+        // The stream's first frame is a `connected` handshake, not a state
+        // change — `loadProjectState` already fetched the full state when the
+        // project opened, so it must NOT trigger a redundant re-download.
+        if (message && message.event && message.event !== 'connected') {
+          scheduleRefresh();
         }
       } catch (err) {
         // Ignore malformed or heartbeat payloads.
@@ -249,11 +280,9 @@ export function useProjectSync(
       if (isSubscribed) store.setSyncStatus('Live updates reconnecting...');
     };
 
-    // Run once immediately, mirroring the previous "run immediately" behavior.
-    refreshFromServer();
-
     return () => {
       isSubscribed = false;
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
       source.close();
     };
     // `store` is recreated every render; only re-subscribe when the project changes.

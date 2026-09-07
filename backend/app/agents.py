@@ -1202,7 +1202,6 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         if db_session:
             await PRDVersionRepository.create(project_id, {
                 "generated_prd": req_state["generated_prd"],
-                "generated_diagram": req_state["generated_diagrams"],
                 "generated_by": "automated_agent"
             }, db_session)
             logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")

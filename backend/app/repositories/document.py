@@ -31,7 +31,6 @@ class DocumentRepository:
             original_format=data["original_format"],
             mime_type=data.get("mime_type"),
             content_markdown=data.get("content_markdown", ""),
-            original_storage_url=data.get("original_storage_url"),
             file_size_bytes=data.get("file_size_bytes", 0),
             token_count=data.get("token_count", 0),
             status=data.get("status", "processed"),

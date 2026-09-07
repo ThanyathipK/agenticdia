@@ -247,6 +247,67 @@ class TestSeedingAndRepository:
         )
         assert status["is_locked"] is True
 
+    @pytest.mark.asyncio
+    async def test_unlock_artifact(self, db_session):
+        session, project_id = db_session
+        await ensure_sections_seeded(project_id, session)
+        section = await PRDSectionRepository.get_by_key("reviews", project_id, session)
+        await LockService.lock_artifact(
+            "prd_section", section["id"], session,
+            locked_by="user", lock_reason="sign-off received", project_id=project_id,
+        )
+        info = await LockService.unlock_artifact(
+            "prd_section", section["id"], session,
+            unlocked_by="user", project_id=project_id,
+        )
+        assert info["is_locked"] is False
+        status = await LockService.get_lock_status(
+            "prd_section", section["id"], session, project_id=project_id
+        )
+        assert status["is_locked"] is False
+
+    @pytest.mark.asyncio
+    async def test_born_locked_section_with_no_lock_owner_is_unlockable(self, db_session):
+        """Regression: 'contents' is seeded is_locked=True with locked_by=NULL
+        (system-derived structure). The unlock ownership check used to treat
+        that NULL as a DIFFERENT owner and answered 403 Forbidden forever.
+        A lock with no recorded owner is not held by any user, so any
+        requester may clear it."""
+        session, project_id = db_session
+        await ensure_sections_seeded(project_id, session)
+        contents = await PRDSectionRepository.get_by_key("contents", project_id, session)
+        assert contents["is_locked"] is True
+        assert contents["locked_by"] is None
+
+        info = await LockService.unlock_artifact(
+            "prd_section", contents["id"], session,
+            unlocked_by="user", project_id=project_id,
+        )
+        assert info["is_locked"] is False
+        after = await PRDSectionRepository.get_by_key("contents", project_id, session)
+        assert after["is_locked"] is False
+
+    @pytest.mark.asyncio
+    async def test_unlock_denied_while_another_user_holds_the_lock(self, db_session):
+        """The guard must keep protecting locks actually held by someone else."""
+        session, project_id = db_session
+        await ensure_sections_seeded(project_id, session)
+        stakeholders = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        await LockService.lock_artifact(
+            "prd_section", stakeholders["id"], session,
+            locked_by="alice", project_id=project_id,
+        )
+        with pytest.raises(PermissionError):
+            await LockService.unlock_artifact(
+                "prd_section", stakeholders["id"], session,
+                unlocked_by="bob", project_id=project_id,
+            )
+        # ...and the lock survives the denied attempt.
+        after = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        assert after["is_locked"] is True
+        assert after["locked_by"] == "alice"
+
+
 
 # =====================================================================
 # AI regeneration ownership contract (sync_sections_from_prd)

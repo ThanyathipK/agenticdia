@@ -66,7 +66,6 @@ export interface RequirementPayload {
   requirement_code: string;
   title: string;
   description?: string;
-  priority?: string | null;
   status?: string;
   is_locked?: boolean;
   locked_by?: string | null;
@@ -105,7 +104,6 @@ export interface AuditResultPayload {
 
 export interface ConversationMessagePayload {
   id: string;
-  conversation_id?: string;
   project_id?: string;
   role: string;
   message?: string;
@@ -276,7 +274,6 @@ export interface UploadedDocumentPayload {
   original_format: DocumentFormat | string;
   mime_type?: string | null;
   content_markdown?: string | null;
-  original_storage_url?: string | null;
   file_size_bytes: number;
   token_count: number;
   status: 'processed' | 'failed' | string;

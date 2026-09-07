@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -140,6 +141,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# GZip response compression. The biggest payloads are the project-state reads,
+# which ship the FULL PRD markdown and the entire conversation history on every
+# request; compressing responses over 1KB typically cuts transfer size 5-10x
+# for markdown-heavy JSON. This is a pure wire-level win — no client changes.
+# (SSE `text/event-stream` frames are tiny and are flushed per chunk, so live
+# update latency is unaffected.)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # ==========================================
 # ROUTER REGISTRATION
 # ==========================================
@@ -202,15 +211,27 @@ def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse
 @app.exception_handler(RequestValidationError)
 def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Return a structured 422 for malformed bodies / unsupported content types."""
+    errors = exc.errors()
     logger.warning(
         "Request validation failed on %s %s: %s",
         request.method,
         request.url.path,
-        exc.errors(),
+        errors,
     )
+    # Pydantic v2 embeds the original exception object in each issue's ``ctx``
+    # (e.g. ``{'error': ValueError(...)}`` when a custom ``field_validator``
+    # raises), which is NOT JSON serializable — returning ``exc.errors()``
+    # verbatim would crash this response with a 500. Render each issue's
+    # ``ctx`` values down to plain strings so the body is always JSON-safe.
+    safe_errors = [
+        {**error, "ctx": {key: str(value) for key, value in error["ctx"].items()}}
+        if error.get("ctx")
+        else error
+        for error in errors
+    ]
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": exc.errors()},
+        content={"detail": safe_errors},
     )
 
 

@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
+import { useModalBehavior } from '../hooks/useModalBehavior';
 
 interface NewProjectModalProps {
   isOpen: boolean;
-  /** Creates the project; resolves to true on success (modal closes only then). */
-  onCreate: (name: string) => Promise<boolean>;
+  /**
+   * Creates the project. Resolves to null on success (modal closes only then)
+   * or to a user-facing error message — e.g. the backend's duplicate-name
+   * conflict — which is rendered inline below the input.
+   */
+  onCreate: (name: string) => Promise<string | null>;
   onClose: () => void;
 }
 
@@ -14,13 +19,27 @@ interface NewProjectModalProps {
 export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalProps) {
   const [name, setName] = useState<string>('');
   const [isCreating, setIsCreating] = useState<boolean>(false);
+  // Inline validation error (e.g. "name already exists" from the backend's
+  // 409 duplicate check) — cleared as soon as the user edits the input.
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Shared modal behavior: Escape-anywhere-to-close, focus trap, focus restore
+  // on close, and background scroll lock. Escape stays disabled while the
+  // create request is in flight (same guard as the overlay click below).
+  const { dialogRef } = useModalBehavior({
+    isOpen,
+    onClose: () => {
+      if (!isCreating) onClose();
+    },
+  });
 
   // Fresh, focused input every time the modal opens.
   useEffect(() => {
     if (!isOpen) return;
     setName('');
     setIsCreating(false);
+    setError(null);
     const timer = setTimeout(() => inputRef.current?.focus(), 30);
     return () => clearTimeout(timer);
   }, [isOpen]);
@@ -31,9 +50,14 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
     const trimmed = name.trim();
     if (!trimmed || isCreating) return;
     setIsCreating(true);
+    setError(null);
     try {
-      const ok = await onCreate(trimmed);
-      if (ok) onClose();
+      const failure = await onCreate(trimmed);
+      if (failure === null) {
+        onClose();
+      } else {
+        setError(failure);
+      }
     } finally {
       setIsCreating(false);
     }
@@ -45,7 +69,9 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
       onClick={() => { if (!isCreating) onClose(); }}
     >
       <div
-        className="w-[320px] bg-white border border-outline rounded-2xl shadow-xl p-5"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="w-[320px] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-label="Create new project"
@@ -65,15 +91,27 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
           ref={inputRef}
           type="text"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value);
+            if (error) setError(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleSubmit();
-            if (e.key === 'Escape' && !isCreating) onClose();
           }}
           placeholder="Project name"
           maxLength={255}
-          className="w-full bg-white border border-outline rounded-xl px-3 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none focus:border-primary transition-colors"
+          aria-invalid={!!error}
+          className={`w-full bg-white border rounded-xl px-3 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none transition-colors ${
+            error
+              ? 'border-red-400 focus:border-red-500'
+              : 'border-outline focus:border-primary'
+          }`}
         />
+        {error && (
+          <p role="alert" className="mt-2 text-[11px] font-medium text-red-600 leading-snug">
+            {error}
+          </p>
+        )}
 
         <div className="flex items-center justify-end gap-2 mt-4">
           <button

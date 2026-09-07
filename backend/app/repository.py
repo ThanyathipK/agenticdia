@@ -23,7 +23,6 @@ from app.repositories import (
     RequirementRepository,
     RequirementStateRepository,
     UserStoryRepository,
-    VersionHistoryRepository,
 )
 
 __all__ = [
@@ -36,7 +35,6 @@ __all__ = [
     "AuditResultRepository",
     "PRDDocumentRepository",
     "PRDVersionRepository",
-    "VersionHistoryRepository",
     "RequirementStateRepository",
     "ConversationMessageRepository",
     "PendingActionRepository",

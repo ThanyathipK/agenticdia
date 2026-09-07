@@ -47,6 +47,11 @@ logger = logging.getLogger("app.routes.projects")
 router = APIRouter()
 
 
+def _duplicate_project_name_detail(name: str) -> str:
+    """User-facing detail message for a duplicate project-name conflict (409)."""
+    return f"A project named '{name}' already exists. Please choose a different name."
+
+
 @router.get("/api/projects", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
 async def get_projects(db: AsyncSession = Depends(get_db)) -> List[ProjectSummary]:
     """
@@ -97,7 +102,21 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
 
     Returns:
         ProjectCreated: The new project's UUID string and name.
+
+    Raises:
+        HTTPException: 409 if a project with the same name already exists
+            (names are compared case-insensitively, ignoring surrounding
+            whitespace).
     """
+    # DUPLICATE-NAME VALIDATION: project names must be unique across the
+    # workspace. ``payload.name`` is already stripped by the ProjectCreate
+    # schema validator; a conflict surfaces as 409 so the UI can render an
+    # inline "name already exists" error.
+    if await ProjectRepository.name_exists(payload.name, db):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_duplicate_project_name_detail(payload.name),
+        )
     project_data = payload.model_dump()
     project_data["id"] = str(uuid.uuid4())
     # Use system user UUID as default until proper auth is implemented
@@ -121,7 +140,10 @@ async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSessi
         ProjectSummary: The updated project record.
 
     Raises:
-        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if not found.
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if not
+            found; 409 if another project already uses the new name
+            (case-insensitive, whitespace-trimmed; renaming to the project's
+            own name is allowed).
     """
     try:
         UUID(project_id)
@@ -129,6 +151,13 @@ async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSessi
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
     updates = payload.model_dump()
+    # DUPLICATE-NAME VALIDATION: the new name must not collide with any OTHER
+    # project (the project may keep its own name). Same 409 contract as create.
+    if await ProjectRepository.name_exists(updates["name"], db, exclude_project_id=project_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_duplicate_project_name_detail(updates["name"]),
+        )
     updated = await ProjectRepository.update(project_id, updates, db)
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -267,7 +296,10 @@ async def get_project_requirement_state(project_id: str, session: AsyncSession =
         logger.info(f"[DB LOG] Saving default state for project {project_id} complete.")
         await event_manager.publish(project_id, "state_initialized", {"project_id": project_id})
 
-    conv_history = await ConversationMessageRepository.get_conversation_history(project_id)
+    # Reuse the request's AsyncSession instead of opening a second pooled
+    # connection just for the conversation history read (one fewer network
+    # round-trip to the database on every project-state load).
+    conv_history = await ConversationMessageRepository.get_conversation_history(project_id, session)
     if isinstance(state, dict):
         state = dict(state)
         state["conversation_history"] = conv_history
@@ -446,7 +478,6 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
     try:
         version_record = await PRDVersionRepository.create(str(project_id), {
             "generated_prd": markdown_content,
-            "generated_diagram": "",
             "generated_by": "prd_export_endpoint"
         }, db)
         logger.info(f"[PRD EXPORT] Created PRD version {version_record['version_number']} for project {project_id}.")

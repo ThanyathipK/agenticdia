@@ -60,8 +60,12 @@ export interface ProjectState {
   handleRenameProject: (projectId: string, newName: string) => Promise<void>;
   /** Deletes a project; resolves to true on success. */
   handleDeleteProject: (projIdToDelete: string) => Promise<boolean>;
-  /** Creates a project with the given name; resolves to true on success. */
-  handleCreateProject: (name: string) => Promise<boolean>;
+  /**
+   * Creates a project with the given name. Resolves to null on success (the
+   * caller may close its dialog), or to a user-facing error message — e.g. a
+   * duplicate-name conflict from the backend — for inline display.
+   */
+  handleCreateProject: (name: string) => Promise<string | null>;
   handleTogglePin: (projectId: string) => Promise<void>;
   /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
   isCreateModalOpen: boolean;

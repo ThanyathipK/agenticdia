@@ -1,7 +1,7 @@
 // ChatPanel — left conversational panel extracted from the former Dashboard.tsx.
 // Renders the message timeline (with embedded human-in-the-loop clarification
 // forms), the agent execution ticker, and the fixed input + action bar.
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -15,8 +15,11 @@ import {
   FileText,
   Loader2,
   Square,
+  ArrowDown,
 } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
+import { ChatEmptyState } from './ChatEmptyState';
+import { Tooltip } from './Tooltip';
 import { highlightMatch } from '../utils/highlight';
 
 export function ChatPanel({ state }: { state: ProjectState }) {
@@ -116,6 +119,47 @@ export function ChatPanel({ state }: { state: ProjectState }) {
     return () => clearTimeout(timer);
   }, [projectSearchQuery, messages]);
 
+  // ---- Smart auto-scroll + "jump to latest" pill ---------------------------
+  // The timeline only follows new output while the user is already reading near
+  // the bottom. If they scrolled up during an agent run, new messages never
+  // yank the viewport back down; a floating pill offers a one-click way back.
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const isNearBottomRef = useRef(true);
+  const [showJumpPill, setShowJumpPill] = useState<boolean>(false);
+
+  const handleChatScroll = (): void => {
+    const container = chatScrollRef.current;
+    if (!container) return;
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+    isNearBottomRef.current = distance <= 96;
+    setShowJumpPill(distance > 200);
+  };
+
+  const scrollToLatest = (): void => {
+    isNearBottomRef.current = true;
+    setShowJumpPill(false);
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    // Always chase the user's own sends; otherwise follow only when near bottom.
+    const lastRole = messages[messages.length - 1]?.role;
+    if (lastRole !== 'user' && !isNearBottomRef.current) return;
+    isNearBottomRef.current = true;
+    setShowJumpPill(false);
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isProcessing, chatEndRef]);
+
+  // Auto-grow composer: expands with content up to a readable cap, and
+  // collapses back after a message is sent (rawInput is cleared).
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [rawInput]);
+
   return (
     <section className="chat-panel flex flex-col bg-surface border-r border-outline relative z-10" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${state.splitPct}%` }}>
       {/* Section Header */}
@@ -145,7 +189,14 @@ export function ChatPanel({ state }: { state: ProjectState }) {
       </div>
 
       {/* Chat Logs scroll list */}
-      <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar pb-32">
+      <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar pb-32">
+        {messages.length === 0 && (
+          <ChatEmptyState
+            disabled={!projectId || isLoading || isProcessing}
+            disabledReason={agentActionHint}
+            onPick={(prompt) => void handleSendMessage(prompt)}
+          />
+        )}
         <AnimatePresence initial={false}>
           {messages.map((msg, msgIndex) => {
             const isUser = msg.role === 'user';
@@ -285,6 +336,25 @@ export function ChatPanel({ state }: { state: ProjectState }) {
         <div ref={chatEndRef} />
       </div>
 
+      {/* Floating "jump to latest" pill (shown while scrolled away from the bottom) */}
+      <AnimatePresence>
+        {showJumpPill && (
+          <motion.button
+            type="button"
+            key="jump-to-latest"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.15 }}
+            onClick={scrollToLatest}
+            className="absolute left-1/2 -translate-x-1/2 bottom-[150px] z-30 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-surface border border-outline shadow-lg text-[11px] font-bold text-on-surface hover:border-primary/40 hover:text-primary transition-colors cursor-pointer"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+            <span>Jump to latest</span>
+          </motion.button>
+        )}
+      </AnimatePresence>
+
       {/* Conversational Fixed Input Container */}
       <div className="absolute bottom-0 w-full p-4 glass-panel border-t border-outline bg-white/90 z-20 space-y-3">
         {/* Agent Actions Row */}
@@ -316,20 +386,25 @@ export function ChatPanel({ state }: { state: ProjectState }) {
           </p>
         )}
 
-        <div className="flex items-center gap-3 bg-black/5 rounded-full px-4 py-2.5 border border-outline focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/10 transition-all">
-          <button
-            type="button"
-            title={projectId ? 'Attach file (.docx / .pdf / .md / .txt)' : 'Create or select a project first'}
-            onClick={handleClipClick}
-            disabled={!projectId || isLoading || isProcessing || documents.isUploading}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        <div className="flex items-end gap-3 bg-black/5 rounded-3xl px-4 py-2.5 border border-outline focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/10 transition-all">
+          <Tooltip
+            label={projectId ? 'Attach file (.docx / .pdf / .md / .txt)' : 'Create or select a project first'}
+            side="top"
           >
-            {documents.isUploading ? (
-              <Loader2 className="w-4.5 h-4.5 animate-spin" />
-            ) : (
-              <Paperclip className="w-4.5 h-4.5" />
-            )}
-          </button>
+            <button
+              type="button"
+              aria-label="Attach file"
+              onClick={handleClipClick}
+              disabled={!projectId || isLoading || isProcessing || documents.isUploading}
+              className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {documents.isUploading ? (
+                <Loader2 className="w-4.5 h-4.5 animate-spin" />
+              ) : (
+                <Paperclip className="w-4.5 h-4.5" />
+              )}
+            </button>
+          </Tooltip>
           <input
             ref={fileInputRef}
             type="file"
@@ -337,36 +412,49 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             className="hidden"
             onChange={(e) => void handleFilePicked(e)}
           />
-          <input
-            type="text"
+          <textarea
+            ref={composerRef}
+            rows={1}
             value={rawInput}
             disabled={isLoading || isProcessing}
             onChange={(e) => setRawInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-            placeholder={isLoading || isProcessing ? "Processing..." : "Describe a change or write feedback..."}
-            className="flex-1 bg-transparent border-none focus:ring-0 font-body-sm text-sm placeholder:text-on-surface-variant/55 text-on-surface outline-none"
+            onKeyDown={(e) => {
+              // Enter sends; Shift+Enter inserts a newline. The isComposing
+              // guard keeps IME composition (e.g. Thai keyboard) from sending.
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                handleSendMessage();
+              }
+            }}
+            placeholder={isLoading || isProcessing ? 'Processing...' : 'Describe a change or write feedback… (Shift+Enter for a new line)'}
+            className="flex-1 bg-transparent border-none focus:ring-0 font-body-sm text-sm placeholder:text-on-surface-variant/55 text-on-surface outline-none resize-none max-h-40 leading-relaxed py-1 custom-scrollbar"
           />
           {isLoading || isProcessing ? (
-            <button
-              type="button"
-              title="Stop generating"
-              onClick={handleStopGeneration}
-              className="w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm bg-red-600 text-white hover:bg-red-700 hover:scale-105 cursor-pointer"
-            >
-              <Square className="w-3.5 h-3.5 fill-current" />
-            </button>
+            <Tooltip label="Stop generating" side="top">
+              <button
+                type="button"
+                aria-label="Stop generating"
+                onClick={handleStopGeneration}
+                className="w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm bg-red-600 text-white hover:bg-red-700 hover:scale-105 cursor-pointer"
+              >
+                <Square className="w-3.5 h-3.5 fill-current" />
+              </button>
+            </Tooltip>
           ) : (
-            <button
-              onClick={() => handleSendMessage()}
-              disabled={!rawInput.trim()}
-              className={`w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm ${
-                rawInput.trim()
-                  ? 'bg-primary text-on-primary hover:scale-105 cursor-pointer'
-                  : 'bg-black/10 text-on-surface-variant/40 cursor-not-allowed'
-              }`}
-            >
-              <Send className="w-4 h-4" />
-            </button>
+            <Tooltip label="Send message" side="top">
+              <button
+                onClick={() => handleSendMessage()}
+                aria-label="Send message"
+                disabled={!rawInput.trim()}
+                className={`w-8.5 h-8.5 rounded-full flex items-center justify-center transition-transform shrink-0 shadow-sm ${
+                  rawInput.trim()
+                    ? 'bg-primary text-on-primary hover:scale-105 cursor-pointer'
+                    : 'bg-black/10 text-on-surface-variant/40 cursor-not-allowed'
+                }`}
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </Tooltip>
           )}
         </div>
       </div>

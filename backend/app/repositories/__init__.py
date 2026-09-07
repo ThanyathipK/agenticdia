@@ -24,7 +24,6 @@ from app.repositories.project import ProjectRepository
 from app.repositories.requirement import RequirementRepository
 from app.repositories.requirement_state import RequirementStateRepository
 from app.repositories.user_story import UserStoryRepository
-from app.repositories.version_history import VersionHistoryRepository
 
 __all__ = [
     "ProjectRepository",
@@ -38,7 +37,6 @@ __all__ = [
     "PRDVersionRepository",
     "PRDSectionRepository",
     "PRDSectionVersionRepository",
-    "VersionHistoryRepository",
     "RequirementStateRepository",
     "ConversationMessageRepository",
     "DocumentRepository",

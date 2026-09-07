@@ -26,10 +26,14 @@ interface SnapshotLedgerProps {
 
 /**
  * TAB: IMMUTABLE VERSION SNAPSHOT LEDGER
- * Owns the snapshot-capture form and renders the immutable version_history
+ * Owns the snapshot-capture form and renders the browser-local snapshot
  * ledger. Capturing a snapshot deep-exports the linked user stories (and
- * acceptance criteria) into a JSONB state block and increments the target
- * requirement's version number.
+ * acceptance criteria) into a simulated JSONB state block and increments the
+ * target requirement's version number.
+ *
+ * NOTE: this tab is a frontend demo. The historical `version_history` table
+ * was removed from the schema (no runtime read/write path existed); the
+ * authoritative immutable ledger is `prd_versions`.
  */
 export default function SnapshotLedger({
   requirements,
@@ -161,7 +165,7 @@ export default function SnapshotLedger({
 
       {/* Historical logs render */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-        <h3 className="text-sm font-bold text-slate-900 mb-4">Immutable Ledger History (version_history table)</h3>
+        <h3 className="text-sm font-bold text-slate-900 mb-4">Immutable Ledger History (demo — see prd_versions)</h3>
 <div className="space-y-4">
           {versions.map((ver) => {
             const snap = JSON.parse(ver.state_snapshot);

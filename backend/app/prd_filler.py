@@ -304,11 +304,15 @@ def _fill_product_scope(body: str, data: Dict[str, Any]) -> str:
     in_lines = _nums(scope_in, last_gap=True)
     out_lines = _nums(scope_out, last_gap=False)
 
+    # Single-line cell content: joined with spaces (not newlines) so that,
+    # after the \parbox unwrap in the preview converter, every in-cell "\\"
+    # stays mid-line and latex_service._keep_in_cell_rowbreaks classifies it
+    # as an in-cell break ("<br>") instead of a row terminator.
     inner = (
-        BS + "prdlbl{Scope In}" + BS + BS + NL
-        + in_lines + NL
-        + BS + "prdlbl{Scope out}" + BS + BS + NL
-        + out_lines + NL
+        BS + "prdlbl{Scope In}" + BS + BS + " "
+        + in_lines + " "
+        + BS + "prdlbl{Scope out}" + BS + BS + " "
+        + out_lines
         + "}}"
     )
     scope_block = (

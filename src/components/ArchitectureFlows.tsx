@@ -3,6 +3,7 @@
 // raw Mermaid source string.
 import { Network, Info, FileCode } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
+import { Tooltip } from './Tooltip';
 
 export function ArchitectureFlows({ state }: { state: ProjectState }) {
   const {
@@ -28,19 +29,25 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
             </div>
           </div>
           <div className="flex bg-black/5 rounded-xl p-1">
-            <button 
-              onClick={() => setDiagramZoom(prev => Math.max(70, prev - 15))}
-              className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
-            >
-              -
-            </button>
+            <Tooltip label="Zoom out" side="bottom">
+              <button
+                onClick={() => setDiagramZoom(prev => Math.max(70, prev - 15))}
+                aria-label="Zoom out"
+                className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
+              >
+                -
+              </button>
+            </Tooltip>
             <span className="px-3 text-xs font-mono font-bold flex items-center">{diagramZoom}%</span>
-            <button 
-              onClick={() => setDiagramZoom(prev => Math.min(150, prev + 15))}
-              className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
-            >
-              +
-            </button>
+            <Tooltip label="Zoom in" side="bottom">
+              <button
+                onClick={() => setDiagramZoom(prev => Math.min(150, prev + 15))}
+                aria-label="Zoom in"
+                className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
+              >
+                +
+              </button>
+            </Tooltip>
           </div>
         </div>
 

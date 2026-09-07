@@ -27,7 +27,6 @@ class ConversationMessageRepository:
         role: str,
         message: str,
         session: Optional[AsyncSession] = None,
-        conversation_id: Optional[str] = None,
         workflow_state: Optional[str] = None,
         intent: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -35,12 +34,10 @@ class ConversationMessageRepository:
             return {}
 
         pid = as_uuid(project_id)
-        conv_id = uuid.UUID(conversation_id) if conversation_id else uuid.uuid4()
 
         async def _save(s: AsyncSession):
             msg_obj = ConversationMessageModel(
                 id=uuid.uuid4(),
-                conversation_id=conv_id,
                 project_id=pid,
                 role=role,
                 message=message,

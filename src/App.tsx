@@ -51,26 +51,25 @@ export default function App() {
   const [artifactEventLogs] = useState<ArtifactEventLogRow[]>(INITIAL_ARTIFACT_EVENT_LOGS);
 
   return (
-    <div id="app-container" className="w-full h-screen bg-slate-100 flex flex-col font-sans text-slate-800 antialiased overflow-hidden">
+    <div id="app-container" className="w-full h-screen bg-background flex flex-col font-sans text-on-surface antialiased overflow-hidden">
       
       {/* Centralized error/warning/system toasts (covers Dashboard & ConfirmationPanel) */}
       <ToastHost />
       
-      {/* GLOBAL TOP NAVBAR (Matching Stitch Header precisely) */}
-      <header className="h-16 w-full shrink-0 flex items-center justify-between gap-2 px-4 sm:px-6 bg-white border-b border-black/5 z-50">
-        {/* Left: Branding & Project Title */}
+      {/* GLOBAL TOP NAVBAR */}
+      <header className="h-16 w-full shrink-0 flex items-center justify-between gap-2 px-4 sm:px-6 bg-surface border-b border-outline z-50">
+        {/* Left: Branding & workspace title (same "Ai" mark as the sidebar) */}
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <span className="material-symbols-outlined text-brand text-2xl font-bold shrink-0">Agentic-AI</span>
-          <div className="hidden sm:flex items-center cursor-pointer group min-w-0">
-            <h1 className="font-bold text-slate-900 text-sm truncate">For PRD</h1>
+          <div className="w-8 h-8 rounded-xl bg-primary flex items-center justify-center text-on-primary text-[11px] font-bold shrink-0 shadow-sm">
+            Ai
+          </div>
+          <div className="hidden sm:flex items-baseline gap-2.5 min-w-0">
+            <h1 className="font-bold text-sm text-on-surface truncate">Agentic-AI</h1>
+            <span className="text-xs text-on-surface-variant whitespace-nowrap">Requirements Workspace</span>
           </div>
         </div>
         
-        {/* Right actions: User Avatar */}
-        <div className="w-8 h-8 rounded-full overflow-hidden cursor-pointer border border-brand/30">
-            <img className="w-full h-full object-cover" referrerPolicy="no-referrer" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBDlAC0DOS6EdgtoiiblRYSq4kovm0aGBgk0J0--3PR3DjY3GRR1MSXxugEHy6Z8hnEcHWXmlcYG_KCT2Tzf3RSjEJ_sS6mj0h8OhQRZXWOaNxhjNMAvrg3TB9jZP5Xf2rG1f_yqj9jQelGFRgrZyqoQuf34EIYP3Vkbvpkm0oruz-4pWwgPSZc9V3DcXA-qq_ufzqZc5GCob0H1QKqJcC7AAnES2wcw3fJ6hiY1iVgYEUWrmCkJbVe"/>
-        </div>
-      </header>
+        </header>
 
       {/* MAIN CONTAINER FRAME */}
       <div className="flex-1 flex overflow-hidden">

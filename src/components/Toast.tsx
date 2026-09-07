@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { XCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react';
+import { Tooltip } from './Tooltip';
 
 export type ToastType = 'error' | 'warning' | 'success' | 'info';
 
@@ -112,16 +113,18 @@ export const ToastHost: React.FC = () => {
           >
             {TOAST_STYLES[t.type].icon}
             <span className="text-sm font-medium leading-snug flex-1">{t.message}</span>
-            <button
-              className="shrink-0 rounded p-0.5 opacity-60 hover:opacity-100 hover:bg-black/5 transition-colors"
-              onClick={(e) => {
-                e.stopPropagation();
-                dismissToast(t.id);
-              }}
-              aria-label="Dismiss notification"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <Tooltip label="Dismiss" side="left">
+              <button
+                className="shrink-0 rounded p-0.5 opacity-60 hover:opacity-100 hover:bg-black/5 transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dismissToast(t.id);
+                }}
+                aria-label="Dismiss notification"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </Tooltip>
           </motion.div>
         ))}
       </AnimatePresence>

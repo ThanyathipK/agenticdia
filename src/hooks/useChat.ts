@@ -3,7 +3,7 @@
 // (send, validate, generate PRD, clarifications). Domain state lives in the
 // shared `RequirementStore`; project info and pending-actions are injected
 // through `deps`.
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import axios from 'axios';
 import { api } from '../api/client';
@@ -100,10 +100,9 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   // The Stop button aborts it; each handler creates a fresh controller per run.
   const abortRef = useRef<AbortController | null>(null);
 
-  // Keep the chat scrolled to the latest message
-  useEffect(() => {
-    store.chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [store.messages, store.isProcessing]);
+  // (Chat auto-scroll moved into ChatPanel, which owns the scroll container:
+  // it only follows the timeline while the user is near the bottom and shows a
+  // "jump to latest" pill otherwise.)
 
   // Build a truthful change-history digest for the backend prompt context.
   // Every agent call used to hardcode 'No previous history.', which defeated

@@ -86,7 +86,6 @@ class RequirementModel(Base):
     requirement_code = Column(String(50), nullable=False) # e.g. REQ-001
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    priority = Column(String(50), nullable=True)
     status = Column(String(50), nullable=False, default="active", server_default="active")
     version = Column(Integer, nullable=False, default=1, server_default="1")
     is_locked = Column(Boolean, nullable=False, default=False, server_default="false")
@@ -144,7 +143,7 @@ class AuditResultModel(Base):
     
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
     requirement_id = Column(GUID, ForeignKey("requirements.id", ondelete="CASCADE"), nullable=False, index=True)
-    audit_version_reviewed = Column("version_reviewed", Integer, nullable=False)
+    audit_version_reviewed = Column(Integer, nullable=False)
     is_valid = Column(Boolean, nullable=False, default=False)
     passed_checks = Column(JSON, nullable=False, default=list)
     failed_checks = Column(JSON, nullable=False, default=list)
@@ -174,8 +173,8 @@ class PRDDocumentModel(Base):
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
     project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     version = Column(Integer, nullable=False)
-    prd_markdown = Column("markdown_content", Text, nullable=False)
-    mermaid_diagram = Column("mermaid_graph", Text, nullable=True)
+    prd_markdown = Column(Text, nullable=False)
+    mermaid_diagram = Column(Text, nullable=True)
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
@@ -196,7 +195,6 @@ class PRDVersionModel(Base):
     project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     version_number = Column(Integer, nullable=False)
     generated_prd = Column(Text, nullable=False)
-    generated_diagram = Column(Text, nullable=True)
     generated_by = Column(String(100), nullable=False, default="automated_agent")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -266,35 +264,6 @@ class PRDSectionVersionModel(Base):
         UniqueConstraint("section_id", "version_number", name="uq_prd_section_versions_section_version"),
     )
 
-class VersionHistoryModel(Base):
-    __tablename__ = "version_history"
-    
-    id = Column(GUID, primary_key=True, default=uuid.uuid4)
-    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    requirement_id = Column(GUID, ForeignKey("requirements.id", ondelete="CASCADE"), nullable=False, index=True)
-    version = Column("version_number", Integer, nullable=False)
-    changed_by_user_id = Column(GUID, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
-    description = Column("change_description", Text, nullable=False)
-    requirements_snapshot = Column("state_snapshot", JSON, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
-
-    @property
-    def timestamp(self) -> str:
-        return self.created_at.isoformat() if self.created_at else ""
-
-    @timestamp.setter
-    def timestamp(self, value):
-        pass
-
-    @property
-    def author(self) -> str:
-        return "Automated BA Agent"
-
-    @author.setter
-    def author(self, value):
-        pass
-
 class RequirementStateModel(Base):
     """
     SQLAlchemy model for centralizing the RequirementState in Supabase.
@@ -325,7 +294,6 @@ class ConversationMessageModel(Base):
     __tablename__ = "conversation_messages"
     
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(GUID, nullable=True, index=True, default=uuid.uuid4)
     project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(String(50), nullable=False)
     message = Column(Text, nullable=False)
@@ -369,7 +337,6 @@ class DocumentModel(Base):
     original_format = Column(String(20), nullable=False)  # 'docx' | 'pdf' | 'md' | 'txt'
     mime_type = Column(String(100), nullable=True)
     content_markdown = Column(Text, nullable=False, default="")  # canonical converted markdown, ALWAYS full
-    original_storage_url = Column(String(255), nullable=True)  # reserved for object storage later
     file_size_bytes = Column(Integer, nullable=False, default=0)
     token_count = Column(Integer, nullable=False, default=0)  # measured at ingest via count_tokens
     status = Column(String(20), nullable=False, default="processed")  # 'processed' | 'failed'

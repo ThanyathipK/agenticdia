@@ -56,7 +56,6 @@ INITIAL_TO_TABLE = {
     "INITIAL_AUDIT_RESULTS": "audit_results",
     "INITIAL_QUESTIONS": "clarification_questions",
     "INITIAL_PRD_DOCS": "prd_documents",
-    "INITIAL_VERSION_HISTORY": "version_history",
     "INITIAL_PRD_VERSIONS": "prd_versions",
     "INITIAL_CONVERSATION_MESSAGES": "conversation_messages",
     "INITIAL_ARTIFACT_EVENT_LOGS": "artifact_event_logs",

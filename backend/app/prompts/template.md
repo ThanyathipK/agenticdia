@@ -50,7 +50,7 @@ PRODUCT REQUIREMENT
 |Role|Name|Signature|Date|
 |---|---|---|---|
 |Product Owner||||
-|Head od Product<br>Management||||
+|Head of Product<br>Management||||
 
 
 
@@ -83,7 +83,7 @@ PRODUCT REQUIREMENT
 |Introduction &<br>Executive Summary||
 |---|---|
 |Problem Statement|1. <br>2.|
-|Business Objectives<br>|1.|
+|Business Objectives|1.|
 |Expected Benefit|1.|
 |Success Metrics|1.|
 |Target Audience &<br>user Personas|1.|
@@ -99,11 +99,10 @@ PRODUCT REQUIREMENT
 
 ### 2. Product Scope & Functional Requirements 
 
-|User Story||||
+|User Story<br>Mapping &<br>Functional<br>Requirements|Epic Name:|||
 |---|---|---|---|
-|Mapping &|Epic Name:<br>|||
-|Functional|User Story (System<br>Focus)|Functional<br>Requirement(FR)|Acceptance Criteria|
-|Requirements||FR 1.1: The system<br>must…|AC 1.1:<br>AC 1.2:|
+||User Story (System<br>Focus)|Functional<br>Requirement (FR)|Acceptance Criteria|
+|||FR 1.1: The system<br>must…|AC 1.1:<br>AC 1.2:|
 |User Flow &<br>Wireframes||||
 |Scope<br>Definition (In<br>vs. Out)|Scope In<br>1. <br>2. <br>Scope out<br>1. <br>2.|||
 
@@ -118,7 +117,7 @@ PRODUCT REQUIREMENT
 
 ### 3. Technical & Operational Considerations 
 
-|Non-<br>Functional<br>Requirements|1. Performance & Latency|
+|Non-Functional<br>Requirements|1. Performance & Latency|
 |---|---|
 |Expected<br>TPS/Customer<br>volume|1.|
 |Growth<br>prediction<br>Y0Y%|1.|

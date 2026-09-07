@@ -4,7 +4,7 @@
 // interactions. All backend calls go through the typed `api` client.
 import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import { api } from '../api/client';
+import { api, detailFromJsonError } from '../api/client';
 import type { PendingActionPayload, ProjectSummary } from '../api/types';
 import { handleError } from '../components/Toast';
 
@@ -30,8 +30,12 @@ export interface UseProjectsResult {
   handleRenameProject: (projectId: string, newName: string) => Promise<void>;
   /** Deletes a project; resolves to true on success. */
   handleDeleteProject: (projIdToDelete: string) => Promise<boolean>;
-  /** Creates a project with the given name; resolves to true on success. */
-  handleCreateProject: (name: string) => Promise<boolean>;
+  /**
+   * Creates a project with the given name. Resolves to null on success (the
+   * caller may close its dialog), or to a user-facing error message — e.g. a
+   * duplicate-name conflict from the backend — for inline display.
+   */
+  handleCreateProject: (name: string) => Promise<string | null>;
   handleTogglePin: (projectId: string) => Promise<void>;
   /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
   isCreateModalOpen: boolean;
@@ -138,7 +142,9 @@ export function useProjects(): UseProjectsResult {
     }
   }, [projectContextMenu]);
 
-  // Handle project rename
+  // Handle project rename. Failures — including the backend's 409
+  // duplicate-name conflict — surface the server's own detail message in the
+  // toast so the user knows exactly which name is already taken.
   const handleRenameProject = async (projectId: string, newName: string) => {
     if (!newName.trim()) return;
     try {
@@ -147,7 +153,7 @@ export function useProjects(): UseProjectsResult {
       setRenameProjectId(null);
       setRenameProjectName('');
     } catch (err) {
-      handleError('Failed to rename the project.', err);
+      handleError(detailFromJsonError(err) ?? 'Failed to rename the project.', err);
     }
   };
 
@@ -174,18 +180,19 @@ export function useProjects(): UseProjectsResult {
   };
 
   // Handle project create (submit from the sidebar's New Project modal).
-  // Resolves to true on success so the modal knows whether to close; failures
-  // are surfaced through the toast handler.
-  const handleCreateProject = async (name: string): Promise<boolean> => {
+  // Resolves to null on success so the modal closes, or to a user-facing
+  // error message — typically the backend's 409 "name already exists" detail —
+  // that the modal renders inline next to the input. No toast here: the modal
+  // is the presentation layer for create failures.
+  const handleCreateProject = async (name: string): Promise<string | null> => {
     const trimmed = name.trim();
-    if (!trimmed) return false;
+    if (!trimmed) return 'Project name must not be empty.';
     try {
       await api.createProject(trimmed);
       setProjects(await api.listProjects());
-      return true;
+      return null;
     } catch (err) {
-      handleError('Failed to create the project.', err);
-      return false;
+      return detailFromJsonError(err) ?? 'Failed to create the project.';
     }
   };
 

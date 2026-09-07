@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { useModalBehavior } from '../hooks/useModalBehavior';
 
 interface ConfirmModalProps {
   isOpen: boolean;
@@ -30,6 +31,16 @@ export function ConfirmModal({
   const [isWorking, setIsWorking] = useState<boolean>(false);
   const confirmBtnRef = useRef<HTMLButtonElement>(null);
 
+  // Shared modal behavior: Escape-anywhere-to-close, focus trap, focus restore
+  // on close, and background scroll lock. Escape stays disabled while a request
+  // is in flight (same guard as the overlay click below).
+  const { dialogRef } = useModalBehavior({
+    isOpen,
+    onClose: () => {
+      if (!isWorking) onClose();
+    },
+  });
+
   // Reset transient state and focus the confirm button whenever opened.
   useEffect(() => {
     if (!isOpen) return;
@@ -57,7 +68,9 @@ export function ConfirmModal({
       onClick={() => { if (!isWorking) onClose(); }}
     >
       <div
-        className="w-[320px] bg-white border border-outline rounded-2xl shadow-xl p-5"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="w-[320px] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -85,9 +98,6 @@ export function ConfirmModal({
             ref={confirmBtnRef}
             onClick={handleConfirm}
             disabled={isWorking}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape' && !isWorking) onClose();
-            }}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
               danger
                 ? 'bg-red-500 text-white hover:bg-red-600 shadow-md shadow-red-500/20'
