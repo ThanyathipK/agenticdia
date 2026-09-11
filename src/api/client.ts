@@ -15,14 +15,18 @@ import type {
   PendingActionPayload,
   PrdSectionListPayload,
   PrdSectionUpdateResponse,
+  PrdVersionDiffPayload,
+  PrdVersionPayload,
   ProcessDocumentResponse,
   ProcessRequirementsRequest,
   ProcessRequirementsResponse,
   ProjectCreated,
   ProjectDeleteResponse,
+  ProjectStatus,
   ProjectSummary,
   RequirementStatePayload,
   UploadedDocumentPayload,
+  TraceabilityPayload,
 } from './types';
 
 async function get<T>(url: string, params?: Record<string, unknown>): Promise<T> {
@@ -112,10 +116,11 @@ export const api = {
     projectId: string,
     sectionKey: string,
     content: string,
-    options?: { review_status?: string; change_summary?: string; updated_by?: string }
+    options?: { review_status?: string; change_summary?: string; updated_by?: string; base_content?: string }
   ) =>
     patch<PrdSectionUpdateResponse>(`/api/project/${projectId}/prd/sections/${sectionKey}`, {
       content,
+      base_content: options?.base_content,
       review_status: options?.review_status,
       change_summary: options?.change_summary,
       updated_by: options?.updated_by ?? 'user',
@@ -124,6 +129,19 @@ export const api = {
     post(`/api/project/${projectId}/prd/sections/${sectionKey}/lock`, { locked_by: lockedBy }),
   unlockPrdSection: (projectId: string, sectionKey: string, lockedBy = 'user') =>
     post(`/api/project/${projectId}/prd/sections/${sectionKey}/unlock`, { locked_by: lockedBy }),
+
+  // ---- PRD version ledger ------------------------------------------------
+  // Immutable per-project PRD snapshots. EVERY change (Generate PRD click or
+  // manual part edit/revert) appends a version that ALWAYS advances; each row
+  // carries change_type ('ai' | 'manual'), a change summary, and the
+  // per-section change records incl. locked_preserved markers.
+  getPrdVersions: (projectId: string) =>
+    get<PrdVersionPayload[]>(`/api/project/${projectId}/prd-versions`),
+  getPrdVersionDiff: (projectId: string, versionNumber: number, baseVersion?: number) =>
+    get<PrdVersionDiffPayload>(
+      `/api/project/${projectId}/prd-versions/${versionNumber}/diff`,
+      baseVersion ? { base_version: baseVersion } : undefined,
+    ),
 
   // ---- Projects ----------------------------------------------------------
   listProjects: () => get<ProjectSummary[]>('/api/projects'),
@@ -136,6 +154,13 @@ export const api = {
     del<ProjectDeleteResponse>(`/api/projects/${projectId}`),
   toggleProjectPin: (projectId: string, isPinned: boolean) =>
     put<ProjectSummary>(`/api/projects/${projectId}/pin`, { is_pinned: isPinned }),
+  // Dashboard-only ★ flag marker (PUT /api/projects/{id}/flag). Independent
+  // of pinning: flagging never affects the sidebar's pinned-first ordering.
+  toggleProjectFlag: (projectId: string, isFlagged: boolean) =>
+    put<ProjectSummary>(`/api/projects/${projectId}/flag`, { is_flagged: isFlagged }),
+  // Dashboard workflow status (user-editable via the status badge dropdown).
+  updateProjectStatus: (projectId: string, status: ProjectStatus) =>
+    put<ProjectSummary>(`/api/projects/${projectId}/status`, { status }),
 
   // ---- Requirement state --------------------------------------------------
   getProjectState: (projectId: string) =>
@@ -241,6 +266,12 @@ export const api = {
       version,
       project_name: projectName,
     }),
+
+  // ---- Requirement Traceability Matrix --------------------------------------
+  // Derived (read-only) matrix linking Requirements <-> User Stories <-> Acceptance
+  // Criteria <-> PRD sections <-> diagrams. See backend/app/traceability_service.py.
+  getTraceability: (projectId: string) =>
+    get<TraceabilityPayload>(`/api/project/${projectId}/traceability`),
 
   // ---- Health --------------------------------------------------------------
   fetchHealth: () => get<HealthPayload>('/api/health'),

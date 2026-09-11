@@ -112,6 +112,38 @@ class Settings(BaseSettings):
     # delivery by construction). The app logs a loud warning at startup instead
     # of refusing to boot. Not recommended.
     SSE_ALLOW_MULTI_PROCESS_IN_PROCESS: bool = False
+    # Semantic memory (see app/semantic_memory.py).
+    # Distilled project facts + conversation embeddings retrieved at prompt
+    # build time so agents "remember" prior decisions across sessions. The
+    # whole pipeline is FAIL-OPEN: any LM Studio/DB failure degrades to the
+    # pre-memory behaviour instead of breaking the chat turn.
+    MEMORY_ENABLED: bool = True
+    # Master switch for the LLM fact-extraction pass (recall stays on).
+    MEMORY_FACT_EXTRACTION_ENABLED: bool = True
+    # Embedding model served by LM Studio (nomic-embed-text = 768 dims, fast on M4).
+    LM_STUDIO_EMBEDDING_MODEL: str = "text-embedding-nomic-embed-text-v1.5"
+    # Embedding request timeout (embeddings must never block a chat turn long).
+    MEMORY_EMBEDDING_TIMEOUT_SECONDS: float = 10.0
+    # How many memories are injected into a prompt at most.
+    MEMORY_TOP_K: int = 6
+    # Hard token ceiling for the "Relevant project memory" prompt block,
+    # mirroring the MAX_CONTEXT_TOKENS budget discipline (Finding #39).
+    MEMORY_CONTEXT_MAX_TOKENS: int = 800
+    # Candidate scan window: only the N most recent memories per project are
+    # scored in-process (keeps the Python cosine pass O(400) worst case).
+    MEMORY_CANDIDATE_LIMIT: int = 400
+    # Relevance blend: score = MEMORY_RELEVANCE_WEIGHT * cosine
+    #                 + (1 - MEMORY_RELEVANCE_WEIGHT) * recency_factor,
+    # where recency_factor = 0.5 ** (age_days / MEMORY_RECENCY_HALF_LIFE_DAYS).
+    MEMORY_RELEVANCE_WEIGHT: float = 0.7
+    MEMORY_RECENCY_HALF_LIFE_DAYS: float = 30.0
+    # New facts with cosine similarity >= this against an existing memory are
+    # considered duplicates and skipped (keeps memory from bloating).
+    MEMORY_DEDUPE_SIMILARITY: float = 0.92
+    # Cap on facts extracted from a single chat turn (token-budget hygiene).
+    MEMORY_MAX_FACTS_PER_TURN: int = 8
+
+    # SSE pub/sub reliability (see app/event_manager.py).
 
     # Application details
     APP_NAME: str = "Enterprise Requirements Architecture Core"

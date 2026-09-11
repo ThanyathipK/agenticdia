@@ -8,22 +8,27 @@ from uuid import UUID
 
 class ProjectCreate(BaseModel):
     """Schema for introducing new banking systems under compliance review."""
-    name: str = Field(..., max_length=255, description="Name of core banking system or microservice.")
+    name: str = Field(..., description="Name of core banking system or microservice (max 40 characters).")
     description: Optional[str] = Field(None, description="System functional scope details.")
     industry_standard: str = Field("Krungsri Nimble Baseline", description="Target compliance guideline standard.")
 
     @field_validator("name")
     @classmethod
     def _strip_and_require_name(cls, value: str) -> str:
-        """Trim surrounding whitespace and reject blank names.
+        """Trim surrounding whitespace, reject blank names, and cap at 40 characters.
 
         Duplicate-name detection (see ``ProjectRepository.name_exists``)
         compares trimmed, lower-cased names, so the stored name is
-        canonicalized here once at the schema boundary.
+        canonicalized here once at the schema boundary. The 40-character cap
+        keeps names short (dashboard table, PRD export filename), is applied
+        AFTER trimming so padded names count their real length, and applies to
+        BOTH create and rename (both routes share this schema).
         """
         stripped = value.strip()
         if not stripped:
             raise ValueError("Project name must not be empty.")
+        if len(stripped) > 40:
+            raise ValueError("Project name must be 40 characters or fewer.")
         return stripped
 
 class RequirementState(BaseModel):
@@ -192,6 +197,15 @@ class ProjectSummary(BaseModel):
     description: Optional[str] = Field(None, description="Optional functional-scope description.")
     industry_standard: str = Field(..., description="Target compliance guideline standard.")
     is_pinned: bool = Field(False, description="True when the project/chat is pinned to the top of the sidebar.")
+    is_flagged: bool = Field(False, description="True when the project is flagged with the dashboard ★ marker (independent of pinning).")
+    status: str = Field(
+        "draft",
+        description="User-editable workflow status: 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised'.",
+    )
+    updated_at: Optional[str] = Field(
+        None,
+        description="ISO-8601 timestamp of the last project update (drives the dashboard 'Updated' column).",
+    )
     match_snippet: Optional[str] = Field(
         None,
         description="Short excerpt of a conversation message (if the project matched via "
@@ -214,6 +228,19 @@ class ProjectDeleteResponse(BaseModel):
 class ProjectPinRequest(BaseModel):
     """Request body for pinning/unpinning a project (chat)."""
     is_pinned: bool = Field(..., description="True pins the project to the top of the sidebar; False unpins it.")
+
+
+class ProjectFlagRequest(BaseModel):
+    """Request body for flagging/unflagging a project (dashboard ★ marker)."""
+    is_flagged: bool = Field(..., description="True marks the project with the dashboard ★ flag; False removes it.")
+
+
+class ProjectStatusRequest(BaseModel):
+    """Request body for setting a project's user-editable workflow status (dashboard table)."""
+    status: str = Field(
+        ...,
+        description="New workflow status: 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised'.",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -355,14 +382,60 @@ class RequirementLockResponse(BaseModel):
     """Payload returned when locking/unlocking a requirement."""
     status: str = Field(..., description="'locked' or 'unlocked'.")
     requirement: RequirementDetail = Field(..., description="The affected requirement record.")
+class PRDVersionChangedSection(BaseModel):
+    """One per-section change record attached to a PRD version snapshot."""
+    model_config = ConfigDict(extra="allow")
+
+    section_key: str = Field(..., description="Stable section key ('stakeholders', ...).")
+    title: str = Field("", description="Display title of the part.")
+    change_kind: str = Field("unchanged", description="'created' | 'updated' | 'unchanged' | 'removed' | 'locked_preserved'.")
+    changed: bool = Field(False, description="True when the snapshot actually changed (or protected) this part.")
+
+
 class PRDVersionResponse(BaseModel):
     """Immutable PRD version record."""
+    model_config = ConfigDict(extra="allow")
+
     version_id: str = Field(..., description="PRD version UUID string.")
     project_id: str = Field(..., description="Project UUID string.")
     version_number: int = Field(..., description="Monotonic version number.")
     generated_prd: str = Field("", description="Markdown PRD content for this version.")
     generated_by: str = Field("automated_agent", description="Actor that produced the version.")
+    change_type: str = Field("ai", description="'ai' | 'manual' — origin of the snapshot.")
+    # Semantic Version (MAJOR.MINOR.PATCH): MAJOR = sections created/removed,
+    # MINOR = AI content updates, PATCH = manual edits / no-change advances.
+    semver: str = Field("1.0.0", description="Semantic Version of this snapshot.")
+    change_summary: Optional[str] = Field(None, description="Human-readable change description.")
+    changed_sections: Optional[List[PRDVersionChangedSection]] = Field(
+        None, description="Per-section change records computed at snapshot time."
+    )
     created_at: str = Field("", description="ISO8601 creation timestamp.")
+
+
+class PrdVersionDiffSection(BaseModel):
+    """Line-level diff of ONE section between two PRD versions."""
+    model_config = ConfigDict(extra="allow")
+
+    section_key: str = Field(..., description="Stable section key.")
+    title: str = Field("", description="Display title of the part.")
+    change_kind: str = Field("unchanged", description="'created' | 'updated' | 'unchanged' | 'removed' | 'locked_preserved'.")
+    changed: bool = Field(False, description="True when the section content differs between the two versions.")
+    added: int = Field(0, description="Lines added in the newer version.")
+    removed: int = Field(0, description="Lines removed from the older version.")
+    diff_lines: List[List[str]] = Field(
+        default_factory=list,
+        description="Diff lines: [['add'|'del'|'context', line], ...].",
+    )
+
+
+class PrdVersionDiffResponse(BaseModel):
+    """Diff between two PRD versions, section by section."""
+    model_config = ConfigDict(extra="allow")
+
+    project_id: str = Field(..., description="Project UUID string.")
+    to_version: int = Field(..., description="Newer version being compared.")
+    base_version: int = Field(..., description="Older base version.")
+    sections: List[PrdVersionDiffSection] = Field(default_factory=list, description="Per-section diffs.")
 
 
 class PRDExportResponse(BaseModel):
@@ -591,6 +664,12 @@ class DocumentProcessResponse(BaseModel):
 class PrdSectionUpdate(BaseModel):
     """Request body for editing ONE PRD section (part-by-part editing)."""
     content: str = Field(..., description="Full markdown content for this section (heading line included).")
+    base_content: Optional[str] = Field(
+        None,
+        description="Section text the editor started from. Sent by the UI so the "
+        "server can three-way merge the edit onto the latest stored section "
+        "(preserving concurrent AI updates outside the edit window).",
+    )
     review_status: Optional[str] = Field(
         None, description="Optional new review status: 'draft' | 'satisfied' | 'approved'."
     )
@@ -650,3 +729,96 @@ class PrdSectionRevertResponse(BaseModel):
     section: PrdSectionResponse = Field(..., description="The PRD part after the revert.")
     document_markdown: str = Field(..., description="Full PRD markdown stitched from ALL parts after the revert.")
     restored_from_version: int = Field(..., description="Version number the content was restored from.")
+
+
+# --------------------------------------------------------------------------
+# Requirement Traceability Matrix (derived, read-only)
+#
+# Links Requirements -> User Stories -> Acceptance Criteria (existing FKs) and
+# Requirements <-> PRD sections / diagrams (REQ-/US- code references inside the
+# section content and mermaid source). Purely derived — no linkage tables.
+# --------------------------------------------------------------------------
+
+
+class TraceabilityRequirementInfo(BaseModel):
+    """The requirement node of a traceability row."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Requirement UUID string.")
+    requirement_code: str = Field(..., description="Requirement code (e.g. REQ-001).")
+    title: str = Field("", description="Requirement title.")
+    description: str = Field("", description="Requirement description.")
+    epic_name: Optional[str] = Field(None, description="Owning epic name, when any.")
+    status: Optional[str] = Field(None, description="Requirement status.")
+    version: Optional[int] = Field(None, description="Requirement revision.")
+    is_locked: bool = Field(False, description="Whether the requirement is locked.")
+
+
+class TraceabilityStory(BaseModel):
+    """A user story linked to its requirement, with its acceptance criteria."""
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[str] = Field(None, description="Story UUID string.")
+    ticket_code: Optional[str] = Field(None, description="Ticket code (e.g. US-001).")
+    story_title: Optional[str] = Field(None, description="Story title.")
+    as_a: Optional[str] = Field(None, description="User role or persona.")
+    i_want_to: Optional[str] = Field(None, description="Requested action/task.")
+    so_that: Optional[str] = Field(None, description="Business benefit/outcome.")
+    acceptance_criteria: List[str] = Field(default_factory=list, description="Criteria bodies linked to this story.")
+    is_locked: bool = Field(False, description="Whether the story is locked.")
+
+
+class TraceabilityRow(BaseModel):
+    """One Requirement Traceability Matrix row: a requirement plus everything that traces to it."""
+    model_config = ConfigDict(extra="allow")
+
+    requirement: TraceabilityRequirementInfo = Field(..., description="The requirement node.")
+    user_stories: List[TraceabilityStory] = Field(default_factory=list, description="Stories implementing this requirement.")
+    prd_sections: List[str] = Field(default_factory=list, description="PRD section keys referencing this requirement (or its stories).")
+    diagrams: List[str] = Field(default_factory=list, description="Diagram labels referencing this requirement (e.g. 'PRD v3').")
+    traced: bool = Field(False, description="True when the requirement has stories with criteria AND a PRD-section reference.")
+
+
+class TraceabilityDiagram(BaseModel):
+    """A diagram artifact available for traceability."""
+    model_config = ConfigDict(extra="allow")
+
+    label: str = Field(..., description="Diagram label (e.g. 'PRD v2').")
+    version: int = Field(..., description="PRD version the diagram belongs to.")
+
+
+class StaleCodeReference(BaseModel):
+    """A code referenced by an artifact that does not exist in the project."""
+    model_config = ConfigDict(extra="allow")
+
+    code: str = Field(..., description="Referenced code (e.g. REQ-999) with no matching artifact.")
+    section_keys: List[str] = Field(default_factory=list, description="PRD sections carrying the stale reference.")
+    diagrams: List[str] = Field(default_factory=list, description="Diagrams carrying the stale reference.")
+
+
+class TraceabilityCoverage(BaseModel):
+    """Aggregated coverage + gap report across the whole matrix."""
+    model_config = ConfigDict(extra="allow")
+
+    total_requirements: int = Field(0, description="Number of requirements.")
+    total_user_stories: int = Field(0, description="Number of active user stories.")
+    total_acceptance_criteria: int = Field(0, description="Number of active acceptance criteria.")
+    traced_requirements: int = Field(0, description="Requirements fully traced end-to-end.")
+    requirements_without_stories: List[str] = Field(default_factory=list, description="Requirement codes with no user story.")
+    requirements_without_prd_sections: List[str] = Field(default_factory=list, description="Requirement codes referenced by no PRD section.")
+    requirements_without_diagram: List[str] = Field(default_factory=list, description="Requirement codes referenced by no diagram.")
+    stories_without_criteria: List[str] = Field(default_factory=list, description="Ticket codes without acceptance criteria.")
+    stories_without_prd_sections: List[str] = Field(default_factory=list, description="Ticket codes referenced by no PRD section.")
+    stale_section_references: List[StaleCodeReference] = Field(default_factory=list, description="Codes referenced by PRD sections but unknown to the project.")
+    stale_diagram_references: List[StaleCodeReference] = Field(default_factory=list, description="Codes referenced by diagrams but unknown to the project.")
+
+
+class TraceabilityResponse(BaseModel):
+    """The complete derived Requirement Traceability Matrix for a project."""
+    model_config = ConfigDict(extra="allow")
+
+    project_id: str = Field(..., description="Project UUID string.")
+    rows: List[TraceabilityRow] = Field(default_factory=list, description="One matrix row per requirement.")
+    diagrams: List[TraceabilityDiagram] = Field(default_factory=list, description="Diagram artifacts considered for tracing.")
+    coverage: TraceabilityCoverage = Field(default_factory=TraceabilityCoverage, description="Coverage/gap report.")
+

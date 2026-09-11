@@ -99,7 +99,7 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
             if (e.key === 'Enter') handleSubmit();
           }}
           placeholder="Project name"
-          maxLength={255}
+          maxLength={40}
           aria-invalid={!!error}
           className={`w-full bg-white border rounded-xl px-3 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none transition-colors ${
             error

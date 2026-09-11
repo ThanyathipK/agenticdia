@@ -422,11 +422,11 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setMessages(prev => [...prev, {
         id: `prd-generated-${Date.now()}`,
         role: 'assistant',
-        content: '📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel.',
+        content: '📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system flowchart in the preview panel.',
         timestamp: nowTime(),
       }]);
 
-      store.setSyncStatus('PRD and sequence diagram updated.');
+      store.setSyncStatus('PRD and flowchart diagram updated.');
       deps.setActiveTab('prd'); // switch tab automatically to PRD
     } catch (err) {
       if (isAbortError(err)) {

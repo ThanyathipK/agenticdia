@@ -1,6 +1,7 @@
 // PRDEditor — PRD Document tab extracted from the former Dashboard.tsx.
 // Renders the compiled PRD as editable markdown sections with lock/unlock and
 // inline section editing.
+import { useRef } from 'react';
 import { FileText, Pencil, Save, Lock, Unlock } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
 import { getSafeSectionTitle, getSafeSectionContent } from '../utils/markdown';
@@ -18,6 +19,11 @@ export function PRDEditor({ state }: { state: ProjectState }) {
     sectionLocks,
     handleToggleSectionLock,
   } = state;
+
+  // The section text the current edit STARTED from. Sent back as
+  // `base_content` so the server can three-way merge the save onto the
+  // latest stored section ("last version + this edit").
+  const editBaseRef = useRef<string>('');
 
   return (
     <div className="space-y-8 animate-fadeIn">
@@ -123,6 +129,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                           onClick={() => {
                             setEditingSectionId(section.id);
                             setEditBuffer(safeContent);
+                            editBaseRef.current = safeContent;
                           }}
                           disabled={sectionLocks[section.id]?.is_locked ?? false}
                           className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-slate-200 shadow-sm cursor-pointer z-10 font-semibold disabled:opacity-30 disabled:cursor-not-allowed`}
@@ -166,7 +173,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                             Cancel
                           </button>
                           <button
-                            onClick={() => handleSaveSection(section.id, editBuffer)}
+                            onClick={() => handleSaveSection(section.id, editBuffer, editBaseRef.current)}
                             className="px-4 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 text-xs font-semibold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
                           >
                             <Save className="w-3.5 h-3.5" />

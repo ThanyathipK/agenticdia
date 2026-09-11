@@ -17,9 +17,14 @@ from app.merge_service import (
     collect_acceptance_criteria,
     filter_active_stories,
     generate_next_ticket_code,
+    merge_acceptance_criteria,
+    merge_story_fields,
     merge_user_stories,
+    merge_user_stories_with_report,
     normalize_ticket_code,
     normalize_title,
+    text_similarity,
+    titles_match,
 )
 
 
@@ -333,3 +338,201 @@ class TestCollectAcceptanceCriteria:
 
     def test_empty_input_returns_empty_list(self):
         assert collect_acceptance_criteria([]) == []
+
+
+# ==========================================
+# fuzzy matching helpers
+# ==========================================
+class TestTextSimilarity:
+    def test_identical_titles_score_one(self):
+        assert text_similarity("User Login", "user login") == 1.0
+
+    def test_reworded_title_still_matches(self):
+        assert titles_match("Upload profile photo", "Upload a profile photo")
+
+    def test_unrelated_titles_do_not_match(self):
+        assert not titles_match("User Login", "Transfer Funds")
+
+    def test_empty_titles_never_match(self):
+        assert not titles_match(None, "User Login")
+        assert not titles_match("User Login", "")
+
+
+# ==========================================
+# merge_acceptance_criteria
+# ==========================================
+class TestMergeAcceptanceCriteria:
+    def test_empty_old_adopts_all_new(self):
+        merged, report = merge_acceptance_criteria([], ["AC1", "AC2"])
+        assert merged == ["AC1", "AC2"]
+        assert report == {"kept": 0, "updated": 0, "added": 2}
+
+    def test_empty_new_keeps_all_old(self):
+        merged, report = merge_acceptance_criteria(["AC1"], [])
+        assert merged == ["AC1"]
+        assert report == {"kept": 1, "updated": 0, "added": 0}
+
+    def test_identical_items_are_kept(self):
+        merged, report = merge_acceptance_criteria(["AC1", "AC2"], ["AC1", "AC2"])
+        assert merged == ["AC1", "AC2"]
+        assert report == {"kept": 2, "updated": 0, "added": 0}
+
+    def test_matched_reworded_item_adopts_richer_text(self):
+        old = ["Failed login shows an error message"]
+        new = ["Failed login shows a clear error message"]
+        merged, report = merge_acceptance_criteria(old, new)
+        assert merged == new  # incoming phrasing is longer -> richer text wins
+        assert report == {"kept": 0, "updated": 1, "added": 0}
+
+    def test_unmatched_old_items_are_never_dropped(self):
+        merged, report = merge_acceptance_criteria(["AC1", "AC2"], ["AC2", "AC3"])
+        assert merged == ["AC1", "AC2", "AC3"]
+        assert report == {"kept": 2, "updated": 0, "added": 1}
+
+
+# ==========================================
+# merge_story_fields
+# ==========================================
+class TestMergeStoryFields:
+    def test_empty_incoming_fields_keep_existing_data(self):
+        matched = {
+            "story_title": "Existing Title",
+            "as_a": "customer",
+            "i_want_to": "do x",
+            "so_that": "because y",
+            "acceptance_criteria": ["AC1"],
+        }
+        updated, changed, _ac_report = merge_story_fields(matched, {"story_title": "", "as_a": None})
+        assert updated["story_title"] == "Existing Title"
+        assert updated["as_a"] == "customer"
+        assert changed == []
+
+    def test_differing_nonempty_incoming_fields_win(self):
+        matched = {"story_title": "Old", "as_a": "customer", "i_want_to": "do x", "so_that": "y", "acceptance_criteria": []}
+        inc = {"story_title": "New", "i_want_to": "do y"}
+        updated, changed, _ac_report = merge_story_fields(matched, inc)
+        assert updated["story_title"] == "New"
+        assert updated["i_want_to"] == "do y"
+        assert updated["as_a"] == "customer"  # untouched persisted data
+        assert changed == ["story_title", "i_want_to"]
+
+    def test_acceptance_criteria_are_union_merged_not_replaced(self):
+        matched = {"acceptance_criteria": ["AC1", "AC2"]}
+        inc = {"acceptance_criteria": ["AC1", "AC3"]}
+        updated, changed, ac_report = merge_story_fields(matched, inc)
+        assert updated["acceptance_criteria"] == ["AC1", "AC2", "AC3"]
+        assert "acceptance_criteria" in changed
+        assert ac_report["added"] == 1
+
+
+# ==========================================
+# fuzzy-title matching inside the merge
+# ==========================================
+class TestFuzzyTitleMatching:
+    def test_reworded_title_updates_existing_story(self, existing_stories):
+        incoming = [{"id": None, "ticket_code": "US-009", "story_title": "A User Login",
+                     "as_a": "customer", "i_want_to": "log in to my account",
+                     "so_that": "I can manage my funds"}]
+        merged = merge_user_stories(existing_stories, incoming)
+        updated = next(s for s in merged if s["story_title"] == "A User Login")
+        assert updated["id"] == "s1"  # matched the existing story, not a duplicate
+        assert updated["change_type"] == "updated"
+        assert updated["ticket_code"] == "US-009"  # unclaimed incoming code is claimed
+        assert not any(s["change_type"] == "created" for s in merged)
+
+    def test_similar_but_different_title_is_created_not_matched(self, existing_stories):
+        incoming = [{"id": None, "ticket_code": "US-009", "story_title": "Export monthly report",
+                     "as_a": "analyst", "i_want_to": "export reports", "so_that": "for audits"}]
+        merged = merge_user_stories(existing_stories, incoming)
+        created = [s for s in merged if s["change_type"] == "created"]
+        assert len(created) == 1
+        assert created[0]["story_title"] == "Export monthly report"
+
+
+# ==========================================
+# protected stories / conflicts
+# ==========================================
+class TestProtectedStories:
+    def test_protected_matched_story_keeps_existing_data(self, existing_stories):
+        incoming = [make_incoming(story_title="User Login v2", i_want_to="log in with biometrics")]
+        merged = merge_user_stories(existing_stories, incoming, protected_ids=["s1"])
+        protected = next(s for s in merged if s["id"] == "s1")
+        assert protected["change_type"] == "unchanged"
+        assert protected["story_title"] == "User Login"          # incoming ignored
+        assert protected["i_want_to"] == "log in to my account"
+
+    def test_protected_story_matched_by_ticket_code(self, existing_stories):
+        incoming = [{"id": None, "ticket_code": "us-2", "story_title": "Transfer Funds",
+                     "as_a": "customer", "i_want_to": "wire transfer without auth",
+                     "so_that": "I can move funds between accounts"}]
+        merged = merge_user_stories(existing_stories, incoming, protected_ids=["US-002"])
+        protected = next(s for s in merged if s["ticket_code"] == "US-002")
+        assert protected["change_type"] == "unchanged"
+        assert protected["i_want_to"] == "transfer money"
+
+    def test_archive_recommendation_on_protected_story_becomes_conflict(self, existing_stories):
+        recs = [{"target_requirement_id": "US-001", "recommended_action": "ARCHIVE"}]
+        merged = merge_user_stories(existing_stories, [], recs, protected_ids=["US-001"])
+        conflict = next(s for s in merged if s["id"] == "s1")
+        assert conflict["status"] == "active"                    # NOT archived
+        assert conflict["change_type"] == "conflict"
+        assert conflict["merge_conflict"] == "archive_requested"
+
+    def test_incoming_archived_status_on_protected_story_becomes_conflict(self, existing_stories):
+        incoming = [make_incoming(status="archived")]
+        merged = merge_user_stories(existing_stories, incoming, protected_ids=["s1"])
+        conflict = next(s for s in merged if s["id"] == "s1")
+        assert conflict["status"] == "active"
+        assert conflict["change_type"] == "conflict"
+
+    def test_unprotected_stories_still_update_normally(self, existing_stories):
+        incoming = [make_incoming(story_title="User Login v2")]
+        merged = merge_user_stories(existing_stories, incoming, protected_ids=["s2"])
+        updated = next(s for s in merged if s["id"] == "s1")
+        assert updated["change_type"] == "updated"
+        assert updated["story_title"] == "User Login v2"
+
+
+# ==========================================
+# merge report / backward compatibility
+# ==========================================
+class TestMergeReport:
+    def test_report_covers_updates_creates_and_unchanged(self, existing_stories):
+        incoming = [
+            make_incoming(story_title="User Login v2"),
+            {"ticket_code": "US-000", "story_title": "Feature Z",
+             "as_a": "a", "i_want_to": "b", "so_that": "c"},
+        ]
+        stories, report = merge_user_stories_with_report(existing_stories, incoming)
+        assert report["US-001"]["action"] == "updated"
+        assert report["US-001"]["matched_by"] == "id"
+        assert "story_title" in report["US-001"]["fields_changed"]
+        assert report["US-002"]["action"] == "unchanged"
+        created_key = next(k for k, v in report.items() if v["action"] == "created")
+        assert report[created_key]["matched_by"] is None
+        # merge_user_stories still returns just the list (backward compatible)
+        assert merge_user_stories(existing_stories, incoming) == stories
+
+    def test_report_includes_acceptance_criteria_counts(self, existing_stories):
+        incoming = [make_incoming(
+            acceptance_criteria=["Login validates credentials", "Failed login shows error", "Supports biometrics"],
+        )]
+        _stories, report = merge_user_stories_with_report(existing_stories, incoming)
+        ac = report["US-001"]["acceptance_criteria"]
+        assert ac == {"kept": 2, "updated": 0, "added": 1}
+
+    def test_protected_ids_accept_ids_and_codes(self, existing_stories):
+        incoming = [make_incoming(story_title="User Login v2")]
+        by_id = merge_user_stories(existing_stories, incoming, protected_ids=["s1"])
+        by_code = merge_user_stories(existing_stories, incoming, protected_ids=["us-1"])
+        assert by_id == by_code  # "us-1" normalizes to "US-001" -> same protection
+
+    def test_colliding_incoming_code_does_not_steal_matched_story_code(self, existing_stories):
+        # incoming carries the id of s1 but the ticket code of s2:
+        # must NOT overwrite s1's code (would create a code collision)
+        incoming = [make_incoming(ticket_code="US-002")]
+        merged = merge_user_stories(existing_stories, incoming)
+        updated = next(s for s in merged if s["id"] == "s1")
+        assert updated["ticket_code"] == "US-001"
+        untouched = next(s for s in merged if s["id"] == "s2")
+        assert untouched["ticket_code"] == "US-002"

@@ -25,7 +25,7 @@ before splitting; markdown sources pass through untouched.
 """
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -142,6 +142,113 @@ def stitch_markdown(sections: List[Dict[str, Any]]) -> str:
         key=lambda s: (s.get("section_order", 0) or 0, s.get("created_at") or ""),
     )
     return "\n\n".join((s.get("content") or "").strip() for s in ordered if s.get("content"))
+
+
+def merge_edited_section(
+    base_content: Optional[str],
+    current_content: Optional[str],
+    edited_content: str,
+) -> str:
+    """Three-way merge for a manual section edit.
+
+    ``base_content`` is the section text the user STARTED editing (the
+    version the editor buffer was seeded from), ``current_content`` is the
+    latest stored section text (possibly advanced by an AI regeneration while
+    the user was editing), and ``edited_content`` is the user's full edited
+    text.
+
+    Merge rule per base line: the user's version wins wherever the user
+    touched the line; everywhere else the current stored line wins. Lines
+    inserted by either side are always kept; lines deleted by the user stay
+    deleted.
+
+    When there is no base (unknown/legacy client) the edit is stored
+    verbatim. When base == current (no concurrent change — the common case)
+    the result is exactly the user's edited text, byte-for-byte, so a manual
+    save can NEVER wipe content in the common case.
+    """
+    edited = edited_content or ""
+    if not base_content or not base_content.strip():
+        return edited
+
+    import difflib
+
+    base_lines = (base_content or "").splitlines()
+    current_lines = (current_content or "").splitlines()
+    edited_lines = edited.splitlines()
+
+    # Fast path: nothing changed concurrently — store the edit verbatim.
+    if base_lines == current_lines:
+        return edited
+
+    user_ops = difflib.SequenceMatcher(
+        a=base_lines, b=edited_lines, autojunk=False
+    ).get_opcodes()
+
+    # 1. For every base line, record the user's replacement lines (None =
+    #    untouched, [] = deleted by user).
+    user_line_map: Dict[int, Optional[List[str]]] = {}
+    for tag, ui1, ui2, uj1, uj2 in user_ops:
+        if tag == "equal":
+            for k in range(ui1, ui2):
+                user_line_map[k] = None
+        elif tag == "delete":
+            for k in range(ui1, ui2):
+                user_line_map[k] = []
+        else:  # replace: map each base line to its share of edited lines
+            span = uj2 - uj1
+            width = ui2 - ui1
+            for n, k in enumerate(range(ui1, ui2)):
+                lo = uj1 + (span * n) // width
+                hi = uj1 + (span * (n + 1)) // width
+                user_line_map[k] = edited_lines[lo:hi]
+    user_inserts: Dict[int, List[str]] = {}
+    for tag, ui1, _ui2, uj1, uj2 in user_ops:
+        if tag == "insert":
+            user_inserts.setdefault(ui1, []).extend(edited_lines[uj1:uj2])
+
+    # 2. Walk base-vs-current; decide each emitted line.
+    out: List[str] = []
+    cur_ops = difflib.SequenceMatcher(
+        a=base_lines, b=current_lines, autojunk=False
+    ).get_opcodes()
+    for tag, i1, i2, j1, j2 in cur_ops:
+        # User insertions anchored at this base offset come first.
+        for pos in range(i1, i1 + 1):
+            if pos in user_inserts:
+                out.extend(user_inserts[pos])
+        if tag == "equal":
+            for k in range(i1, i2):
+                rep = user_line_map.get(k, None)
+                out.extend(current_lines[j1 + (k - i1): j1 + (k - i1) + 1] if rep is None else rep)
+        elif tag == "delete":
+            for k in range(i1, i2):
+                rep = user_line_map.get(k, None)
+                if rep is None:
+                    continue  # AI deletion of untouched line stands
+                out.extend(rep)  # user touched it — edit wins
+        elif tag == "insert":
+            out.extend(current_lines[j1:j2])  # AI insertions always kept
+        else:  # replace — AI rewrote this base range
+            for k in range(i1, i2):
+                rep = user_line_map.get(k, None)
+                if rep is None:
+                    # Untouched by user: keep AI's corresponding line when the
+                    # rewrite is 1:1, else keep the whole AI block once.
+                    if i2 - i1 == j2 - j1:
+                        out.append(current_lines[j1 + (k - i1)])
+                    elif k == i1:
+                        out.extend(current_lines[j1:j2])
+                else:
+                    out.extend(rep)  # user's edit wins
+
+    # 3. User insertions anchored at EOF (or any anchor never visited above).
+    visited = {i1 for tag, i1, _i2, _j1, _j2 in cur_ops if tag == "insert"}
+    for pos in sorted(user_inserts):
+        if pos not in visited:
+            out.extend(user_inserts[pos])
+
+    return "\n".join(out)
 
 
 def prd_is_sectioned_markdown(document: str) -> bool:

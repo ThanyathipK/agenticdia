@@ -4,7 +4,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
-export type WorkspaceTab = 'prd' | 'flows' | 'history';
+export type WorkspaceTab = 'prd' | 'flows' | 'trace' | 'history';
+
+/** Top-level app view: the chat/PRD workspace or the projects overview dashboard. */
+export type AppView = 'workspace' | 'dashboard';
 
 export interface UseWorkspaceUiResult {
   splitPct: number;
@@ -16,6 +19,9 @@ export interface UseWorkspaceUiResult {
   splitContainerRef: React.RefObject<HTMLDivElement | null>;
   activeTab: WorkspaceTab;
   setActiveTab: (tab: WorkspaceTab) => void;
+  /** Which top-level page fills the content area next to the project sidebar. */
+  activeView: AppView;
+  setActiveView: (view: AppView) => void;
   diagramZoom: number;
   setDiagramZoom: Dispatch<SetStateAction<number>>;
   hoverNode: string | null;
@@ -55,8 +61,12 @@ export function useWorkspaceUi(): UseWorkspaceUiResult {
     };
   }, [isDraggingSplit]);
 
-  // Layout Tab Active States: 'prd' | 'flows' | 'history'
+  // Layout Tab Active States: 'prd' | 'flows' | 'trace' | 'history'
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('prd');
+
+  // Top-level view next to the project sidebar: 'workspace' (chat + PRD tabs)
+  // or 'dashboard' (projects overview table). Toggled from the sidebar nav.
+  const [activeView, setActiveView] = useState<AppView>('workspace');
 
   // Interactive Flowchart/Sequence Visualizer zoom/state
   const [diagramZoom, setDiagramZoom] = useState<number>(100);
@@ -77,6 +87,8 @@ export function useWorkspaceUi(): UseWorkspaceUiResult {
     splitContainerRef,
     activeTab,
     setActiveTab,
+    activeView,
+    setActiveView,
     diagramZoom,
     setDiagramZoom,
     hoverNode,

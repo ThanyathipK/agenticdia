@@ -94,6 +94,8 @@ export function useProjectSync(
 
         // Load per-part PRD section lock/ownership metadata (non-blocking).
         store.loadSectionLocks(projId);
+        // Load the immutable PRD version ledger (AI + manual snapshots)
+        store.loadVersionHistory(projId);
 
         store.setSyncStatus('Synced with Supabase Cloud');
       }
@@ -227,6 +229,8 @@ export function useProjectSync(
 
           // 8. Sync per-part PRD section lock/ownership metadata (non-blocking)
           if (isSubscribed) store.loadSectionLocks(projectId);
+          // 9. Sync the immutable PRD version ledger (non-blocking)
+          if (isSubscribed) store.loadVersionHistory(projectId);
 
           store.setSyncStatus('Synced via live updates');
         }

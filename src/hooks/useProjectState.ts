@@ -26,11 +26,11 @@ import type {
   StructuredRequirements,
   VersionHistory,
 } from '../components/types';
-import type { PendingActionPayload, ProjectSummary } from '../api/types';
+import type { PendingActionPayload, ProjectStatus, ProjectSummary } from '../api/types';
 import { api, detailFromBlobError } from '../api/client';
 import { handleError } from '../components/Toast';
 import type { UseDocumentsResult } from './useDocuments';
-import type { WorkspaceTab } from './useWorkspaceUi';
+import type { AppView, WorkspaceTab } from './useWorkspaceUi';
 import { useArtifactLocks } from './useArtifactLocks';
 import { useChat } from './useChat';
 import { useDocuments } from './useDocuments';
@@ -67,6 +67,10 @@ export interface ProjectState {
    */
   handleCreateProject: (name: string) => Promise<string | null>;
   handleTogglePin: (projectId: string) => Promise<void>;
+  /** Flags/unflags a project (dashboard ★ marker) — independent of pinning. */
+  handleToggleFlag: (projectId: string) => Promise<void>;
+  /** Sets the project's user-editable workflow status (dashboard table), optimistically. */
+  handleUpdateProjectStatus: (projectId: string, status: ProjectStatus) => Promise<void>;
   /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
   isCreateModalOpen: boolean;
   setIsCreateModalOpen: Dispatch<SetStateAction<boolean>>;
@@ -131,7 +135,7 @@ export interface ProjectState {
   setEditingSectionId: Dispatch<SetStateAction<string | null>>;
   editBuffer: string;
   setEditBuffer: Dispatch<SetStateAction<string>>;
-  handleSaveSection: (sectionId: string, newContent: string) => Promise<void>;
+  handleSaveSection: (sectionId: string, newContent: string, baseContent?: string) => Promise<void>;
   lockedRequirements: Record<string, RequirementLockState>;
   handleLockRequirement: (requirementCode: string) => Promise<void>;
   handleUnlockRequirement: (requirementCode: string) => Promise<void>;
@@ -143,6 +147,9 @@ export interface ProjectState {
   // Tabs / flows / history (document library lives inside the history tab)
   activeTab: WorkspaceTab;
   setActiveTab: (tab: WorkspaceTab) => void;
+  /** Top-level view next to the project sidebar: 'workspace' | 'dashboard'. */
+  activeView: AppView;
+  setActiveView: (view: AppView) => void;
   mermaidDiagram: string;
   versionHistory: VersionHistory[];
   selectedHistVersion: number;
@@ -229,10 +236,19 @@ export function useProjectState(): ProjectState {
           ? await api.exportPrdPdf(pid, store.prdMarkdown, store.currentVersion, projectName)
           : await api.exportPrdDocx(pid, store.prdMarkdown, store.currentVersion, projectName);
 
-      const stem = `PRD-${projectName.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 48)}`;
+      // Default download name follows the shared PRD_projectname_version_date_time
+      // convention: PRD_<project>_V<version>_<YYYY-MM-DD>_<HHMM>.<fmt>.
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const dateStamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+      const timeStamp = `${pad(now.getHours())}${pad(now.getMinutes())}`;
+      const stem = `PRD_${projectName
+        .replace(/[^A-Za-z0-9._-]+/g, '_')
+        .slice(0, 48)
+        .replace(/^_+|_+$/g, '')}`;
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = `${stem}-V${store.currentVersion}.${fmt}`;
+      link.download = `${stem}_V${store.currentVersion}_${dateStamp}_${timeStamp}.${fmt}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -293,6 +309,8 @@ export function useProjectState(): ProjectState {
     handleDeleteProject: projectsApi.handleDeleteProject,
     handleCreateProject: projectsApi.handleCreateProject,
     handleTogglePin: projectsApi.handleTogglePin,
+    handleToggleFlag: projectsApi.handleToggleFlag,
+    handleUpdateProjectStatus: projectsApi.handleUpdateProjectStatus,
     isCreateModalOpen: projectsApi.isCreateModalOpen,
     setIsCreateModalOpen: projectsApi.setIsCreateModalOpen,
     projectPendingDelete: projectsApi.projectPendingDelete,
@@ -315,6 +333,8 @@ export function useProjectState(): ProjectState {
     handleToggleSectionLock: store.handleToggleSectionLock,
     activeTab: ui.activeTab,
     setActiveTab: ui.setActiveTab,
+    activeView: ui.activeView,
+    setActiveView: ui.setActiveView,
     mermaidDiagram: store.mermaidDiagram,
     versionHistory: store.versionHistory,
     selectedHistVersion: ui.selectedHistVersion,

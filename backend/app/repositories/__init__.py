@@ -23,6 +23,7 @@ from app.repositories.prd_section import PRDSectionRepository, PRDSectionVersion
 from app.repositories.project import ProjectRepository
 from app.repositories.requirement import RequirementRepository
 from app.repositories.requirement_state import RequirementStateRepository
+from app.repositories.semantic_memory import SemanticMemoryRepository
 from app.repositories.user_story import UserStoryRepository
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "PRDSectionVersionRepository",
     "RequirementStateRepository",
     "ConversationMessageRepository",
+    "SemanticMemoryRepository",
     "DocumentRepository",
     "PendingActionRepository",
     "ArtifactEventLogRepository",

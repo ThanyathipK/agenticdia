@@ -123,7 +123,7 @@ agenticdia/
 │   ├── .env.example            # ← copy to backend/.env
 │   ├── requirements.txt        # Python dependencies
 │   ├── alembic.ini
-│   ├── alembic/                # Migrations 0001 initial · 0002 locks rename · 0003 pinned · 0004 uploaded_documents
+│   ├── alembic/                # Migrations 0001 initial · 0002 locks rename · 0003 pinned · 0004 uploaded_documents · 0009 flagged
 │   ├── init.sql                # Full PostgreSQL reference DDL
 │   ├── check_schema_drift.py   # init.sql ↔ models.py drift harness
 │   ├── test_sse.py             # End-to-end SSE stream test
@@ -391,6 +391,7 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `POST` | `/api/projects` | Create a project (`ProjectCreate`: `name`, `description`, `industry_standard`) |
 | `PUT` | `/api/projects/{project_id}` | Rename / update a project |
 | `PUT` | `/api/projects/{project_id}/pin` | Toggle the pinned (quick-access) flag |
+| `PUT` | `/api/projects/{project_id}/flag` | Toggle the dashboard ★ flag (independent of pinning) |
 | `DELETE` | `/api/projects/{project_id}` | Delete a project |
 | `GET` | `/api/project/{project_id}` | Load the centralized **requirement state** (or defaults if none exists) |
 | `PUT` | `/api/project/{project_id}` | Directly persist manual edits to the requirement state (e.g. PRD edits) |

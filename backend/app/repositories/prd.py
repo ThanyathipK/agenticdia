@@ -110,7 +110,9 @@ class PRDVersionRepository:
     async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         pid = as_uuid(project_id)
 
-        # Determine the next version number for this project
+        # Determine the next version number for this project. The version ALWAYS
+        # advances on every snapshot (AI generation, manual edit, revert) —
+        # there is intentionally no "same content" short-circuit.
         stmt = select(func.max(PRDVersionModel.version_number)).where(PRDVersionModel.project_id == pid)
         result = await session.execute(stmt)
         max_version = result.scalar() or 0
@@ -120,12 +122,37 @@ class PRDVersionRepository:
             project_id=pid,
             version_number=next_version,
             generated_prd=data.get("generated_prd", ""),
-            generated_by=data.get("generated_by", "automated_agent")
+            generated_by=data.get("generated_by", "automated_agent"),
+            change_type=data.get("change_type", "ai"),
+            change_summary=data.get("change_summary"),
+            changed_sections=data.get("changed_sections"),
+            semver=data.get("semver") or "1.0.0",
         )
         session.add(version)
         await session.flush()
         await session.refresh(version)
         return serialize_prd_version(version)
+
+    @staticmethod
+    async def get_previous(project_id: str, before_version: int, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        """The version IMMEDIATELY before ``before_version`` (or None when none).
+
+        Used for change/diff computation: the snapshot at ``before_version`` is
+        compared against this predecessor's content.
+        """
+        pid = as_uuid(project_id)
+        stmt = (
+            select(PRDVersionModel)
+            .where(
+                PRDVersionModel.project_id == pid,
+                PRDVersionModel.version_number < before_version,
+            )
+            .order_by(PRDVersionModel.version_number.desc())
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        v = result.scalar_one_or_none()
+        return serialize_prd_version(v) if v else None
 
     @staticmethod
     async def get_by_project(project_id: str, session: AsyncSession) -> List[Dict[str, Any]]:

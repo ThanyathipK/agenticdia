@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from uuid import UUID
 
@@ -34,9 +35,12 @@ from app.schemas import (
     ProjectCreated,
     ProjectDeleteResponse,
     ProjectPinRequest,
+    ProjectFlagRequest,
+    ProjectStatusRequest,
     RequirementStateResponse,
     ConversationMessageResponse,
     PRDVersionResponse,
+    PrdVersionDiffResponse,
     PRDExportResponse,
 )
 from app.prompt_loader import load_prd_template, load_prd_latex_template
@@ -225,6 +229,77 @@ async def pin_project(project_id: str, payload: ProjectPinRequest, db: AsyncSess
     return updated
 
 
+@router.put("/api/projects/{project_id}/flag", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
+async def flag_project(project_id: str, payload: ProjectFlagRequest, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+    """Flag or unflag a project (dashboard ★ marker).
+
+    Independent of pinning: flagging only marks the project for attention in
+    the projects overview table and never affects the sidebar ordering.
+
+    Args:
+        project_id: Project UUID string.
+        payload: Desired flagged state.
+        db: Active asynchronous database session.
+
+    Returns:
+        ProjectSummary: The updated project record.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID; 404 if not found.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    updated = await ProjectRepository.toggle_flagged(project_id, payload.is_flagged, db)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await event_manager.publish(project_id, "project_updated", {
+        "project_id": project_id,
+        "is_flagged": payload.is_flagged,
+    })
+    return updated
+
+
+@router.put("/api/projects/{project_id}/status", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
+async def set_project_status(project_id: str, payload: ProjectStatusRequest, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+    """Set a project's user-editable workflow status (dashboard table).
+
+    Args:
+        project_id: Project UUID string.
+        payload: Desired workflow status.
+        db: Active asynchronous database session.
+
+    Returns:
+        ProjectSummary: The updated project record.
+
+    Raises:
+        HTTPException: 400 if ``project_id`` is not a valid UUID or the status
+            value is not one of the allowed workflow statuses; 404 if not found.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    allowed = {"draft", "in_review_hpo", "in_review_po", "approved", "revised"}
+    if payload.status not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status '{payload.status}'. Allowed: {', '.join(sorted(allowed))}",
+        )
+
+    updated = await ProjectRepository.update_status(project_id, payload.status, db)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Project not found")
+    await event_manager.publish(project_id, "project_updated", {
+        "project_id": project_id,
+        "status": payload.status,
+    })
+    return updated
+
+
 @router.get("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
 async def get_project_requirement_state(project_id: str, session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
     """
@@ -364,6 +439,23 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
 
     logger.info(f"[DB LOG] Updating RequirementState directly for project {project_id}")
     state = await RequirementStateRepository.save_or_update(project_id, updates, session)
+
+    # If the update includes a new generated_prd (e.g. legacy manual section edit
+    # fallback), record an immutable PRD version so the version ledger never
+    # collapses — even when the primary section endpoint is unavailable.
+    if "generated_prd" in updates and updates["generated_prd"]:
+        try:
+            from app.version_service import record_prd_version
+            await record_prd_version(
+                project_id, session,
+                generated_prd=updates["generated_prd"],
+                generated_by="user",
+                change_type="manual",
+                change_summary=updates.get("change_summary"),
+            )
+        except Exception as ver_err:
+            logger.warning("[DB LOG] Failed to record PRD version for legacy update: %s", ver_err)
+
     await event_manager.publish(project_id, "state_updated", {"project_id": project_id})
     return state
 
@@ -532,11 +624,27 @@ class LatexExportPayload(BaseModel):
     project_name: Optional[str] = Field(None, description="Project name for the filename.")
 
 
-def _safe_filename_stem(project_id: UUID, payload: LatexExportPayload) -> str:
+def _timestamp_stamp(now: Optional[datetime] = None) -> str:
+    """``YYYY-MM-DD_HHMM`` wall-clock stamp used in exported PRD filenames."""
+    now = now or datetime.now()
+    return now.strftime("%Y-%m-%d_%H%M")
+
+
+def _safe_filename_stem(
+    project_id: UUID,
+    payload: LatexExportPayload,
+    now: Optional[datetime] = None,
+) -> str:
+    """``PRD_<project>_V<version>_<YYYY-MM-DD>_<HHMM>`` default download name.
+
+    Underscore-separated so the browser/default OS download name matches the
+    shared ``PRD_projectname_version_date_time`` convention on both PDF and
+    DOCX exports. ``now`` is injectable for deterministic tests.
+    """
     name = (payload.project_name or "").strip()
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", name)[:48].strip("-") if name else str(project_id)[:8]
-    version_part = f"-V{payload.version}" if payload.version else ""
-    return f"PRD-{stem}{version_part or ''}"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:48].strip("_") if name else str(project_id)[:8]
+    version_part = f"_V{payload.version}" if payload.version else ""
+    return f"PRD_{stem}{version_part}_{_timestamp_stamp(now)}"
 
 
 async def _export_prd_bytes(
@@ -778,6 +886,44 @@ async def get_prd_versions(project_id: str, session: AsyncSession = Depends(get_
 
     versions = await PRDVersionRepository.get_by_project(project_id, session)
     return versions
+
+
+@router.get(
+    "/api/project/{project_id}/prd-versions/{version_number}/diff",
+    response_model=PrdVersionDiffResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_prd_version_diff(
+    project_id: str,
+    version_number: int,
+    base_version: Optional[int] = Query(default=None, description="Older base version; defaults to the immediate predecessor."),
+    session: AsyncSession = Depends(get_db),
+) -> PrdVersionDiffResponse:
+    """Section-level diff of one PRD version against an earlier base version.
+
+    Locked sections whose content WOULD have changed are reported as
+    ``locked_preserved`` — the ledger proves the lock contract was honoured
+    while the version still advanced.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    from app.version_service import diff_versions
+    diff = await diff_versions(
+        project_id, version_number, session,
+        base_version=base_version,
+    )
+    if diff is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Version {version_number} of project {project_id} does not exist"
+                " or has no base version to compare against."
+            ),
+        )
+    return diff
 
 
 @router.get("/api/project/{project_id}/prd-versions/latest", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)

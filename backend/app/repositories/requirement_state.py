@@ -225,10 +225,15 @@ class RequirementStateRepository:
                 model.acceptance_criteria = []
             if "clarification_questions" in updates and updates["clarification_questions"] is not None:
                 model.clarification_questions = []
+            # generated_prd / generated_diagrams are persisted verbatim — the
+            # caller passes the FINAL merged document (e.g. the manual-edit
+            # merge of "previous version + this edit", or the AI regeneration).
+            # Clearing them here wiped the preview after every manual save
+            # (the frontend reloads project state and read generated_prd).
             if "generated_prd" in updates and updates["generated_prd"] is not None:
-                model.generated_prd = ""
+                model.generated_prd = updates["generated_prd"]
             if "generated_diagrams" in updates and updates["generated_diagrams"] is not None:
-                model.generated_diagrams = ""
+                model.generated_diagrams = updates["generated_diagrams"]
 
         version_num = model.version_number
 

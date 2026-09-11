@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { api, detailFromJsonError } from '../api/client';
-import type { PendingActionPayload, ProjectSummary } from '../api/types';
+import type { PendingActionPayload, ProjectStatus, ProjectSummary } from '../api/types';
 import { handleError } from '../components/Toast';
 
 export interface ProjectContextMenuState {
@@ -37,6 +37,10 @@ export interface UseProjectsResult {
    */
   handleCreateProject: (name: string) => Promise<string | null>;
   handleTogglePin: (projectId: string) => Promise<void>;
+  /** Flags/unflags a project (dashboard ★ marker) — independent of pinning. */
+  handleToggleFlag: (projectId: string) => Promise<void>;
+  /** Sets the project's user-editable workflow status (dashboard table), optimistically. */
+  handleUpdateProjectStatus: (projectId: string, status: ProjectStatus) => Promise<void>;
   /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
   isCreateModalOpen: boolean;
   setIsCreateModalOpen: Dispatch<SetStateAction<boolean>>;
@@ -187,6 +191,7 @@ export function useProjects(): UseProjectsResult {
   const handleCreateProject = async (name: string): Promise<string | null> => {
     const trimmed = name.trim();
     if (!trimmed) return 'Project name must not be empty.';
+    if (trimmed.length > 40) return 'Project name must be 40 characters or fewer.';
     try {
       await api.createProject(trimmed);
       setProjects(await api.listProjects());
@@ -216,6 +221,50 @@ export function useProjects(): UseProjectsResult {
     setProjectContextMenu(null);
   };
 
+  // Handle project flag/unflag — dashboard-only ★ marker. Deliberately
+  // independent of pinning: flagging marks the project for attention in the
+  // projects overview table and never affects the sidebar's pinned ordering.
+  const handleToggleFlag = async (projectIdToFlag: string) => {
+    const target = projects.find(p => p.id === projectIdToFlag);
+    const nextFlagged = !(target && target.is_flagged);
+    // Optimistic update for snappy UI, then reconcile with the server.
+    setProjects(prev =>
+      prev.map(p => (p.id === projectIdToFlag ? { ...p, is_flagged: nextFlagged } : p))
+    );
+    try {
+      const updated = await api.toggleProjectFlag(projectIdToFlag, nextFlagged);
+      setProjects(prev => prev.map(p => (p.id === projectIdToFlag ? { ...p, is_flagged: updated.is_flagged } : p)));
+    } catch (err) {
+      setProjects(prev =>
+        prev.map(p => (p.id === projectIdToFlag ? { ...p, is_flagged: !nextFlagged } : p))
+      );
+      handleError('Failed to update the flag.', err);
+    }
+    setProjectContextMenu(null);
+  };
+
+  // Handle project workflow status change (dashboard status badge dropdown).
+  // Same optimistic pattern as pinning: apply locally for snappy UI, reconcile
+  // with the server, and roll back on failure with a toast.
+  const handleUpdateProjectStatus = async (projectIdToUpdate: string, newStatus: ProjectStatus) => {
+    const previousStatus = projects.find(p => p.id === projectIdToUpdate)?.status;
+    setProjects(prev =>
+      prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: newStatus } : p))
+    );
+    try {
+      const updated = await api.updateProjectStatus(projectIdToUpdate, newStatus);
+      setProjects(prev =>
+        prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: updated.status, updated_at: updated.updated_at } : p))
+      );
+    } catch (err) {
+      setProjects(prev =>
+        prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: previousStatus } : p))
+      );
+      handleError('Failed to update the project status.', err);
+    }
+    setProjectContextMenu(null);
+  };
+
   return {
     projectId,
     setProjectId,
@@ -233,6 +282,8 @@ export function useProjects(): UseProjectsResult {
     handleDeleteProject,
     handleCreateProject,
     handleTogglePin,
+    handleToggleFlag,
+    handleUpdateProjectStatus,
     isCreateModalOpen,
     setIsCreateModalOpen,
     projectPendingDelete,

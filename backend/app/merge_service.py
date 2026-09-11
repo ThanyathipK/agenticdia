@@ -4,19 +4,32 @@ User Story Merge Service.
 Pure, dependency-free helpers (no langchain / DB / LLM imports) that power
 the multi-agent Gatherer's user story reconciliation logic.
 
-The core entrypoint is :func:`merge_user_stories`, which reconciles newly
-generated user stories against previously persisted ones:
+The core entrypoint is :func:`merge_user_stories` (a thin wrapper over
+:func:`merge_user_stories_with_report`), which performs an INCREMENTAL
+reconciliation of newly generated user stories against previously persisted
+ones WITHOUT overwriting existing data:
 
 - Keep unchanged stories        -> ``change_type="unchanged"``, ``status="active"``
-- Update modified stories       -> ``change_type="updated"``,  ``status="active"``
+- Update modified stories       -> ``change_type="updated"``,   ``status="active"``
+  (field-level: empty incoming values keep the persisted data; acceptance
+  criteria are union-merged via :func:`merge_acceptance_criteria`, never
+  wholesale-replaced)
 - Insert brand-new stories      -> ``change_type="created"``,  ``status="active"``
 - Archive deleted stories       -> ``change_type="archived"``, ``status="archived"``
+- Protected stories (locked / human-edited, via ``protected_ids``) are never
+  mutated; a pending archive on one is surfaced as ``change_type="conflict"``
+  (status stays ``active``) instead of being silently applied.
+
+Matching is progressive identity resolution — exact id -> exact ticket code ->
+exact title -> fuzzy title (:func:`titles_match`) — so a re-worded story title
+updates the existing story instead of creating a duplicate.
 
 Exposing this logic in a dedicated module (instead of inside ``agents.py``)
 keeps it unit-testable without bootstrapping an LLM client or the LangGraph
 workflow.
 """
-from typing import Dict, Any, List, Optional
+import difflib
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 
 # ==========================================
@@ -50,29 +63,247 @@ def generate_next_ticket_code(stories: List[Dict[str, Any]]) -> str:
     return f"US-{max_num + 1:03d}"
 
 # ==========================================
+# FUZZY MATCHING HELPERS (stdlib only)
+# ==========================================
+FUZZY_TITLE_THRESHOLD = 0.85
+FUZZY_AC_THRESHOLD = 0.85
+MERGED_STORY_FIELDS = ("story_title", "as_a", "i_want_to", "so_that")
+
+
+def text_similarity(a: Optional[str], b: Optional[str]) -> float:
+    """Normalized-text similarity in ``[0.0, 1.0]`` (difflib.SequenceMatcher)."""
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio()
+
+
+def titles_match(a: Optional[str], b: Optional[str], threshold: float = FUZZY_TITLE_THRESHOLD) -> bool:
+    """True when two story titles are similar enough to be the same story."""
+    return text_similarity(a, b) >= threshold
+
+
+# ==========================================
+# ACCEPTANCE-CRITERIA UNION MERGE
+# ==========================================
+def _normalize_ac_text(ac: Any) -> str:
+    s = str(ac or "").lower().strip()
+    return " ".join(s.split())
+
+
+def merge_acceptance_criteria(
+    old_ac: Optional[List[Any]],
+    new_ac: Optional[List[Any]],
+    threshold: float = FUZZY_AC_THRESHOLD,
+) -> Tuple[List[Any], Dict[str, int]]:
+    """
+    Union-merges acceptance criteria instead of replacing the whole list.
+
+    Existing criteria are never silently dropped: every old item is matched
+    against the incoming items (fuzzy). A match either keeps the text
+    (identical) or adopts only the richer (longer) phrasing; unmatched old
+    items are KEPT as-is, unmatched new items are APPENDED.
+
+    Returns ``(merged_list, report)`` with report counts
+    ``{"kept": int, "updated": int, "added": int}``.
+    """
+    old_items = list(old_ac or [])
+    new_items = list(new_ac or [])
+    report = {"kept": 0, "updated": 0, "added": 0}
+
+    if not new_items:
+        report["kept"] = len(old_items)
+        return old_items, report
+    if not old_items:
+        report["added"] = len(new_items)
+        return new_items, report
+
+    used_new: Set[int] = set()
+    merged: List[Any] = []
+    for o in old_items:
+        o_norm = _normalize_ac_text(o)
+        best_idx: Optional[int] = None
+        best_ratio = 0.0
+        for i, n in enumerate(new_items):
+            if i in used_new:
+                continue
+            ratio = difflib.SequenceMatcher(None, o_norm, _normalize_ac_text(n)).ratio()
+            if ratio > best_ratio:
+                best_ratio, best_idx = ratio, i
+        if best_idx is not None and best_ratio >= threshold:
+            n = new_items[best_idx]
+            used_new.add(best_idx)
+            if _normalize_ac_text(n) == o_norm:
+                merged.append(o)          # identical -> untouched existing data
+                report["kept"] += 1
+            else:
+                # matched re-wording -> keep only the richer (longer) phrasing
+                merged.append(n if len(str(n)) > len(str(o)) else o)
+                report["updated"] += 1
+        else:
+            merged.append(o)              # never silently drop existing data
+            report["kept"] += 1
+
+    for i, n in enumerate(new_items):
+        if i not in used_new:
+            merged.append(n)
+            report["added"] += 1
+
+    return merged, report
+
+
+# ==========================================
+# FIELD-LEVEL INCREMENTAL MERGE
+# ==========================================
+def merge_story_fields(
+    matched: Dict[str, Any],
+    inc: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[str], Dict[str, int]]:
+    """
+    Incremental FIELD-LEVEL merge for an already-matched story.
+
+    The incoming story wins ONLY the fields it actually provides (non-empty);
+    empty incoming values keep the persisted data. Acceptance criteria are
+    union-merged via :func:`merge_acceptance_criteria` instead of being
+    wholesale-replaced.
+
+    Returns ``(updated_story, changed_fields, ac_report)`` where
+    ``changed_fields`` lists the story fields whose persisted value changed.
+    """
+    updated = dict(matched)
+    changed_fields: List[str] = []
+
+    for field in MERGED_STORY_FIELDS:
+        m_val = (matched.get(field) or "").strip()
+        i_val = (inc.get(field) or "").strip()
+        if i_val and i_val != m_val:
+            updated[field] = i_val
+            changed_fields.append(field)
+
+    old_ac = matched.get("acceptance_criteria", [])
+    new_ac = inc.get("acceptance_criteria") if "acceptance_criteria" in inc else old_ac
+    merged_ac, ac_report = merge_acceptance_criteria(old_ac, new_ac)
+    if merged_ac != old_ac:
+        updated["acceptance_criteria"] = merged_ac
+        changed_fields.append("acceptance_criteria")
+
+    return updated, changed_fields, ac_report
+
+
+# ==========================================
+# PROTECTED-STORY HELPERS
+# ==========================================
+def build_protected_set(protected_ids: Optional[List[str]]) -> Set[str]:
+    """
+    Normalizes the ``protected_ids`` allow-list (story UUIDs and/or ticket
+    codes, any casing) into a lookup set.
+    """
+    protected: Set[str] = set()
+    for p in (protected_ids or []):
+        if not p:
+            continue
+        p_str = str(p).strip()
+        protected.add(p_str)
+        code = normalize_ticket_code(p_str)
+        if code:
+            protected.add(code)
+    return protected
+
+
+def is_protected_story(story: Dict[str, Any], protected_set: Set[str]) -> bool:
+    """True when the story id or ticket code is in the protected set."""
+    if not protected_set:
+        return False
+    if story.get("id") and str(story["id"]) in protected_set:
+        return True
+    code = normalize_ticket_code(story.get("ticket_code"))
+    return bool(code) and code in protected_set
+
+
+# ==========================================
+# STORY IDENTITY MATCHING
+# ==========================================
+def _match_incoming_story(
+    inc: Dict[str, Any],
+    existing_by_id: Dict[str, Dict[str, Any]],
+    existing_by_code: Dict[str, Dict[str, Any]],
+    existing_by_title: Dict[str, Dict[str, Any]],
+    matched_ptrs: Set[int],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Progressive identity resolution for one incoming story:
+
+    exact id -> exact ticket code -> exact title -> fuzzy title.
+
+    The fuzzy-title stage prevents the worst failure mode of a naive merge:
+    a re-worded story title turning into a DUPLICATE story. Returns
+    ``(matched_story_or_None, matched_by_or_None)``.
+    """
+    inc_id = str(inc["id"]) if inc.get("id") else None
+    inc_code = normalize_ticket_code(inc.get("ticket_code"))
+    inc_title = normalize_title(inc.get("story_title"))
+
+    if inc_id and inc_id in existing_by_id:
+        return existing_by_id[inc_id], "id"
+    if inc_code and inc_code != "US-000" and inc_code in existing_by_code:
+        return existing_by_code[inc_code], "ticket_code"
+    if inc_title and inc_title in existing_by_title:
+        return existing_by_title[inc_title], "title"
+    if inc_title:
+        best_story: Optional[Dict[str, Any]] = None
+        best_ratio = 0.0
+        for title, story in existing_by_title.items():
+            if id(story) in matched_ptrs:
+                continue
+            ratio = difflib.SequenceMatcher(None, inc_title, title).ratio()
+            if ratio >= FUZZY_TITLE_THRESHOLD and ratio > best_ratio:
+                best_story, best_ratio = story, ratio
+        if best_story is not None:
+            return best_story, "fuzzy_title"
+    return None, None
+
+
+# ==========================================
 # CORE MERGE LOGIC
 # ==========================================
-def merge_user_stories(
+def merge_user_stories_with_report(
     existing_stories: List[Dict[str, Any]],
     new_incoming_stories: List[Dict[str, Any]],
-    semantic_recs: Optional[List[Dict[str, Any]]] = None
-) -> List[Dict[str, Any]]:
+    semantic_recs: Optional[List[Dict[str, Any]]] = None,
+    protected_ids: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """
-    Merges newly generated user stories with existing user stories.
-    Requirements:
-    - Load all existing User Stories.
-    - Merge newly generated User Stories.
-    - Keep unchanged stories (change_type="unchanged", status="active").
-    - Update modified stories (change_type="updated", status="active").
-    - Insert new stories (change_type="created", status="active").
-    - Archive deleted stories (change_type="archived", status="archived").
+    Performs an INCREMENTAL reconciliation of newly generated user stories
+    against the persisted ones WITHOUT overwriting existing data.
 
-    ``semantic_recs`` is an optional list of semantic-change recommendations of
-    the form ``{"target_requirement_id": ..., "recommended_action": ...}``
+    - Keep unchanged stories   -> ``change_type="unchanged"``, ``status="active"``
+    - Update modified stories  -> ``change_type="updated"``,   ``status="active"``
+      (field-level: empty incoming values keep persisted data; acceptance
+      criteria are union-merged, never wholesale-replaced)
+    - Insert brand-new stories -> ``change_type="created"``,   ``status="active"``
+    - Archive deleted stories  -> ``change_type="archived"``,  ``status="archived"``
+    - Protected stories (``protected_ids``: story UUIDs / ticket codes of
+      locked or human-edited stories) are NEVER mutated; a pending archive on
+      one is surfaced as ``change_type="conflict"`` (status stays ``active``)
+      instead of being silently applied.
+
+    ``semantic_recs`` is an optional list of semantic-change recommendations
+    of the form ``{"target_requirement_id": ..., "recommended_action": ...}``
     where ``recommended_action`` is one of ``INSERT``, ``UPDATE``,
     ``ARCHIVE`` or ``NO_CHANGE``.
+
+    Returns ``(merged_stories, merge_report)``. ``merge_report`` maps an
+    affected story key (its ticket code or normalized title) to::
+
+        {
+            "action": "updated"|"unchanged"|"created"|"archived"|"conflict",
+            "matched_by": "id"|"ticket_code"|"title"|"fuzzy_title"|None,
+            "protected": bool,
+            "fields_changed": [...],       # updated stories only
+            "acceptance_criteria": {...},  # kept/updated/added counts
+        }
     """
     semantic_recs = semantic_recs or []
+    protected_set = build_protected_set(protected_ids)
 
     rec_by_code = {}
     rec_by_title = {}
@@ -102,103 +333,134 @@ def merge_user_stories(
         if title:
             existing_by_title[title] = s
 
-    matched_existing_ptrs = set()
+    matched_existing_ptrs: Set[int] = set()
     merged_stories: List[Dict[str, Any]] = []
+    merge_report: Dict[str, Dict[str, Any]] = {}
 
     # 1. Process incoming stories
     for inc in new_incoming_stories:
-        inc_id = str(inc["id"]) if inc.get("id") else None
         inc_code = normalize_ticket_code(inc.get("ticket_code"))
         inc_title = normalize_title(inc.get("story_title"))
 
-        matched = None
-        if inc_id and inc_id in existing_by_id:
-            matched = existing_by_id[inc_id]
-        elif inc_code and inc_code in existing_by_code:
-            matched = existing_by_code[inc_code]
-        elif inc_title and inc_title in existing_by_title:
-            matched = existing_by_title[inc_title]
+        matched, matched_by = _match_incoming_story(
+            inc, existing_by_id, existing_by_code, existing_by_title, matched_existing_ptrs
+        )
 
         if matched:
             matched_existing_ptrs.add(id(matched))
 
-            rec_act = rec_by_code.get(inc_code) or rec_by_code.get(normalize_ticket_code(matched.get("ticket_code"))) or rec_by_title.get(inc_title)
+            m_code = normalize_ticket_code(matched.get("ticket_code"))
+            report_key = m_code or inc_code or inc_title or "story"
+            rec_act = (
+                rec_by_code.get(inc_code)
+                or rec_by_code.get(m_code)
+                or rec_by_title.get(inc_title)
+            )
+            protected = is_protected_story(matched, protected_set)
 
             if rec_act == "ARCHIVE" or inc.get("status") == "archived" or inc.get("change_type") == "archived":
-                archived_story = dict(matched)
-                archived_story["status"] = "archived"
-                archived_story["change_type"] = "archived"
-                merged_stories.append(archived_story)
+                if protected:
+                    # NEVER silently archive protected data -> surface a conflict
+                    conflict_story = dict(matched)
+                    conflict_story["status"] = "active"
+                    conflict_story["change_type"] = "conflict"
+                    conflict_story["merge_conflict"] = "archive_requested"
+                    merged_stories.append(conflict_story)
+                    merge_report[report_key] = {
+                        "action": "conflict",
+                        "matched_by": matched_by,
+                        "protected": True,
+                    }
+                else:
+                    archived_story = dict(matched)
+                    archived_story["status"] = "archived"
+                    archived_story["change_type"] = "archived"
+                    merged_stories.append(archived_story)
+                    merge_report[report_key] = {
+                        "action": "archived",
+                        "matched_by": matched_by,
+                        "protected": False,
+                    }
                 continue
 
-            # Compare fields to check if modified
-            m_title = (matched.get("story_title") or "").strip()
-            m_as_a = (matched.get("as_a") or "").strip()
-            m_i_want = (matched.get("i_want_to") or "").strip()
-            m_so_that = (matched.get("so_that") or "").strip()
-            m_ac = matched.get("acceptance_criteria", [])
+            if protected:
+                # Protected story: existing persisted data wins, incoming ignored
+                keep_story = dict(matched)
+                keep_story["status"] = "active"
+                keep_story["change_type"] = "unchanged"
+                merged_stories.append(keep_story)
+                merge_report[report_key] = {
+                    "action": "unchanged",
+                    "matched_by": matched_by,
+                    "protected": True,
+                }
+                continue
 
-            i_title = (inc.get("story_title") or m_title).strip()
-            i_as_a = (inc.get("as_a") or m_as_a).strip()
-            i_i_want = (inc.get("i_want_to") or m_i_want).strip()
-            i_so_that = (inc.get("so_that") or m_so_that).strip()
-            i_ac = inc.get("acceptance_criteria") if "acceptance_criteria" in inc else m_ac
+            # Incremental field merge: only what the incoming story actually
+            # says is applied; empty incoming values keep persisted data.
+            updated_story, changed_fields, ac_report = merge_story_fields(matched, inc)
 
-            title_diff = (m_title != i_title)
-            as_a_diff = (m_as_a != i_as_a)
-            i_want_diff = (m_i_want != i_i_want)
-            so_that_diff = (m_so_that != i_so_that)
-            ac_diff = (m_ac != i_ac)
-
-            field_changed = title_diff or as_a_diff or i_want_diff or so_that_diff or ac_diff
-
-            if rec_act == "UPDATE":
-                is_modified = True
-            elif rec_act == "NO_CHANGE":
-                is_modified = False
-            else:
-                is_modified = field_changed
-
-            updated_story = dict(matched)
-            updated_story["story_title"] = i_title
-            updated_story["as_a"] = i_as_a
-            updated_story["i_want_to"] = i_i_want
-            updated_story["so_that"] = i_so_that
-            updated_story["acceptance_criteria"] = i_ac
-            updated_story["status"] = "active"
-            updated_story["change_type"] = "updated" if is_modified else "unchanged"
-
-            if inc_code and inc_code != "US-000":
+            # Ticket-code policy: keep the matched story's code unless the
+            # incoming one is a real code that is unclaimed (or claimed by the
+            # matched story itself) — never create code collisions.
+            claimed_by_other = (
+                inc_code in existing_by_code and existing_by_code[inc_code] is not matched
+            )
+            if inc_code and inc_code != "US-000" and not claimed_by_other:
                 updated_story["ticket_code"] = inc_code
             elif not updated_story.get("ticket_code"):
                 updated_story["ticket_code"] = matched.get("ticket_code") or "US-001"
 
+            updated_story["status"] = "active"
+            # Semantic-rec overrides: UPDATE forces the "updated" label even
+            # without field diffs; NO_CHANGE keeps the "unchanged" label even
+            # when incoming values were applied (values win, label follows
+            # the recommendation).
+            if rec_act == "UPDATE":
+                final_change = "updated"
+            elif rec_act == "NO_CHANGE":
+                final_change = "unchanged"
+            else:
+                final_change = "updated" if changed_fields else "unchanged"
+            updated_story["change_type"] = final_change
             merged_stories.append(updated_story)
-
-        else:
-            # Unmatched incoming -> New story insertion
-            rec_act = rec_by_code.get(inc_code) or rec_by_title.get(inc_title)
-            if rec_act == "ARCHIVE" or inc.get("status") == "archived":
-                continue
-
-            ticket_code = inc_code
-            if not ticket_code or ticket_code == "US-000" or ticket_code in existing_by_code:
-                ticket_code = generate_next_ticket_code(active_existing + merged_stories)
-
-            new_story = {
-                "ticket_code": ticket_code,
-                "story_title": inc.get("story_title", "Untitled Story"),
-                "as_a": inc.get("as_a", ""),
-                "i_want_to": inc.get("i_want_to", ""),
-                "so_that": inc.get("so_that", ""),
-                "acceptance_criteria": inc.get("acceptance_criteria", []),
-                "status": "active",
-                "change_type": "created"
+            merge_report[report_key] = {
+                "action": final_change,
+                "matched_by": matched_by,
+                "protected": False,
+                "fields_changed": changed_fields,
+                "acceptance_criteria": ac_report,
             }
-            if inc.get("id"):
-                new_story["id"] = inc["id"]
+            continue
 
-            merged_stories.append(new_story)
+        # Unmatched incoming -> New story insertion
+        rec_act = rec_by_code.get(inc_code) or rec_by_title.get(inc_title)
+        if rec_act == "ARCHIVE" or inc.get("status") == "archived":
+            continue
+
+        ticket_code = inc_code
+        if not ticket_code or ticket_code == "US-000" or ticket_code in existing_by_code:
+            ticket_code = generate_next_ticket_code(active_existing + merged_stories)
+
+        new_story = {
+            "ticket_code": ticket_code,
+            "story_title": inc.get("story_title", "Untitled Story"),
+            "as_a": inc.get("as_a", ""),
+            "i_want_to": inc.get("i_want_to", ""),
+            "so_that": inc.get("so_that", ""),
+            "acceptance_criteria": inc.get("acceptance_criteria", []),
+            "status": "active",
+            "change_type": "created",
+        }
+        if inc.get("id"):
+            new_story["id"] = inc["id"]
+
+        merged_stories.append(new_story)
+        merge_report[ticket_code or inc_title or "story"] = {
+            "action": "created",
+            "matched_by": None,
+            "protected": False,
+        }
 
     # 2. Process existing active stories that were NOT matched by incoming
     for ex in active_existing:
@@ -208,19 +470,63 @@ def merge_user_stories(
         ex_code = normalize_ticket_code(ex.get("ticket_code"))
         ex_title = normalize_title(ex.get("story_title"))
         rec_act = rec_by_code.get(ex_code) or rec_by_title.get(ex_title)
+        report_key = ex_code or ex_title or "story"
+        protected = is_protected_story(ex, protected_set)
 
         if rec_act == "ARCHIVE":
-            archived_story = dict(ex)
-            archived_story["status"] = "archived"
-            archived_story["change_type"] = "archived"
-            merged_stories.append(archived_story)
+            if protected:
+                # NEVER silently archive protected data -> surface a conflict
+                conflict_story = dict(ex)
+                conflict_story["status"] = "active"
+                conflict_story["change_type"] = "conflict"
+                conflict_story["merge_conflict"] = "archive_requested"
+                merged_stories.append(conflict_story)
+                merge_report[report_key] = {
+                    "action": "conflict",
+                    "matched_by": None,
+                    "protected": True,
+                }
+            else:
+                archived_story = dict(ex)
+                archived_story["status"] = "archived"
+                archived_story["change_type"] = "archived"
+                merged_stories.append(archived_story)
+                merge_report[report_key] = {
+                    "action": "archived",
+                    "matched_by": None,
+                    "protected": False,
+                }
         else:
             # KEEP UNCHANGED!
             unchanged_story = dict(ex)
             unchanged_story["status"] = "active"
             unchanged_story["change_type"] = "unchanged"
             merged_stories.append(unchanged_story)
+            merge_report[report_key] = {
+                "action": "unchanged",
+                "matched_by": None,
+                "protected": protected,
+            }
 
+    return merged_stories, merge_report
+
+
+def merge_user_stories(
+    existing_stories: List[Dict[str, Any]],
+    new_incoming_stories: List[Dict[str, Any]],
+    semantic_recs: Optional[List[Dict[str, Any]]] = None,
+    protected_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Backward-compatible wrapper around :func:`merge_user_stories_with_report`
+    returning only the merged story list.
+    """
+    merged_stories, _merge_report = merge_user_stories_with_report(
+        existing_stories=existing_stories,
+        new_incoming_stories=new_incoming_stories,
+        semantic_recs=semantic_recs,
+        protected_ids=protected_ids,
+    )
     return merged_stories
 
 

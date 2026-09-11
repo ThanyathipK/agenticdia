@@ -55,6 +55,13 @@ class ProjectModel(Base):
     description = Column(Text, nullable=True)
     industry_standard = Column(String(100), nullable=False)
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # Dashboard-only ★ flag marker — deliberately independent of is_pinned:
+    # flagging marks a project for attention in the projects overview table and
+    # NEVER affects the sidebar's pinned-first ordering.
+    is_flagged = Column(Boolean, nullable=False, default=False)
+    # User-editable workflow status shown on the dashboard table
+    # ('draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised').
+    status = Column(String(50), nullable=False, default="draft", server_default="draft")
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
@@ -186,8 +193,10 @@ class PRDDocumentModel(Base):
 class PRDVersionModel(Base):
     """
     Dedicated immutable PRD version repository.
-    Each PRD generation creates a new version record.
-    Never overwrites previous versions.
+    EVERY change to the document — an AI regeneration ("Generate PRD") or a
+    manual part edit / revert — creates a new version record, whether or not
+    the content actually changed (a click always advances the version so the
+    audit trail never collapses). Never overwrites previous versions.
     """
     __tablename__ = "prd_versions"
 
@@ -196,6 +205,23 @@ class PRDVersionModel(Base):
     version_number = Column(Integer, nullable=False)
     generated_prd = Column(Text, nullable=False)
     generated_by = Column(String(100), nullable=False, default="automated_agent")
+    # 'ai' | 'manual' — who/what created this snapshot (the version ALWAYS
+    # advances for both; this only records the origin for the Version ledger).
+    change_type = Column(String(20), nullable=False, default="ai", server_default="ai")
+    # Human-readable change description surfaced in the Version History tab.
+    change_summary = Column(Text, nullable=True)
+    # JSON list of per-section change records computed at snapshot time:
+    #   [{"section_key": "business_overview", "title": "...", "change_kind":
+    #    "created"|"updated"|"unchanged"|"locked_preserved", "changed": bool}]
+    # Locked sections appear as "locked_preserved" so the ledger proves the
+    # lock contract was honoured while the version still advanced.
+    changed_sections = Column(JSON, nullable=True)
+    # Semantic Version (MAJOR.MINOR.PATCH) for this snapshot, derived from the
+    # per-section change records:
+    #   MAJOR — structural change (sections created or removed)
+    #   MINOR — AI regeneration with section content updates
+    #   PATCH — manual edit, or an advance with no content change
+    semver = Column(String(20), nullable=False, default="1.0.0", server_default="1.0.0")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -371,4 +397,42 @@ class ArtifactEventLogModel(Base):
     __table_args__ = (
         Index("idx_artifact_event_logs_artifact", "artifact_type", "artifact_id"),
         Index("idx_artifact_event_logs_timestamp", "timestamp"),
+    )
+
+
+class SemanticMemoryModel(Base):
+    """
+    One distilled, project-scoped semantic memory (Option A memory layer).
+
+    After each chat turn a small LLM pass extracts DURABLE facts/decisions
+    ("Project requires SSO", "User rejected option B") from the conversation.
+    Each fact is embedded and persisted here so later turns can recall the
+    most relevant memories by cosine similarity + recency.
+
+    Embeddings are stored as a JSON float array instead of a pgvector column:
+    the app also runs against the SQLite dev fallback (DATABASE_URL default),
+    which cannot host a ``vector`` type, and per-project memory volumes are
+    small enough that the bounded in-process cosine pass
+    (MEMORY_CANDIDATE_LIMIT) is fast. Upgrading to pgvector + an HNSW index is
+    a pure storage change (same 768-dim unit-normalised vectors).
+    """
+    __tablename__ = "semantic_memories"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    # 'semantic' (LLM-extracted fact) — room for future kinds ('preference',
+    # 'decision', 'constraint') without a schema change.
+    kind = Column(String(30), nullable=False, default="semantic", server_default="semantic")
+    content = Column(Text, nullable=False)
+    # Unit-normalised float vector from the LM Studio embedding model.
+    embedding = Column(JSON, nullable=False, default=list)
+    # Embedding model id — lets the recall path detect a model/dimension change.
+    embedding_model = Column(String(100), nullable=False, default="")
+    source_message_id = Column(GUID, nullable=True, index=True)  # conversation_messages.id, no FK (chat may run standalone)
+    recall_count = Column(Integer, nullable=False, default=0, server_default="0")
+    last_recalled_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_semantic_memories_project_created", "project_id", "created_at"),
     )

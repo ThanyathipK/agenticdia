@@ -2,7 +2,7 @@
 // Now composes dedicated modules:
 //   - useProjectState   -> all state/effects/handlers (src/hooks/useProjectState.ts)
 //   - ChatPanel         -> left conversational panel
-//   - PRDEditor         -> PRD Document tab
+//   - PRDEditor         -> PRD Documents tab
 //   - ArchitectureFlows -> System Flows tab
 //   - VersionHistory    -> Version Ledger tab
 //   - MarkdownRenderer  -> markdown rendering (via PRDEditor)
@@ -20,11 +20,13 @@ import {
   Pencil,
   FileText,
   Network,
+  GitBranch,
   Clock,
   Download,
   Printer,
   AlertTriangle,
   CheckCircle2,
+  LayoutGrid,
   Lock,
   Unlock,
   Pin,
@@ -35,11 +37,13 @@ import { useProjectState } from '../hooks/useProjectState';
 import { ChatPanel } from './ChatPanel';
 import { PRDEditor } from './PRDEditor';
 import { ArchitectureFlows } from './ArchitectureFlows';
+import { RequirementTraceability } from './RequirementTraceability';
 import { VersionHistory } from './VersionHistory';
 import { ConfirmationPanel } from './ConfirmationPanel';
 import { DocumentLibrary } from './DocumentLibrary';
 import { NewProjectModal } from './NewProjectModal';
 import { ConfirmModal } from './ConfirmModal';
+import { ProjectsDashboard } from './ProjectsDashboard';
 import { Tooltip, TooltipBubble } from './Tooltip';
 import { highlightMatch } from '../utils/highlight';
 
@@ -75,6 +79,8 @@ export default function Dashboard() {
     splitContainerRef,
     activeTab,
     setActiveTab,
+    activeView,
+    setActiveView,
     handleDownloadDocx,
     handlePrintPDF,
     currentAgentNode,
@@ -165,6 +171,39 @@ export default function Dashboard() {
             >
               <Plus className="w-4 h-4 shrink-0" />
               {expanded && <span>New Project</span>}
+            </button>
+          </Tooltip>
+          {/* View switcher — the sidebar doubles as the app's navigation: the
+              chat/PRD workspace and the projects overview dashboard are the
+              two pages, and the active one is highlighted like a nav item. */}
+          <Tooltip label="Workspace" side="right" className="w-full">
+            <button
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${collapsed ? 'justify-center' : ''} ${
+                activeView === 'workspace'
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-on-surface-variant hover:bg-primary/10 hover:text-primary'
+              }`}
+              aria-label="Workspace view"
+              aria-current={activeView === 'workspace' ? 'page' : undefined}
+              onClick={() => setActiveView('workspace')}
+            >
+              <MessageSquare className="w-4 h-4 shrink-0" />
+              {expanded && <span>Workspace</span>}
+            </button>
+          </Tooltip>
+          <Tooltip label="Dashboard" side="right" className="w-full">
+            <button
+              className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold transition-colors ${collapsed ? 'justify-center' : ''} ${
+                activeView === 'dashboard'
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-on-surface-variant hover:bg-primary/10 hover:text-primary'
+              }`}
+              aria-label="Dashboard view"
+              aria-current={activeView === 'dashboard' ? 'page' : undefined}
+              onClick={() => setActiveView('dashboard')}
+            >
+              <LayoutGrid className="w-4 h-4 shrink-0" />
+              {expanded && <span>Dashboard</span>}
             </button>
           </Tooltip>
           <Tooltip label="Search Projects" side="right" className="w-full">
@@ -273,6 +312,7 @@ export default function Dashboard() {
                         if (e.key === 'Enter') handleRenameProject(p.id, renameProjectName);
                         if (e.key === 'Escape') setRenameProjectId(null);
                       }}
+                      maxLength={40}
                       className="flex-1 bg-white border border-primary/30 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-primary"
                       autoFocus
                       onClick={(e) => e.stopPropagation()}
@@ -298,7 +338,13 @@ export default function Dashboard() {
                   </div>
                 ) : (
                   <button
-                    onClick={() => setProjectId(p.id)}
+                    onClick={() => {
+                      setProjectId(p.id);
+                      // Selecting a project from the sidebar always lands the
+                      // user back in the chat/PRD workspace, even if they were
+                      // browsing the dashboard view.
+                      setActiveView('workspace');
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       setProjectContextMenu({ projectId: p.id, x: e.clientX, y: e.clientY });
@@ -449,7 +495,13 @@ export default function Dashboard() {
         />
       )}
 
-      {/* HORIZONTAL SPLIT GRID WORKSPACE */}
+      {/* PAGE CONTENT — the workspace (chat + PRD tabs) or the projects
+          overview dashboard, switched from the sidebar's view nav. Only the
+          content area swaps; the sidebar and its shared project state stay
+          mounted so both views always agree. */}
+      {activeView === 'dashboard' ? (
+        <ProjectsDashboard state={state} />
+      ) : (
       <div id="split-container" className="flex-1 flex flex-col lg:flex-row overflow-hidden" ref={splitContainerRef}>
         
         {/* LEFT PANEL: Conversational Timeline & Human-In-The-Loop */}
@@ -463,78 +515,98 @@ export default function Dashboard() {
 
         {/* RIGHT PANEL: Live Workspace Previews (Tabbed System) */}
         <section className="flex-1 min-w-0 min-h-0 flex flex-col bg-background relative overflow-hidden">
-          {/* Tabs bar */}
-          <div className="min-h-13 bg-glass-bg border-b border-outline flex flex-wrap items-center px-4 md:px-6 justify-between gap-2 shrink-0 select-none">
-            <div className="flex bg-black/5 rounded-full p-1 h-9.5 border border-black/5">
-              <Tooltip label="PRD Document" side="bottom" className="h-full">
+          {/* Tabs bar — warm pill navigation (PRD Documents / Requirements / Flows /
+              Versions) modeled on the PRD nav reference; each tab is wired to its
+              live workspace panel, and the DOCX/PDF exports sit at the pill's right
+              edge (inside it) like the reference's Export button. */}
+          <div className="min-h-13 bg-glass-bg border-b border-outline flex flex-wrap items-center px-4 md:px-6 gap-2 shrink-0 select-none">
+            <div className="flex flex-1 bg-tab-pill border border-tab-pill-border rounded-[10px] p-1 h-[53px] items-center gap-1">
+              <Tooltip label="PRD Documents" side="bottom" className="h-full">
                 <button
                   onClick={() => setActiveTab('prd')}
-                  aria-label="PRD Document tab"
-                  className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
+                  aria-label="PRD Documents tab"
+                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
                     activeTab === 'prd'
-                      ? 'bg-primary text-on-primary shadow-sm'
-                      : 'text-on-surface-variant hover:text-on-surface'
+                      ? 'bg-tab-active text-white shadow-sm'
+                      : 'text-tab-text hover:bg-tab-hover'
                   }`}
                 >
                   <FileText className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">PRD Document</span>
+                  <span className="hidden sm:inline">PRD Documents</span>
                 </button>
               </Tooltip>
-              
-              <Tooltip label="Architecture Flows" side="bottom" className="h-full">
+
+              <Tooltip label="Requirements" side="bottom" className="h-full">
+                <button
+                  onClick={() => setActiveTab('trace')}
+                  aria-label="Requirements tab"
+                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
+                    activeTab === 'trace'
+                      ? 'bg-tab-active text-white shadow-sm'
+                      : 'text-tab-text hover:bg-tab-hover'
+                  }`}
+                >
+                  <GitBranch className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Requirements</span>
+                </button>
+              </Tooltip>
+
+              <Tooltip label="Flows" side="bottom" className="h-full">
                 <button
                   onClick={() => setActiveTab('flows')}
-                  aria-label="Architecture Flows tab"
-                  className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
+                  aria-label="Flows tab"
+                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
                     activeTab === 'flows'
-                      ? 'bg-primary text-on-primary shadow-sm'
-                      : 'text-on-surface-variant hover:text-on-surface'
+                      ? 'bg-tab-active text-white shadow-sm'
+                      : 'text-tab-text hover:bg-tab-hover'
                   }`}
                 >
                   <Network className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Architecture Flows</span>
+                  <span className="hidden sm:inline">Flows</span>
                 </button>
               </Tooltip>
-              
-              <Tooltip label="Versions & Docs" side="bottom" className="h-full">
+
+              <Tooltip label="Versions" side="bottom" className="h-full">
                 <button
                   onClick={() => setActiveTab('history')}
-                  aria-label="Versions and Docs tab"
-                  className={`px-5 h-full flex items-center rounded-full font-bold font-label-md text-xs transition-all gap-1.5 ${
+                  aria-label="Versions tab"
+                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
                     activeTab === 'history'
-                      ? 'bg-primary text-on-primary shadow-sm'
-                      : 'text-on-surface-variant hover:text-on-surface'
+                      ? 'bg-tab-active text-white shadow-sm'
+                      : 'text-tab-text hover:bg-tab-hover'
                   }`}
                 >
                   <Clock className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Versions & Docs</span>
-                </button>
-              </Tooltip>
-            </div>
-
-            {/* Quick action buttons */}
-            <div className="flex items-center gap-2 no-print shrink-0">
-              <Tooltip label="Export Word (DOCX)" side="bottom">
-                <button
-                  onClick={handleDownloadDocx}
-                  aria-label="Export Word (DOCX)"
-                  className="px-3 py-1.5 rounded-xl bg-white border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface transition-all flex items-center gap-1.5 cursor-pointer font-semibold shadow-sm whitespace-nowrap"
-                >
-                  <Download className="w-3.5 h-3.5 text-primary" />
-                  <span className="hidden md:inline">Export Word (DOCX)</span>
+                  <span className="hidden sm:inline">Versions</span>
                 </button>
               </Tooltip>
 
-              <Tooltip label="Export PDF" side="bottom">
-                <button
-                  onClick={handlePrintPDF}
-                  aria-label="Export PDF"
-                  className="px-3 py-1.5 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary/15 animate-none whitespace-nowrap"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">Export PDF</span>
-                </button>
-              </Tooltip>
+              {/* Export actions — kept inside the pill, pushed to the far right like
+                  the reference's Export button. Both compile server-side (LaTeX
+                  service), so these only trigger the existing handlers. */}
+              <div className="ml-auto flex items-center gap-1 shrink-0 no-print">
+                <Tooltip label="Export Word (DOCX)" side="bottom">
+                  <button
+                    onClick={handleDownloadDocx}
+                    aria-label="Export Word (DOCX)"
+                    className="h-[39px] px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5 text-primary" />
+                    <span className="hidden md:inline">DOCX</span>
+                  </button>
+                </Tooltip>
+
+                <Tooltip label="Export PDF" side="bottom">
+                  <button
+                    onClick={handlePrintPDF}
+                    aria-label="Export PDF"
+                    className="h-[39px] px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-primary" />
+                    <span className="hidden md:inline">PDF</span>
+                  </button>
+                </Tooltip>
+              </div>
             </div>
           </div>
 
@@ -698,6 +770,7 @@ export default function Dashboard() {
             <div className="max-w-4xl mx-auto">
               {activeTab === 'prd' && <PRDEditor state={state} />}
               {activeTab === 'flows' && <ArchitectureFlows state={state} />}
+              {activeTab === 'trace' && <RequirementTraceability projectId={projectId} />}
               {activeTab === 'history' && (
                 <>
                   <VersionHistory state={state} />
@@ -710,6 +783,7 @@ export default function Dashboard() {
         </section>
 
       </div>
+      )}
 
       {/* NEW PROJECT MODAL (styled replacement for native prompt()) */}
       <NewProjectModal

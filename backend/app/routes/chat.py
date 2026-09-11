@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.config import settings
 from app.repositories import ConversationMessageRepository
 from app.schemas import ChatSessionRequest, ChatResponse, HealthResponse
+from app.semantic_memory import build_memory_block, extract_and_remember, recall
 from app.llm_client import (
     call_lm_studio,
     check_lm_studio_health,
@@ -87,11 +88,31 @@ async def post_chat_query(
     # token budget is consumed by the LLM gateway.
     validate_messages_budget(request.messages)
 
+    # --- Semantic memory recall (fail-open) --------------------------------
+    # Before the LLM call, retrieve the most relevant distilled memories for
+    # this project (scored on the CURRENT user message) and inject them as a
+    # hard-capped block into the system prompt. Any failure degrades to the
+    # pre-memory behaviour — chat never breaks because memory is down.
+    memory_block = ""
+    if request.project_id and settings.MEMORY_ENABLED:
+        current_message = request.messages[-1].content
+        try:
+            memories = await recall(str(request.project_id), current_message)
+            memory_block = build_memory_block(memories)
+        except Exception as mem_err:  # belt & braces: recall is already fail-open
+            logger.warning("Memory recall skipped (%s).", mem_err)
+
     system_instruction = (
         "You are an expert enterprise business analyst specializing in core banking requirement designs. "
         "Adhere to Krungsri Nimble standards, ensure high compliance, security OTP mechanics, and double-entry general ledgers. "
         f"Strictly keep your replies inside a total contextual window budget of {settings.MAX_CONTEXT_TOKENS} tokens."
     )
+    if memory_block:
+        system_instruction = (
+            f"{system_instruction}\n\n{memory_block}\n"
+            "Use the remembered project context when it is relevant; never contradict a "
+            "recorded user decision without saying so."
+        )
 
     formatted_messages = [{"role": "system", "content": system_instruction}]
     for msg in request.messages:
@@ -124,6 +145,20 @@ async def post_chat_query(
             workflow_state="chat",
             intent="GENERAL_CHAT"
         )
+        # Semantic memory write path (fail-open): distil durable facts from
+        # this finished turn so FUTURE conversations understand the project
+        # better. Runs after the reply is persisted; failures are logged and
+        # swallowed — the user's reply is already delivered either way.
+        last_user_message = next(
+            (m.content for m in reversed(request.messages) if m.role == "user"),
+            "",
+        )
+        if last_user_message and settings.MEMORY_FACT_EXTRACTION_ENABLED:
+            await extract_and_remember(
+                project_id=str(request.project_id),
+                user_message=last_user_message,
+                assistant_reply=reply_text,
+            )
         # Notify SSE subscribers so other connected clients refresh their conversation view.
         await event_manager.publish(str(request.project_id), "chat_reply", {
             "project_id": str(request.project_id),

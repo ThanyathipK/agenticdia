@@ -762,11 +762,13 @@ class TestExportEndpoints:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/pdf")
         assert resp.content.startswith(b"%PDF")
-        # Download-name contract consumed by the frontend blob saver.
-        assert (
-            'attachment; filename="PRD-Export-Test-Project-V2.pdf"'
-            == resp.headers["content-disposition"]
+        # Download-name contract consumed by the frontend blob saver:
+        # PRD_<project>_V<version>_<YYYY-MM-DD>_<HHMM>.pdf (date/time is dynamic).
+        match = re.fullmatch(
+            r'attachment; filename="PRD_Export_Test_Project_V2_\d{4}-\d{2}-\d{2}_\d{4}\.pdf"',
+            resp.headers["content-disposition"],
         )
+        assert match, resp.headers["content-disposition"]
 
     @pytest.mark.asyncio
     async def test_pdf_export_renders_the_docx_pipeline(self, client, seeded_project, monkeypatch):

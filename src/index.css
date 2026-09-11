@@ -30,6 +30,19 @@
   --color-on-surface-variant: #8c8676;
   --color-outline: #ece7dc;
   --color-glass-bg: rgb(255 255 255 / 0.75);
+
+  /* PRD workspace tab pill — warm paper-toned surface + espresso active state
+     (modeled on the PRD navigation reference). Kept as dedicated tokens so the
+     top tabs match the reference palette without reusing the plain `background`
+     token or sprinkling raw hex values across Dashboard.tsx. */
+  --color-tab-pill: #faf8f5;
+  --color-tab-pill-border: #e5dcd4;
+  --color-tab-text: #716860;
+  --color-tab-hover: #f0ebe6;
+  --color-tab-active: #624535;
+  --color-export-border: #e2d8d0;
+  --color-export-text: #5d514a;
+  --color-export-hover: #f7f3ef;
 }
 
 /* Small type-scale + surface utilities referenced by Dashboard.tsx. */

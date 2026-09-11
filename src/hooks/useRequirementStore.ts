@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { api } from '../api/client';
+import { toVersionHistoryList } from '../api/transforms';
 import type {
   ArtifactLockState,
   AuditResult,
@@ -150,9 +151,11 @@ export interface RequirementStore {
 
   // actions
   resetProjectState: () => void;
-  handleSaveSection: (sectionId: string, newContent: string) => Promise<void>;
+  handleSaveSection: (sectionId: string, newContent: string, baseContent?: string) => Promise<void>;
   /** Fetch the per-part PRD section lock/ownership map from the backend. */
   loadSectionLocks: (projId: string) => Promise<void>;
+  /** Fetch the immutable PRD version ledger (AI + manual snapshots). */
+  loadVersionHistory: (projId: string) => Promise<void>;
   /** Lock/unlock ONE PRD part (blocks edits + AI regeneration when locked). */
   handleToggleSectionLock: (sectionId: string) => Promise<void>;
   sectionLocks: Record<string, PrdSectionLockState>;
@@ -285,21 +288,22 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
 
   // (Chat auto-scroll moved into ChatPanel — see the note in useChat.ts.)
 
-  const handleSaveSection = async (sectionId: string, newContent: string) => {
+  const handleSaveSection = async (sectionId: string, newContent: string, baseContent?: string) => {
     // 1. Update the local sections state
     const updatedSections = sections.map(s =>
       s.id === sectionId ? { ...s, content: newContent } : s
     );
     setSections(updatedSections);
 
-    // 2. Save THE PART to the backend (PATCH one section). The server appends
-    // an immutable section version, re-stitches the full document from all
-    // parts, and persists it. Falls back to the legacy whole-document save if
-    // the section endpoint is unavailable (older backend).
+    // 2. Save THE PART to the backend (PATCH one section). baseContent is the
+    // text the editor started from — the server three-way merges it onto the
+    // latest stored section, so a manual save is always "last version + this
+    // edit" and never clobbers concurrent AI updates. Falls back to the
+    // legacy whole-document save if the section endpoint is unavailable.
     if (projectId) {
       setSyncStatus('Saving section edit...');
       try {
-        const res = await api.updatePrdSection(projectId, sectionId, newContent);
+        const res = await api.updatePrdSection(projectId, sectionId, newContent, { base_content: baseContent });
         setPrdMarkdown(res.document_markdown);
         setPrdMarkdownDisplay(res.document_markdown);
         // Refresh per-part lock/version metadata (version_number advanced).
@@ -319,8 +323,21 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
         setSyncStatus('Section saved & versioned.');
       } catch {
         // Legacy fallback: stitch all sections and save the whole document.
+        // Do NOT include edits to locked sections — the lock must be honoured
+        // even in the fallback path. Restore locked sections from the backend.
         try {
-          const stitchedMarkdown = stitchSectionsToPRD(updatedSections);
+          const payload = await api.getPrdSections(projectId);
+          const backendSections = new Map(payload.sections.map(s => [s.section_key, s.content]));
+          const safeSections = updatedSections.map(sec => {
+            // section.id IS the section_key (from parsePRDToSections)
+            const key = sec.id as string;
+            if (sectionLocks[key]?.is_locked) {
+              // Restore the locked section's content from the backend.
+              return { ...sec, content: backendSections.get(key) ?? sec.content };
+            }
+            return sec;
+          });
+          const stitchedMarkdown = stitchSectionsToPRD(safeSections);
           setPrdMarkdown(stitchedMarkdown);
           setPrdMarkdownDisplay(stitchedMarkdown);
           await api.updateProjectState(projectId, { generated_prd: stitchedMarkdown });
@@ -330,6 +347,11 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
           setSyncStatus('Failed to sync manual changes with server.');
         }
       }
+
+      // Refresh the version ledger — a manual section edit always creates a new
+      // immutable PRD version on the server, so reload the history to reflect the
+      // new version number / change summary.
+      await loadVersionHistory(projectId);
     }
 
     // 3. Reset editing state
@@ -353,6 +375,16 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
       setSectionLocks(map);
     } catch {
       // Cosmetic metadata — never block project loading on it.
+    }
+  };
+
+  const loadVersionHistory = async (projId: string) => {
+    try {
+      const payload = await api.getPrdVersions(projId);
+      console.log('[VersionHistory] Loaded', payload?.length, 'versions for project', projId);
+      setVersionHistory(toVersionHistoryList(payload));
+    } catch (err) {
+      console.warn('[VersionHistory] Failed to load:', err);
     }
   };
 
@@ -460,6 +492,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     resetProjectState,
     handleSaveSection,
     loadSectionLocks,
+    loadVersionHistory,
     handleToggleSectionLock,
     sectionLocks,
   };

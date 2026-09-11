@@ -18,9 +18,23 @@ export interface ProjectSummary {
   description: string | null;
   industry_standard: string;
   is_pinned?: boolean;
+  /** Dashboard ★ flag marker; independent of the sidebar pin. */
+  is_flagged?: boolean;
+  /** User-editable workflow status ('draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised') shown on the dashboard table. */
+  status?: string;
+  /** ISO-8601 timestamp of the last project update (dashboard 'Updated' column). */
+  updated_at?: string | null;
   /** Short excerpt of a matching conversation message, present only when the project matched via message content. */
   match_snippet?: string | null;
 }
+
+/** Request body for setting a project's user-editable workflow status (dashboard table). */
+export interface ProjectStatusRequest {
+  status: ProjectStatus;
+}
+
+/** Workflow statuses editable from the dashboard projects table. */
+export type ProjectStatus = 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised';
 
 export interface ProjectCreated {
   id: string;
@@ -350,3 +364,131 @@ export interface PrdSectionUpdateResponse {
   /** Full PRD markdown stitched from ALL parts after the edit. */
   document_markdown: string;
 }
+
+
+// ----------------------------------------------------------------------------
+// PRD version ledger (`/api/project/{id}/prd-versions*`)
+//
+// EVERY document change — an AI regeneration or a manual part edit/revert —
+// appends an immutable `prd_versions` snapshot. The version ALWAYS advances,
+// and each snapshot carries `change_type` ('ai' | 'manual'), a change summary
+// and the per-section change records (incl. `locked_preserved` markers proving
+// the lock contract was honoured).
+// ----------------------------------------------------------------------------
+
+export interface PrdVersionChangedSection {
+  section_key: string;
+  title: string;
+  /** 'created' | 'updated' | 'unchanged' | 'removed' | 'locked_preserved'. */
+  change_kind: string;
+  changed: boolean;
+}
+
+export interface PrdVersionPayload {
+  version_id: string;
+  project_id: string;
+  version_number: number;
+  /** Semantic Version (MAJOR.MINOR.PATCH): MAJOR = sections created/removed,
+   *  MINOR = AI content updates, PATCH = manual edits / no-change advances. */
+  semver: string;
+  /** Full PRD markdown snapshot at this version (used for diffing / restore). */
+  generated_prd: string;
+  generated_by: string;
+  /** 'ai' | 'manual' — origin of the snapshot. */
+  change_type: string;
+  change_summary: string | null;
+  changed_sections: PrdVersionChangedSection[] | null;
+  created_at: string;
+}
+
+export interface PrdVersionDiffSectionPayload {
+  section_key: string;
+  title: string;
+  change_kind: string;
+  changed: boolean;
+  added: number;
+  removed: number;
+  /** Diff lines: [['add'|'del'|'context', line], ...]. */
+  diff_lines: [string, string][];
+}
+
+export interface PrdVersionDiffPayload {
+  project_id: string;
+  to_version: number;
+  base_version: number;
+  sections: PrdVersionDiffSectionPayload[];
+}
+
+
+// ============================================================================
+// Requirement Traceability Matrix (derived, read-only)
+// GET /api/project/{id}/traceability — links Requirements <-> User Stories
+// <-> Acceptance Criteria <-> PRD sections <-> diagrams via FKs + REQ-/US- code
+// references inside section content and mermaid source. See
+// backend/app/traceability_service.py for how links are derived.
+// ============================================================================
+export interface TraceabilityRequirementInfo {
+  id: string;
+  requirement_code: string;
+  title: string;
+  description: string;
+  epic_name?: string | null;
+  status?: string | null;
+  version?: number | null;
+  is_locked: boolean;
+}
+
+export interface TraceabilityStory {
+  id?: string | null;
+  ticket_code?: string | null;
+  story_title?: string | null;
+  as_a?: string | null;
+  i_want_to?: string | null;
+  so_that?: string | null;
+  acceptance_criteria: string[];
+  is_locked: boolean;
+}
+
+export interface TraceabilityRow {
+  requirement: TraceabilityRequirementInfo;
+  user_stories: TraceabilityStory[];
+  /** PRD section keys referencing this requirement (or its stories). */
+  prd_sections: string[];
+  /** Diagram labels referencing this requirement (e.g. 'PRD v3'). */
+  diagrams: string[];
+  /** True when the requirement has stories with criteria AND a section reference. */
+  traced: boolean;
+}
+
+export interface TraceabilityDiagram {
+  label: string;
+  version: number;
+}
+
+export interface StaleCodeReference {
+  code: string;
+  section_keys?: string[];
+  diagrams?: string[];
+}
+
+export interface TraceabilityCoverage {
+  total_requirements: number;
+  total_user_stories: number;
+  total_acceptance_criteria: number;
+  traced_requirements: number;
+  requirements_without_stories: string[];
+  requirements_without_prd_sections: string[];
+  requirements_without_diagram: string[];
+  stories_without_criteria: string[];
+  stories_without_prd_sections: string[];
+  stale_section_references: StaleCodeReference[];
+  stale_diagram_references: StaleCodeReference[];
+}
+
+export interface TraceabilityPayload {
+  project_id: string;
+  rows: TraceabilityRow[];
+  diagrams: TraceabilityDiagram[];
+  coverage: TraceabilityCoverage;
+}
+

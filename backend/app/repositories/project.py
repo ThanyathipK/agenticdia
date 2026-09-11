@@ -204,10 +204,43 @@ class ProjectRepository:
                 p.industry_standard = updates["industry_standard"]
             if "is_pinned" in updates:
                 p.is_pinned = bool(updates["is_pinned"])
+            if "is_flagged" in updates:
+                p.is_flagged = bool(updates["is_flagged"])
+            if "status" in updates:
+                p.status = str(updates["status"])
             await session.flush()
             await session.refresh(p)
             return serialize_project(p)
         return None
+
+    @staticmethod
+    async def update_status(project_id: str, new_status: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        """Set a project's user-editable workflow status (dashboard table).
+
+        Mirrors :meth:`toggle_pinned`: a UI metadata update, so it is NOT gated
+        by the artifact lock (locking protects document content, not review
+        bookkeeping).
+
+        Args:
+            project_id: Project UUID string.
+            new_status: Workflow status to apply ('draft' | 'in_review_hpo' |
+                'in_review_po' | 'approved' | 'revised').
+            session: Active asynchronous database session.
+
+        Returns:
+            Optional[Dict[str, Any]]: The updated project record, or None if the
+                project does not exist.
+        """
+        pid = as_uuid(project_id)
+        stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        result = await session.execute(stmt)
+        p = result.scalar_one_or_none()
+        if not p:
+            return None
+        p.status = str(new_status)
+        await session.flush()
+        await session.refresh(p)
+        return serialize_project(p)
 
     @staticmethod
     async def toggle_pinned(project_id: str, is_pinned: bool, session: AsyncSession) -> Optional[Dict[str, Any]]:
@@ -229,6 +262,34 @@ class ProjectRepository:
         if not p:
             return None
         p.is_pinned = bool(is_pinned)
+        await session.flush()
+        await session.refresh(p)
+        return serialize_project(p)
+
+    @staticmethod
+    async def toggle_flagged(project_id: str, is_flagged: bool, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        """Flag or unflag a project (dashboard ★ marker).
+
+        Deliberately independent of :meth:`toggle_pinned`: flagging marks a
+        project for attention in the projects overview table and NEVER affects
+        the sidebar's pinned-first ordering.
+
+        Args:
+            project_id: Project UUID string.
+            is_flagged: New flagged state to apply.
+            session: Active asynchronous database session.
+
+        Returns:
+            Optional[Dict[str, Any]]: The updated project record, or None if the
+                project does not exist.
+        """
+        pid = as_uuid(project_id)
+        stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        result = await session.execute(stmt)
+        p = result.scalar_one_or_none()
+        if not p:
+            return None
+        p.is_flagged = bool(is_flagged)
         await session.flush()
         await session.refresh(p)
         return serialize_project(p)

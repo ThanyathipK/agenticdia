@@ -13,6 +13,7 @@ from app.event_manager import verify_single_worker_guarantee as verify_sse_singl
 from app.rate_limit import verify_single_worker_guarantee
 from app.routes import chat, projects, requirements, lock, events, documents
 from app.routes import prd_sections
+from app.routes import traceability
 from app.llm_client import check_lm_studio_health
 
 # Logger initialization
@@ -101,6 +102,10 @@ openapi_tags = [
         "name": "Events & SSE",
         "description": "Artifact event log queries and the Server-Sent Events (SSE) realtime push stream.",
     },
+    {
+        "name": "Traceability",
+        "description": "Derived Requirement Traceability Matrix linking requirements, user stories, acceptance criteria, PRD sections and diagrams.",
+    },
 ]
 
 # Instantiate FastAPI application
@@ -162,6 +167,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 #                  /api/pending-actions, /api/confirm-action, /api/cancel-action
 #   - events:      /api/events, /api/project/{id}/events, /api/project/{id}/sse (SSE push stream)
 #   - documents:   /api/project/{id}/documents upload/list/get + DRAFT-only process endpoint
+#   - traceability:/api/project/{id}/traceability (derived matrix)
 app.include_router(chat.router, tags=["System"])
 app.include_router(projects.router, tags=["Projects"])
 app.include_router(requirements.router, tags=["Requirements & Workflow"])
@@ -170,6 +176,9 @@ app.include_router(events.router, tags=["Events & SSE"])
 app.include_router(documents.router, tags=["Documents"])
 # PRD part-level editing / locking / versioning (the nine preview parts)
 app.include_router(prd_sections.router, tags=["PRD Sections"])
+# Derived Requirement Traceability Matrix (requirements <-> stories <-> criteria
+# <-> PRD sections <-> diagrams)
+app.include_router(traceability.router, tags=["Traceability"])
 
 
 # ==========================================

@@ -26,12 +26,14 @@ from app.prd_section_service import (
     VALID_REVIEW_STATUSES,
     assemble_document_markdown,
     ensure_sections_seeded,
+    merge_edited_section,
 )
 from app.repositories import (
     ArtifactEventLogRepository,
     PRDDocumentRepository,
     PRDSectionRepository,
     PRDSectionVersionRepository,
+    PRDVersionRepository,
     RequirementStateRepository,
 )
 from app.schemas import (
@@ -135,9 +137,23 @@ async def update_prd_section(
 
     section = await _get_section_or_404(section_key, project_id, session)
 
+    # MERGE-WITH-LAST-VERSION (three-way): the UI sends BOTH the full edited
+    # text (``content``) AND the text it started editing from
+    # (``base_content``). ``section.content`` is the CURRENT stored text —
+    # possibly advanced by an AI regeneration while the user was editing.
+    # ``merge_edited_section`` keeps the user's touched lines and preserves
+    # concurrent changes outside the edit window, so a manual save always
+    # produces "last version + this edit" instead of overwriting. Legacy
+    # clients without ``base_content`` fall back to verbatim storage.
+    edited_content = merge_edited_section(
+        payload.base_content,
+        section.get("content"),
+        payload.content or "",
+    )
+
     try:
         updated = await PRDSectionRepository.update_content(
-            section["id"], project_id, payload.content, session,
+            section["id"], project_id, edited_content, session,
             changed_by=payload.updated_by or "user",
             change_summary=payload.change_summary,
             review_status=payload.review_status,
@@ -164,7 +180,28 @@ async def update_prd_section(
     except Exception as log_err:  # never block an edit on event logging
         logger.warning(f"[PRD SECTIONS] Failed to log update event: {log_err}")
 
+    # Full-document snapshot flow: the parts table (with this edit applied) is
+    # the single source of truth. Re-stitch ALL parts in canonical order.
     document_markdown = await assemble_document_markdown(project_id, session)
+
+    # ORDER MATTERS: record the version FIRST so requirement_states
+    # .version_number advances to N+1; the subsequent save_or_update then
+    # propagates the merged document into a NEW prd_documents row for version
+    # N+1 instead of overwriting the previous version's row in place. This is
+    # what makes a manual edit "merge with the old one and save as a NEW
+    # version" — the old version's document row is never touched.
+    try:
+        from app.version_service import record_prd_version
+        await record_prd_version(
+            project_id, session,
+            generated_prd=document_markdown,
+            generated_by=payload.updated_by or "user",
+            change_type="manual",
+            change_summary=payload.change_summary,
+        )
+    except Exception as ver_err:  # never block a valid edit on ledger bookkeeping
+        logger.warning("[PRD SECTIONS] Failed to record manual PRD version: %s", ver_err)
+
     await RequirementStateRepository.save_or_update(project_id, {
         "generated_prd": document_markdown,
     }, session)
@@ -223,7 +260,27 @@ async def revert_prd_section(
         changed_by=updated_by or "user",
         change_summary=f"Reverted to version {version_number}.",
     )
+    # Same single-source-of-truth flow as a manual edit: the parts table (with
+    # the restored part applied) is re-stitched and persisted as both the
+    # requirement-state document and the new immutable version.
     document_markdown = await assemble_document_markdown(project_id, session)
+
+    # ORDER MATTERS: record the version first (advances requirement_states
+    # .version_number) so the document propagation below creates a NEW
+    # prd_documents row for the new version instead of overwriting the old
+    # one. A revert must also preserve every previous version's document.
+    try:
+        from app.version_service import record_prd_version
+        await record_prd_version(
+            project_id, session,
+            generated_prd=document_markdown,
+            generated_by=updated_by or "user",
+            change_type="manual",
+            change_summary=f"Reverted '{section_key}' to version {version_number}.",
+        )
+    except Exception as ver_err:  # never block a valid revert on ledger bookkeeping
+        logger.warning("[PRD SECTIONS] Failed to record revert PRD version: %s", ver_err)
+
     await RequirementStateRepository.save_or_update(project_id, {
         "generated_prd": document_markdown,
     }, session)

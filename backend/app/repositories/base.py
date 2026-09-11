@@ -26,6 +26,7 @@ from app.models import (
     PRDVersionModel,
     ProjectModel,
     RequirementModel,
+    SemanticMemoryModel,
     UserStoryModel,
 )
 
@@ -63,6 +64,9 @@ def serialize_project(p: ProjectModel, *, match_snippet: Optional[str] = None) -
         "description": p.description,
         "industry_standard": p.industry_standard,
         "is_pinned": bool(p.is_pinned) if p.is_pinned is not None else False,
+        "is_flagged": bool(p.is_flagged) if p.is_flagged is not None else False,
+        "status": p.status or "draft",
+        "updated_at": dt_iso_or_none(p.updated_at),
     }
     if match_snippet:
         data["match_snippet"] = match_snippet
@@ -203,8 +207,12 @@ def serialize_prd_version(v: PRDVersionModel) -> Dict[str, Any]:
         "version_id": str(v.id),
         "project_id": str(v.project_id),
         "version_number": v.version_number,
+        "semver": v.semver or "1.0.0",
         "generated_prd": v.generated_prd,
         "generated_by": v.generated_by,
+        "change_type": v.change_type or "ai",
+        "change_summary": v.change_summary,
+        "changed_sections": v.changed_sections,
         "created_at": dt_iso(v.created_at),
     }
 
@@ -313,6 +321,28 @@ def serialize_pending_action(a: PendingActionModel, *, full: bool = False) -> Di
         "target_requirement_id": a.target_requirement_id,
         "status": a.status,
     }
+
+
+def serialize_semantic_memory(m: SemanticMemoryModel, *, score: Optional[float] = None) -> Dict[str, Any]:
+    """Serialize a SemanticMemoryModel into its public dict representation.
+
+    ``score`` (blended relevance+recency from the recall path) is only emitted
+    when provided, so plain persistence payloads stay unchanged.
+    """
+    data = {
+        "id": str(m.id),
+        "project_id": str(m.project_id),
+        "kind": m.kind,
+        "content": m.content,
+        "embedding_model": m.embedding_model,
+        "source_message_id": str(m.source_message_id) if m.source_message_id else None,
+        "recall_count": m.recall_count,
+        "last_recalled_at": dt_iso_or_none(m.last_recalled_at),
+        "created_at": dt_iso(m.created_at),
+    }
+    if score is not None:
+        data["score"] = round(float(score), 4)
+    return data
 
 
 def serialize_event_log(e: ArtifactEventLogModel) -> Dict[str, Any]:

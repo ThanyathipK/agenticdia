@@ -6,7 +6,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.repositories import RequirementStateRepository, ConversationMessageRepository, PRDVersionRepository
+from app.repositories import RequirementStateRepository, ConversationMessageRepository
 from app.schemas import GatheredRequirements
 from app.prompt_loader import load_prompt
 from app.llm_factory import llm, parser
@@ -1134,20 +1134,6 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     req_state["generated_diagrams"] = req_state.get("generated_diagrams", "")
     req_state["current_workflow_state"] = "architect_node"
 
-    # Persist the freshly filled document as an immutable version record.
-
-
-    # Create an immutable PRD version record
-    try:
-        if db_session:
-            await PRDVersionRepository.create(project_id, {
-                "generated_prd": req_state["generated_prd"],
-                "generated_by": "automated_agent"
-            }, db_session)
-            logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
-    except Exception as version_err:
-        logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
-
     # PART-LEVEL PRD SYNC: merge the freshly generated document into the
     # project's prd_sections. Human-owned (ai_generatable=False) and locked
     # sections are PRESERVED verbatim — regeneration only touches unlocked,
@@ -1168,6 +1154,27 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
                 f"[PRD SECTIONS] Failed to sync PRD sections for project {project_id}: "
                 f"{str(section_sync_err)}"
             )
+
+    # Persist the FINAL document as an immutable PRD version record. The
+    # version ALWAYS advances on every Generate PRD click — even when every
+    # changed section was locked and the final merged document is byte-identical
+    # to the previous snapshot — so the Version ledger never collapses. The
+    # per-section change records prove which parts changed and which were
+    # locked_preserved by the lock contract.
+    if db_session:
+        try:
+            from app.version_service import record_prd_version
+            await record_prd_version(
+                project_id, db_session,
+                generated_prd=req_state["generated_prd"],
+                generated_by="automated_agent",
+                change_type="ai",
+                change_summary=(version_history_summaries or "").strip()
+                    or None,
+            )
+            logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
+        except Exception as version_err:
+            logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
 
     architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
     await ConversationMessageRepository.save_message(

@@ -57,10 +57,27 @@ export interface ChatMessage {
 
 export interface VersionHistory {
   version: number;
+  /** Semantic Version (MAJOR.MINOR.PATCH) of this snapshot.
+   *  MAJOR = sections created/removed, MINOR = AI content updates,
+   *  PATCH = manual edits / no-change advances. */
+  semVersion?: string;
   timestamp: string;
   author: string;
   description: string;
-  requirementsSnapshot: StructuredRequirements;
+  /** 'ai' | 'manual' — origin of the snapshot (Generate PRD vs manual edit). */
+  changeType?: 'ai' | 'manual' | string;
+  /** Per-section change records incl. 'locked_preserved' markers. */
+  changedSections?: VersionSectionChange[];
+  requirementsSnapshot?: StructuredRequirements;
+}
+
+/** One per-section change record attached to a PRD version snapshot. */
+export interface VersionSectionChange {
+  section_key: string;
+  title: string;
+  /** 'created' | 'updated' | 'unchanged' | 'removed' | 'locked_preserved'. */
+  change_kind: string;
+  changed: boolean;
 }
 
 // PRD Section Types and helper utilities

@@ -47,6 +47,8 @@ CREATE TABLE projects (
     description TEXT,
     industry_standard VARCHAR(100) NOT NULL, -- e.g., 'Krungsri Nimble', 'ISO-20022', 'PCI-DSS'
     is_pinned BOOLEAN NOT NULL DEFAULT FALSE, -- Pinned chats/projects float to the top of the sidebar
+    is_flagged BOOLEAN NOT NULL DEFAULT FALSE, -- Dashboard ★ flag marker; independent of sidebar pinning
+    status VARCHAR(50) NOT NULL DEFAULT 'draft', -- Dashboard workflow status: 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised'
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
@@ -248,6 +250,10 @@ CREATE TABLE prd_versions (
     version_number INT NOT NULL,
     generated_prd TEXT NOT NULL,
     generated_by VARCHAR(100) NOT NULL DEFAULT 'automated_agent',
+    change_type VARCHAR(20) NOT NULL DEFAULT 'ai',
+    change_summary TEXT,
+    changed_sections JSONB,
+    semver VARCHAR(20) NOT NULL DEFAULT '1.0.0',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

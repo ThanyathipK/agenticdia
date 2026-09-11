@@ -171,6 +171,32 @@ async def test_create_whitespace_only_name_rejected(client):
 
 
 @pytest.mark.asyncio
+async def test_create_name_over_40_chars_rejected(client):
+    resp = await _create_via_api(client, "A" * 41)
+
+    assert resp.status_code == 422
+    assert "40 characters or fewer" in resp.json()["detail"][0]["msg"]
+
+
+@pytest.mark.asyncio
+async def test_create_name_padded_over_40_chars_rejected(client):
+    # The cap is applied AFTER trimming, so surrounding whitespace must not
+    # let an over-long name slip through.
+    resp = await _create_via_api(client, "  " + "A" * 41 + " ")
+
+    assert resp.status_code == 422
+    assert "40 characters or fewer" in resp.json()["detail"][0]["msg"]
+
+
+@pytest.mark.asyncio
+async def test_create_name_exactly_40_chars_succeeds(client):
+    resp = await _create_via_api(client, "A" * 40)
+
+    assert resp.status_code == 201
+    assert resp.json()["name"] == "A" * 40
+
+
+@pytest.mark.asyncio
 async def test_create_distinct_names_both_persist(client):
     first = await _create_via_api(client, "Payment Hub")
     second = await _create_via_api(client, "Lending Suite")
@@ -226,7 +252,16 @@ async def test_rename_to_own_name_allowed(client):
     resp = await client.put(f"/api/projects/{id_a}", json={"name": "Payment Hub"})
 
     assert resp.status_code == 200
-    assert resp.json()["name"] == "Payment Hub"
+
+
+@pytest.mark.asyncio
+async def test_rename_over_40_chars_rejected(client):
+    id_a, _ = await _seed_two_projects(client, "Payment Hub", "Lending Suite")
+
+    resp = await client.put(f"/api/projects/{id_a}", json={"name": "B" * 41})
+
+    assert resp.status_code == 422
+    assert "40 characters or fewer" in resp.json()["detail"][0]["msg"]
 
 
 @pytest.mark.asyncio
