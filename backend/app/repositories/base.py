@@ -99,7 +99,6 @@ def serialize_requirement(req: RequirementModel) -> Dict[str, Any]:
         "is_locked": bool(req.is_locked) if req.is_locked is not None else False,
         "locked_by": req.locked_by,
         "locked_at": dt_iso_or_none(req.locked_at),
-        "lock_reason": req.lock_reason,
     }
 
 
@@ -133,8 +132,7 @@ def serialize_user_story(
             "is_locked": story.is_locked,
             "locked_by": story.locked_by,
             "locked_at": dt_iso_or_none(story.locked_at),
-            "lock_reason": story.lock_reason,
-        })
+            })
     return data
 
 
@@ -236,7 +234,6 @@ def serialize_prd_section(s: PRDSectionModel, *, current_version: Optional[int] 
         "is_locked": bool(s.is_locked) if s.is_locked is not None else False,
         "locked_by": s.locked_by,
         "locked_at": dt_iso_or_none(s.locked_at),
-        "lock_reason": s.lock_reason,
         "created_at": dt_iso(s.created_at),
         "updated_at": dt_iso(s.updated_at),
     }

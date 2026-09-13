@@ -102,7 +102,6 @@ export interface ArtifactLockState {
   is_locked: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
-  lock_reason?: string | null;
 }
 
 // Optimistic lock state tracked in the UI keyed by requirement code.

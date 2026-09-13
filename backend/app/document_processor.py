@@ -130,16 +130,33 @@ def _tail_by_tokens(text: str, max_tokens: int) -> str:
 
 
 def _split_long_line(line: str, chunk_size: int) -> List[str]:
-    """Word-bucket splits a single unbreakable line so each piece fits budget."""
+    """Word-bucket splits a single unbreakable line so each piece fits budget.
+
+    The naive approach re-encodes the whole growing candidate for EVERY word
+    (O(n^2) tokenization on unbreakable blobs such as base64), which is a real
+    slowdown on large documents.
+
+    Fast path: a tokenizer token is always at least one UTF-8 byte long, so
+    ``len(tokens) <= len(bytes)`` always holds. The exact ``count_tokens`` check
+    is therefore needed only when a candidate's *byte* length already exceeds the
+    budget — otherwise the token count is provably within budget and the check
+    can be skipped. Output is byte-for-byte identical to the exact-only version.
+    """
     pieces: List[str] = []
     current: List[str] = []
+    space_bytes = len(" ".encode("utf-8"))
+    current_bytes = 0  # utf-8 byte length of ``" ".join(current)``
     for word in line.split(" "):
-        candidate = " ".join(current + [word])
-        if current and count_tokens(candidate) > chunk_size:
-            pieces.append(" ".join(current))
-            current = [word]
-        else:
-            current.append(word)
+        word_bytes = len(word.encode("utf-8"))
+        candidate_bytes = current_bytes + word_bytes + (space_bytes if current else 0)
+        if current and candidate_bytes > chunk_size:
+            if count_tokens(" ".join(current + [word])) > chunk_size:
+                pieces.append(" ".join(current))
+                current = [word]
+                current_bytes = word_bytes
+                continue
+        current.append(word)
+        current_bytes = candidate_bytes
     if current:
         pieces.append(" ".join(current))
     return pieces
@@ -149,6 +166,7 @@ def split_markdown_into_chunks(
     text: str,
     chunk_size: Optional[int] = None,
     overlap: Optional[int] = None,
+    token_count: Optional[int] = None,
 ) -> List[str]:
     """Split ``text`` into ordered, token-budgeted chunks with overlap.
 
@@ -165,6 +183,9 @@ def split_markdown_into_chunks(
         text: Full converted-markdown document body.
         chunk_size: Target token budget per chunk (defaults to settings).
         overlap: Tokens of the previous chunk repeated at the next chunk start.
+        token_count: Precomputed ``count_tokens(text)`` when the caller already
+            measured it (routes do), skipping one redundant full-document
+            tokenization pass on large documents.
 
     Returns:
         Ordered list of chunk strings (length >= 1 when ``text`` is non-empty).
@@ -176,7 +197,7 @@ def split_markdown_into_chunks(
 
     if not text:
         return []
-    if count_tokens(text) <= chunk_size:
+    if (token_count if token_count is not None else count_tokens(text)) <= chunk_size:
         return [text]
 
     chunks: List[str] = []

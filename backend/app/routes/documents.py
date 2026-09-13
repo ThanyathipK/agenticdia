@@ -47,6 +47,7 @@ from app.repositories import (
     RequirementStateRepository,
 )
 from app.schemas import (
+    DocumentDeleteResponse,
     DocumentMarkdownResponse,
     DocumentProcessResponse,
     UploadedDocumentResponse,
@@ -383,6 +384,92 @@ async def get_document_markdown(
 
 
 # ==========================================
+# DELETE — REMOVE A DOCUMENT FROM THE KNOWLEDGE BASE
+# ==========================================
+
+@router.delete(
+    "/api/project/{project_id}/documents/{document_id}",
+    response_model=DocumentDeleteResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def delete_document(
+    project_id: str,
+    document_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Permanently remove an uploaded document from the project's knowledge base.
+
+    Deletes the immutable document record (full canonical markdown included).
+    Any DRAFT extraction merge-preview staged from this document (the
+    ``INSERT_CHUNKED_REQUIREMENTS`` pending_action whose
+    ``proposed_changes._document_ref.document_id`` matches) is discarded too, so
+    the ConfirmationPanel never offers a draft whose source is gone. Requirements
+    that were ALREADY extracted and confirmed from this document are NOT touched
+    — they live in the requirement tables and the PRD version ledger.
+
+    Args:
+        project_id: Owning project UUID string.
+        document_id: Document UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        DocumentDeleteResponse: Confirmation payload with the removed file name.
+
+    Raises:
+        HTTPException: 400 on invalid UUIDs; 404 if the document does not exist.
+    """
+    try:
+        UUID(project_id)
+        UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or document_id format")
+
+    doc = await DocumentRepository.delete(str(document_id), str(project_id), session)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Drop every DRAFT merge-preview staged from this document (and nothing
+    # else), so the confirmation UI never references a deleted source. Only
+    # WAITING_CONFIRMATION actions are returned by get_by_project and these
+    # expire within the hour anyway — this just prevents stale drafts.
+    pending = await PendingActionRepository.get_by_project(str(project_id), session)
+    removed_drafts = 0
+    for action in pending:
+        document_ref = (action.get("proposed_changes") or {}).get("_document_ref") or {}
+        if (
+            action.get("action_type") == DRAFT_ACTION_TYPE
+            and document_ref.get("document_id") == str(document_id)
+        ):
+            await PendingActionRepository.delete(action["id"], str(project_id), session)
+            removed_drafts += 1
+
+    await event_manager.publish(
+        str(project_id),
+        "document_deleted",
+        {
+            "project_id": str(project_id),
+            "document_id": str(document_id),
+            "original_filename": doc.get("original_filename"),
+        },
+    )
+
+    logger.info(
+        "Document %s ('%s') deleted for project %s (discarded %d draft(s)).",
+        document_id,
+        doc.get("original_filename"),
+        project_id,
+        removed_drafts,
+    )
+
+    return {
+        "status": "deleted",
+        "document_id": str(document_id),
+        "project_id": str(project_id),
+        "original_filename": doc.get("original_filename") or "",
+    }
+
+
+# ==========================================
 # PROCESS — EXPLICIT, DRAFT-ONLY REQUIREMENTS EXTRACTION
 # ==========================================
 
@@ -396,9 +483,11 @@ async def _run_extraction_by_chunks(
 
     Mode routing:
       - ``token_count <= DOCUMENT_BUDGET``   -> ONE gatherer pass over the full doc.
-      - otherwise                            -> sequential chunked passes (~10%
-        overlap each so headings/context are never clipped), streaming per-chunk
-        progress over the SSE event bus.
+      - otherwise                            -> chunked passes of ``~DOCUMENT_CHUNK_SIZE``
+        tokens with ``DOCUMENT_CHUNK_OVERLAP`` overlap. Passes run sequentially by
+        default (``DOCUMENT_EXTRACTION_CONCURRENCY=1``) or with bounded parallelism
+        when that setting is raised; per-chunk progress is streamed over the SSE
+        event bus using the cumulative INPUT token count.
 
     The extracted artifacts stay in memory only (``chunk_results``); NOTHING is
     written to requirements/user_stories/acceptance_criteria until the user
@@ -411,8 +500,11 @@ async def _run_extraction_by_chunks(
     mode = decide_document_mode(token_count)
     if mode == "full":
         chunks = [content_markdown]
+        chunk_input_tokens = [token_count]
     else:
-        chunks = split_markdown_into_chunks(content_markdown)
+        # Pass the already-measured token_count so the chunker does not re-tokenize
+        # the whole document a second time (a real cost on large briefs).
+        chunks = split_markdown_into_chunks(content_markdown, token_count=token_count)
         if len(chunks) > settings.MAX_DOCUMENT_CHUNKS:
             raise HTTPException(
                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -423,40 +515,51 @@ async def _run_extraction_by_chunks(
                     "smaller files and upload them separately."
                 ),
             )
+        # Measure each chunk's input tokens ONCE so the progress stream (and the
+        # dedup step) never re-encodes outputs.
+        chunk_input_tokens = [count_tokens(chunk) for chunk in chunks]
 
     chunk_count = len(chunks)
+    concurrency = max(1, int(settings.DOCUMENT_EXTRACTION_CONCURRENCY))
     logger.info(
-        "Document %s extraction mode=%s chunks=%d tokens=%d (budget=%d).",
+        "Document %s extraction mode=%s chunks=%d tokens=%d (budget=%d, concurrency=%d).",
         document_id,
         mode,
         chunk_count,
         token_count,
         document_budget(),
+        concurrency,
     )
 
-    chunk_results: List[Dict[str, Any]] = []
-    for idx, chunk in enumerate(chunks, start=1):
+    processed_input_tokens = 0
+
+    async def _extract_chunk(idx: int) -> Dict[str, Any]:
+        """Run ONE gatherer pass; failures are loud and order-independent."""
+        nonlocal processed_input_tokens
+        chunk = chunks[idx]
         try:
             result = await extract_requirements_from_text(
-                chunk, chunk_index=idx, chunk_count=chunk_count
+                chunk, chunk_index=idx + 1, chunk_count=chunk_count
             )
         except Exception as exc:
             logger.error(
                 "Document %s chunk %d/%d extraction failed: %s",
                 document_id,
-                idx,
+                idx + 1,
                 chunk_count,
                 exc,
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=(
-                    f"Extraction failed on chunk {idx}/{chunk_count}. No changes "
+                    f"Extraction failed on chunk {idx + 1}/{chunk_count}. No changes "
                     f"were written. ({exc})"
                 ),
             ) from exc
-        chunk_results.append(result)
 
+        # Monotonic cumulative INPUT tokens (previously re-encoded the gatherer
+        # OUTPUT dicts, which count_tokens cannot tokenize -> a meaningless value).
+        processed_input_tokens += chunk_input_tokens[idx]
         await event_manager.publish(
             project_id,
             "document_extraction_progress",
@@ -464,11 +567,28 @@ async def _run_extraction_by_chunks(
                 "project_id": project_id,
                 "document_id": document_id,
                 "mode": mode,
-                "chunk_index": idx,
+                "chunk_index": idx + 1,
                 "chunk_count": chunk_count,
-                "processed_tokens": sum(count_tokens(c) for c in chunk_results),
+                "processed_tokens": processed_input_tokens,
             },
         )
+        return result
+
+    if mode == "full" or concurrency == 1:
+        chunk_results: List[Dict[str, Any]] = []
+        for idx in range(chunk_count):
+            chunk_results.append(await _extract_chunk(idx))
+    else:
+        # Bounded parallel passes via a shared semaphore. asyncio.gather keeps the
+        # result list in DOCUMENT order regardless of completion order, so the
+        # accumulate/dedupe step is byte-for-byte identical to sequential mode.
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _bounded(idx: int) -> Dict[str, Any]:
+            async with semaphore:
+                return await _extract_chunk(idx)
+
+        chunk_results = list(await asyncio.gather(*[_bounded(i) for i in range(chunk_count)]))
 
     return {
         "mode": mode,

@@ -117,7 +117,6 @@ class RequirementStateRepository:
                 "is_locked": bool(req.is_locked) if req.is_locked is not None else False,
                 "locked_by": req.locked_by,
                 "locked_at": req.locked_at.isoformat() if req.locked_at else None,
-                "lock_reason": req.lock_reason
             }
             requirements_list.append(req_entry)
             all_user_stories.extend(active_stories)

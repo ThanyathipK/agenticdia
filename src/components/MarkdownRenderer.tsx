@@ -1,24 +1,66 @@
 // JSX-producing markdown renderer extracted from the former Dashboard.tsx.
 // Renders markdown lines into high-fidelity styled React elements on-the-fly.
 // Pure string helpers live in ../utils/markdown.ts.
+import type { ReactNode } from 'react';
+import { highlightMatch } from '../utils/highlight';
 
-export function renderInlineFormatting(text: string) {
+// Renders inline markdown formatting (`**bold**` → real <strong>, `` `code` `` →
+// styled <code>) as React nodes, on-the-fly from a plain string.
+//
+// For the chat panel the optional `highlightQuery`/`highlightClass` args are
+// forwarded so the sidebar search highlight keeps lighting up matches — the
+// formatting and highlight compose on the same message body. Bold/code nodes
+// inherit the surrounding text color so they stay readable on brand-tinted
+// chat bubbles (white-on-brown) as well as the white PRD preview surface.
+export function renderInlineFormatting(
+  text: string,
+  highlightQuery?: string,
+  highlightClass?: string,
+): ReactNode {
   if (!text) return '';
-  // Support bold formatting **text**
-  const parts = text.split('**');
-  return parts.map((part, index) => {
-    if (index % 2 === 1) {
-      return <strong key={index} className="font-semibold text-slate-900">{part}</strong>;
+  const nodes: ReactNode[] = [];
+
+  // Renders one non-bold chunk: `` `code` `` spans become <code> chips and
+  // everything else goes through the shared search-highlighter.
+  const renderCodeAndText = (chunk: string): void => {
+    const codePattern = /`([^`]+?)`/g;
+    let codeMatch: RegExpExecArray | null;
+    let last = 0;
+    while ((codeMatch = codePattern.exec(chunk)) !== null) {
+      const plain = chunk.slice(last, codeMatch.index);
+      if (plain) nodes.push(highlightMatch(plain, highlightQuery ?? '', highlightClass));
+      nodes.push(
+        <code
+          key={nodes.length}
+          className="bg-slate-100 text-primary font-mono text-[11px] px-1.5 py-0.5 rounded border border-slate-200"
+        >
+          {codeMatch[1]}
+        </code>,
+      );
+      last = codeMatch.index + codeMatch[0].length;
     }
-    // Also support simple inline code format `code` inside the parts
-    const subParts = part.split('`');
-    return subParts.map((subPart, subIndex) => {
-      if (subIndex % 2 === 1) {
-        return <code key={subIndex} className="bg-slate-100 text-primary font-mono text-[11px] px-1.5 py-0.5 rounded border border-slate-200">{subPart}</code>;
-      }
-      return subPart;
-    });
-  });
+    if (last < chunk.length) {
+      nodes.push(highlightMatch(chunk.slice(last), highlightQuery ?? '', highlightClass));
+    }
+  };
+
+  // Paired **bold** segments only — an unmatched opening `**` (e.g. `5 ** 3`)
+  // stays literal text instead of bolding the rest of the line.
+  const boldPattern = /\*\*([^*]+?)\*\*/g;
+  let boldMatch: RegExpExecArray | null;
+  let cursor = 0;
+  while ((boldMatch = boldPattern.exec(text)) !== null) {
+    renderCodeAndText(text.slice(cursor, boldMatch.index));
+    nodes.push(
+      <strong key={nodes.length} className="font-bold">
+        {highlightMatch(boldMatch[1], highlightQuery ?? '', highlightClass)}
+      </strong>,
+    );
+    cursor = boldMatch.index + boldMatch[0].length;
+  }
+  renderCodeAndText(text.slice(cursor));
+
+  return nodes;
 }
 
 // Splits a markdown table row "| a | b |" into its trimmed cells.
@@ -56,14 +98,15 @@ function renderMarkdownTable(rows: string[], key: string) {
   const bodyRows = hasHeader ? rows.slice(2) : rows;
 
   return (
-    <table key={key} className="w-full border-collapse my-4 text-sm">
+    <div key={key} className="w-full overflow-x-auto custom-scrollbar my-4">
+    <table className="w-full border-collapse text-sm">
       {headerCells && (
         <thead>
           <tr>
             {headerCells.map((cell, i) => (
               <th
                 key={i}
-                className="border border-slate-200 bg-slate-50 px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-slate-700"
+                className="border border-slate-200 bg-slate-50 px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-slate-700 break-words"
               >
                 {renderCellContent(cell)}
               </th>
@@ -75,7 +118,7 @@ function renderMarkdownTable(rows: string[], key: string) {
         {bodyRows.map((row, r) => (
           <tr key={r} className={r % 2 === 1 ? 'bg-slate-50/50' : ''}>
             {splitMarkdownRow(row).map((cell, c) => (
-              <td key={c} className="border border-slate-200 px-3 py-2 align-top text-slate-600 leading-relaxed">
+              <td key={c} className="border border-slate-200 px-3 py-2 align-top text-slate-600 leading-relaxed break-words">
                 {renderCellContent(cell)}
               </td>
             ))}
@@ -83,6 +126,7 @@ function renderMarkdownTable(rows: string[], key: string) {
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -108,7 +152,7 @@ export function parseAndRenderMarkdown(md: string) {
   }
 
   return (
-    <div className="space-y-3.5 text-on-surface-variant font-sans">
+    <div className="space-y-3.5 text-on-surface-variant font-sans min-w-0">
       {blocks.map((block, idx) => {
         if (block.kind === 'table') {
           return renderMarkdownTable(block.rows, `tbl-${idx}`);
@@ -162,7 +206,7 @@ export function parseAndRenderMarkdown(md: string) {
         // Blockquotes
         if (trimmed.startsWith('> ')) {
           return (
-            <blockquote key={idx} className="border-l-4 border-primary/40 bg-primary/5 pl-4 pr-2 py-2 rounded-r-md italic my-4 text-slate-700 text-sm">
+            <blockquote key={idx} className="border-l-4 border-primary/40 bg-primary/5 pl-4 pr-2 py-2 rounded-r-md italic my-4 text-slate-700 text-sm break-words min-w-0">
               {renderInlineFormatting(trimmed.slice(2))}
             </blockquote>
           );
@@ -176,7 +220,7 @@ export function parseAndRenderMarkdown(md: string) {
         // Bullet Lists
         if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
           return (
-            <li key={idx} className="ml-5 list-disc text-slate-700 my-1 leading-relaxed text-sm">
+            <li key={idx} className="ml-5 list-disc text-slate-700 my-1 leading-relaxed text-sm break-words">
               {renderInlineFormatting(trimmed.slice(2))}
             </li>
           );
@@ -186,7 +230,7 @@ export function parseAndRenderMarkdown(md: string) {
         const numListMatch = trimmed.match(/^(\d+)\.\s(.*)/);
         if (numListMatch) {
           return (
-            <li key={idx} className="ml-5 list-decimal text-slate-700 my-1 leading-relaxed text-sm">
+            <li key={idx} className="ml-5 list-decimal text-slate-700 my-1 leading-relaxed text-sm break-words">
               {renderInlineFormatting(numListMatch[2])}
             </li>
           );
@@ -199,7 +243,7 @@ export function parseAndRenderMarkdown(md: string) {
 
         // Standard Paragraph
         return (
-          <p key={idx} className="text-slate-600 my-2 leading-relaxed text-sm">
+          <p key={idx} className="text-slate-600 my-2 leading-relaxed text-sm break-words">
             {renderInlineFormatting(trimmed)}
           </p>
         );

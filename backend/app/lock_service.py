@@ -48,7 +48,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "epic": {
             "model": EpicModel,
@@ -56,7 +55,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "requirement": {
             "model": RequirementModel,
@@ -64,7 +62,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "user_story": {
             "model": UserStoryModel,
@@ -72,7 +69,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "acceptance_criteria": {
             "model": AcceptanceCriteriaModel,
@@ -80,7 +76,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "clarification_question": {
             "model": ClarificationQuestionModel,
@@ -88,7 +83,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "prd_document": {
             "model": PRDDocumentModel,
@@ -96,7 +90,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
         "prd_section": {
             "model": PRDSectionModel,
@@ -104,7 +97,6 @@ class LockService:
             "lock_field": "is_locked",
             "locked_by_field": "locked_by",
             "locked_at_field": "locked_at",
-            "lock_reason_field": "lock_reason",
         },
     }
 
@@ -191,7 +183,6 @@ class LockService:
         artifact_id: str,
         session: AsyncSession,
         locked_by: str = "user",
-        lock_reason: Optional[str] = None,
         project_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -202,7 +193,6 @@ class LockService:
             artifact_id: UUID of the artifact
             session: Database session
             locked_by: Who is locking the artifact
-            lock_reason: Optional reason for locking
             project_id: UUID of the project that must own the artifact. If provided,
                 verification fails with ValueError when the artifact does not belong
                 to the project.
@@ -224,7 +214,6 @@ class LockService:
         lock_field = config["lock_field"]
         locked_by_field = config["locked_by_field"]
         locked_at_field = config["locked_at_field"]
-        lock_reason_field = config["lock_reason_field"]
 
         # Query the artifact
         stmt = select(model).where(getattr(model, id_field) == artifact_id)
@@ -269,8 +258,6 @@ class LockService:
         setattr(artifact, lock_field, True)
         setattr(artifact, locked_by_field, locked_by)
         setattr(artifact, locked_at_field, datetime.now(timezone.utc))
-        if lock_reason:
-            setattr(artifact, lock_reason_field, lock_reason)
 
         await session.flush()
         await session.refresh(artifact)
@@ -288,7 +275,6 @@ class LockService:
                     "is_locked": True,
                     "locked_by": locked_by,
                     "locked_at": datetime.now(timezone.utc).isoformat(),
-                    "lock_reason": lock_reason
                 },
                 performed_by=locked_by
             )
@@ -336,7 +322,6 @@ class LockService:
         lock_field = config["lock_field"]
         locked_by_field = config["locked_by_field"]
         locked_at_field = config["locked_at_field"]
-        lock_reason_field = config["lock_reason_field"]
 
         # Query the artifact
         stmt = select(model).where(getattr(model, id_field) == artifact_id)
@@ -377,7 +362,6 @@ class LockService:
         setattr(artifact, lock_field, False)
         setattr(artifact, locked_by_field, None)
         setattr(artifact, locked_at_field, None)
-        setattr(artifact, lock_reason_field, None)
 
         await session.flush()
         await session.refresh(artifact)
@@ -418,7 +402,6 @@ class LockService:
                 to the project.
         
         Returns:
-            Dict with lock metadata (is_locked, locked_by, locked_at, lock_reason)
         
         Raises:
             ValueError: If artifact_type is not supported, if the artifact is not found,
@@ -452,7 +435,6 @@ class LockService:
             "is_locked": bool(getattr(artifact, config["lock_field"])) if getattr(artifact, config["lock_field"]) is not None else False,
             "locked_by": getattr(artifact, config["locked_by_field"]),
             "locked_at": getattr(artifact, config["locked_at_field"]).isoformat() if getattr(artifact, config["locked_at_field"]) else None,
-            "lock_reason": getattr(artifact, config["lock_reason_field"])
         }
 
     @staticmethod

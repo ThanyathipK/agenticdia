@@ -27,11 +27,21 @@ export interface UseProjectSyncResult {
   loadProjectState: (projId: string, retries?: number, delay?: number) => Promise<void>;
 }
 
+/**
+ * Optional SSE callbacks. The UI layer uses these to show LIVE extraction chunk
+ * progress (chunk X/N) instead of a full-state refresh during long runs.
+ */
+export interface ProjectSyncOptions {
+  onDocumentExtractionStarted?: (data: Record<string, unknown>) => void;
+  onDocumentExtractionProgress?: (data: Record<string, unknown>) => void;
+}
+
 export function useProjectSync(
   store: RequirementStore,
   projectId: string | null,
   setPendingActions: Dispatch<SetStateAction<PendingActionPayload[]>>,
   setActiveTab: (tab: WorkspaceTab) => void,
+  options?: ProjectSyncOptions,
 ): UseProjectSyncResult {
   // Live refs so the SSE handler always reads the freshest values without
   // having to reconnect the EventSource every time these change.
@@ -269,12 +279,28 @@ export function useProjectSync(
       if (!isSubscribed) return;
       try {
         const message = JSON.parse(event.data);
+        if (!message || !message.event) return;
+
         // The stream's first frame is a `connected` handshake, not a state
         // change — `loadProjectState` already fetched the full state when the
         // project opened, so it must NOT trigger a redundant re-download.
-        if (message && message.event && message.event !== 'connected') {
-          scheduleRefresh();
+        if (message.event === 'connected') return;
+
+        // High-frequency document-extraction frames: forward them to the
+        // DocumentLibrary so users see live chunk progress (chunk X/N) on big
+        // documents, and do NOT trigger a full project-state GET. A many-chunk
+        // extraction would otherwise fire one heavy state download (PRD markdown
+        // + chat history) per chunk while the backend is already busy serving
+        // the local LLM.
+        if (message.event === 'document_extraction_started') {
+          options?.onDocumentExtractionStarted?.(message.data);
+          return;
         }
+        if (message.event === 'document_extraction_progress') {
+          options?.onDocumentExtractionProgress?.(message.data);
+          return;
+        }
+        scheduleRefresh();
       } catch (err) {
         // Ignore malformed or heartbeat payloads.
       }

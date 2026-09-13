@@ -16,7 +16,7 @@
 // This hook keeps exposing the same `ProjectState` interface so the presentational
 // components (Dashboard, ChatPanel, PRDEditor, ArchitectureFlows, VersionHistory)
 // are unaffected.
-import type { Dispatch, SetStateAction } from 'react';
+import { useRef, type Dispatch, type SetStateAction } from 'react';
 import type {
   AuditResult,
   ChatMessage,
@@ -29,7 +29,7 @@ import type {
 import type { PendingActionPayload, ProjectStatus, ProjectSummary } from '../api/types';
 import { api, detailFromBlobError } from '../api/client';
 import { handleError } from '../components/Toast';
-import type { UseDocumentsResult } from './useDocuments';
+import type { UseDocumentsResult, DocumentExtractionProgress } from './useDocuments';
 import type { AppView, WorkspaceTab } from './useWorkspaceUi';
 import { useArtifactLocks } from './useArtifactLocks';
 import { useChat } from './useChat';
@@ -143,6 +143,9 @@ export interface ProjectState {
   sectionLocks: Record<string, PrdSectionLockState>;
   /** Lock/unlock ONE PRD part — blocks edits + AI regeneration when locked. */
   handleToggleSectionLock: (sectionId: string) => Promise<void>;
+  /** Restore the whole PRD document from a ledger version (append-only;
+   *  locked parts preserved). Resolves to true on success. */
+  handleRestoreVersion: (versionNumber: number) => Promise<boolean>;
 
   // Tabs / flows / history (document library lives inside the history tab)
   activeTab: WorkspaceTab;
@@ -173,11 +176,47 @@ export function useProjectState(): ProjectState {
   const ui = useWorkspaceUi();
   const store = useRequirementStore(projectsApi.projectId);
   const locks = useArtifactLocks(store, projectsApi.projectId);
+
+  // SSE bridge for LIVE extraction progress. useProjectSync receives the
+  // document_extraction_* frames, maps them to a DocumentExtractionProgress,
+  // and forwards them into useDocuments' setter (registered below) so the
+  // DocumentLibrary "chunk X/N" readout moves in real time during long runs.
+  const liveExtractionProgressRef = useRef<(p: DocumentExtractionProgress | null) => void>(
+    () => {},
+  );
+
   const { loadProjectState } = useProjectSync(
     store,
     projectsApi.projectId,
     projectsApi.setPendingActions,
     ui.setActiveTab,
+    {
+      onDocumentExtractionStarted: (data) => {
+        // Optimistically pick the mode from the measured token_count vs budget.
+        const documentId = String(data?.document_id ?? '');
+        if (!documentId) return;
+        const tokenCount = Number(data?.token_count ?? 0);
+        const budget = Number(data?.budget ?? 0);
+        liveExtractionProgressRef.current({
+          documentId,
+          mode: tokenCount > 0 && tokenCount > budget ? 'chunked' : 'full',
+          chunkIndex: 0,
+          chunkCount: 0,
+        });
+      },
+      onDocumentExtractionProgress: (data) => {
+        const documentId = String(data?.document_id ?? '');
+        const chunkIndex = Number(data?.chunk_index ?? 0);
+        const chunkCount = Number(data?.chunk_count ?? 0);
+        if (!documentId || chunkIndex < 1) return;
+        liveExtractionProgressRef.current({
+          documentId,
+          mode: String(data?.mode ?? 'chunked'),
+          chunkIndex,
+          chunkCount,
+        });
+      },
+    },
   );
   const lm = useLmStudioHealth();
   // Documents must be composed BEFORE useChat so the agent-action gate below
@@ -186,6 +225,9 @@ export function useProjectState(): ProjectState {
     projectId: projectsApi.projectId,
     pendingActions: projectsApi.pendingActions,
     setPendingActions: projectsApi.setPendingActions,
+    registerLiveProgress: (fn) => {
+      liveExtractionProgressRef.current = fn;
+    },
   });
 
   // Agent-action gating (Validate Requirements / Generate PRD): a brand-new
@@ -331,6 +373,7 @@ export function useProjectState(): ProjectState {
     handleUnlockRequirement: locks.handleUnlockRequirement,
     sectionLocks: store.sectionLocks,
     handleToggleSectionLock: store.handleToggleSectionLock,
+    handleRestoreVersion: store.handleRestoreVersion,
     activeTab: ui.activeTab,
     setActiveTab: ui.setActiveTab,
     activeView: ui.activeView,

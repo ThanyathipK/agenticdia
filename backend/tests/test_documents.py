@@ -12,6 +12,7 @@ Run from the ``backend`` directory::
     ../venv/bin/python -m pytest tests/test_documents.py -v
 """
 import io
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -30,8 +31,10 @@ from app.document_processor import (
     document_budget,
     route_document_tokens,
     split_markdown_into_chunks,
+    _split_long_line,
     _tail_by_tokens,
 )
+from app.event_manager import event_manager
 from app.main import app as fastapi_app
 from app.models import (
     AcceptanceCriteriaModel,
@@ -221,6 +224,57 @@ class TestChunker:
         for word in blob.split(" "):
             assert any(word in chunk for chunk in chunks)
 
+    def test_precomputed_token_count_skips_redundant_encode(self, long_doc_lines):
+        """Supplying the measured token_count must not change the chunk output
+        (the route already counted the whole doc once; the chunker reusing that
+        number skips a full extra tokenization on large documents)."""
+        text = "\n".join(long_doc_lines)
+        chunk_size, overlap = 120, 12
+        reference = split_markdown_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
+        assert len(reference) > 1
+        precomputed = split_markdown_into_chunks(
+            text,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            token_count=count_tokens_local(text),
+        )
+        assert precomputed == reference
+
+    def test_split_long_line_fast_path_stays_within_budget(self):
+        """The estimate-first fast path must flush at the same word boundaries as
+        the exact checker — every piece stays within budget for a big blob."""
+        blob = " ".join(["supercalifragilistic"] * 200)
+        pieces = _split_long_line(blob, chunk_size=40)
+        assert len(pieces) > 1
+        for piece in pieces:
+            assert count_tokens_local(piece) <= 40
+        # No content was lost between the pieces.
+        assert " ".join(pieces) == blob
+
+    def test_split_long_line_matches_exact_reference(self):
+        """The fast path output must be identical to the original per-word exact
+        algorithm (reference reimplemented inline for proof of equivalence)."""
+        blob = " ".join(["supercalifragilistic"] * 200)
+
+        def exact_reference(line, chunk_size):
+            pieces_out = []
+            current = []
+            for word in line.split(" "):
+                candidate = " ".join(current + [word])
+                if current and count_tokens_local(candidate) > chunk_size:
+                    pieces_out.append(" ".join(current))
+                    current = [word]
+                else:
+                    current.append(word)
+            if current:
+                pieces_out.append(" ".join(current))
+            return pieces_out
+
+        for chunk_size in (30, 40, 60, 120):
+            assert _split_long_line(blob, chunk_size) == exact_reference(
+                blob, chunk_size
+            )
+
 
 def count_tokens_local(text: str) -> int:
     from app.input_validation import count_tokens
@@ -346,28 +400,30 @@ async def _upload_doc(client, project_id: str, name="spec.md", body="# Spec\n\n"
     return resp.json()
 
 
+@pytest.fixture
+def fake_gatherer(monkeypatch):
+    """Replace the LLM gatherer with deterministic per-chunk output.
+
+    Chunk overlap means consecutive chunks re-report the same story; the
+    accumulator must collapse those duplicates across the whole document.
+    """
+    calls = {"chunks": []}
+
+    async def _fake_extract(chunk_text, *, chunk_index=1, chunk_count=1):
+        calls["chunks"].append(chunk_text)
+        return make_gathered(
+            stories=[
+                make_story("US-001", "Duplicate From Overlap"),
+                make_story(f"US-{chunk_index + 1:03d}", f"Unique Story {chunk_index}"),
+            ]
+        )
+
+    import app.routes.documents as documents_module
+    monkeypatch.setattr(documents_module, "extract_requirements_from_text", _fake_extract)
+    return calls
+
+
 class TestDraftOnlyExtraction:
-    @pytest.fixture
-    def fake_gatherer(self, monkeypatch):
-        """Replace the LLM gatherer with deterministic per-chunk output.
-
-        Chunk overlap means consecutive chunks re-report the same story; the
-        accumulator must collapse those duplicates across the whole document.
-        """
-        calls = {"chunks": []}
-
-        async def _fake_extract(chunk_text, *, chunk_index=1, chunk_count=1):
-            calls["chunks"].append(chunk_text)
-            return make_gathered(
-                stories=[
-                    make_story("US-001", "Duplicate From Overlap"),
-                    make_story(f"US-{chunk_index + 1:03d}", f"Unique Story {chunk_index}"),
-                ]
-            )
-
-        import app.routes.documents as documents_module
-        monkeypatch.setattr(documents_module, "extract_requirements_from_text", _fake_extract)
-        return calls
 
     @pytest.mark.asyncio
     async def test_process_creates_draft_only_and_confirm_applies_once(
@@ -513,3 +569,162 @@ class TestDraftOnlyExtraction:
         assert payload["mode"] == "full"
         assert payload["chunk_count"] == 1
         assert len(fake_gatherer["chunks"]) == 1
+
+    # =====================================================================
+    # Extraction performance/correctness guards
+    # =====================================================================
+    async def _progress_frames(self, project_id: str) -> list:
+        """Return every document_extraction_progress frame for `project_id` from
+        the in-process event bus (ordered by publish seq)."""
+        frames = []
+        for _, payload in event_manager._history.get(project_id, ()):
+            message = json.loads(payload)
+            if message["event"] == "document_extraction_progress":
+                frames.append(message["data"])
+        return frames
+
+    @pytest.mark.asyncio
+    async def test_progress_reports_input_chunk_tokens_not_output_dicts(
+        self, seeded_project, client, monkeypatch, fake_gatherer
+    ):
+        """The SSE progress frame must carry the cumulative INPUT chunk tokens
+        (previously it re-encoded the gatherer OUTPUT dicts, degrading to a
+        meaningless len(dict)//4 heuristic)."""
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 60)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_SIZE", 30)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_OVERLAP", 5)
+
+        body = "# Spec\n\n" + "Detail line.\n" * 40
+        doc = await _upload_doc(client, seeded_project, body=body)
+        proc = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+        assert proc.status_code == 200
+
+        frames = await self._progress_frames(seeded_project)
+        assert frames, "expected per-chunk progress frames"
+        assert [f["chunk_index"] for f in frames] == list(range(1, len(frames) + 1))
+
+        # Real cumulative input tokens: monotonic and finishing at the sum of the
+        # document's chunk token counts (duplicates the route's own math).
+        expected_chunks = split_markdown_into_chunks(
+            body,
+            chunk_size=30,
+            overlap=5,
+            token_count=count_tokens_local(body),
+        )
+        expected_total = sum(count_tokens_local(c) for c in expected_chunks)
+        assert expected_total > 10, "sanity: the chunk metric must be meaningful"
+        values = [f["processed_tokens"] for f in frames]
+        assert all(b >= a for a, b in zip(values, values[1:])), "must be monotonic"
+        assert values[-1] == expected_total
+
+    @pytest.mark.asyncio
+    async def test_concurrent_chunked_extraction_preserves_results_and_draft(
+        self, seeded_project, client, db_session, monkeypatch, fake_gatherer
+    ):
+        """DOCUMENT_EXTRACTION_CONCURRENCY > 1 must run the same gatherer passes,
+        keep the merged draft deduplicated, and still write NOTHING until confirm."""
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 60)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_SIZE", 30)
+        monkeypatch.setattr(settings, "DOCUMENT_CHUNK_OVERLAP", 5)
+        monkeypatch.setattr(settings, "DOCUMENT_EXTRACTION_CONCURRENCY", 3)
+
+        doc = await _upload_doc(client, seeded_project)
+        proc = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+        assert proc.status_code == 200
+        payload = proc.json()
+        assert payload["mode"] == "chunked"
+        assert payload["chunk_count"] > 1
+
+        # Every chunk was handed to the (fake) gatherer, one pass per chunk.
+        assert len(fake_gatherer["chunks"]) == payload["chunk_count"]
+
+        action_rows = (
+            (await db_session.execute(select(PendingActionModel))).scalars().all()
+        )
+        assert len(action_rows) == 1
+        proposed = action_rows[0].proposed_changes
+        flat_titles = [
+            s["story_title"]
+            for req in proposed["requirements"]
+            for s in req.get("user_stories", [])
+        ]
+        assert len(flat_titles) == len(set(flat_titles)), "duplicates leaked into draft"
+
+        # NOTHING was persisted to requirement tables — draft only!
+        assert await _count(db_session, RequirementModel) == 0
+        assert await _count(db_session, UserStoryModel) == 0
+        assert await _count(db_session, AcceptanceCriteriaModel) == 0
+# =====================================================================
+# DELETE — permanent removal from the knowledge base
+# =====================================================================
+class TestDeleteDocument:
+    @pytest.mark.asyncio
+    async def test_delete_removes_document_and_no_drafts_yet(
+        self, seeded_project, client, db_session
+    ):
+        """Deleting a document without a draft just removes the stored record."""
+        doc = await _upload_doc(client, seeded_project)
+        assert await _count(db_session, DocumentModel) == 1
+
+        resp = await client.delete(f"/api/project/{seeded_project}/documents/{doc['id']}")
+        assert resp.status_code == status.HTTP_200_OK
+        body = resp.json()
+        assert body["status"] == "deleted"
+        assert body["document_id"] == doc["id"]
+        assert body["original_filename"] == doc["original_filename"]
+
+        assert await _count(db_session, DocumentModel) == 0
+        listing = await client.get(f"/api/project/{seeded_project}/documents")
+        assert listing.json() == []
+
+        # Second delete -> 404 (already gone).
+        again = await client.delete(f"/api/project/{seeded_project}/documents/{doc['id']}")
+        assert again.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_delete_discards_staged_draft_but_not_confirmations(
+        self, seeded_project, client, db_session, monkeypatch, fake_gatherer
+    ):
+        """Deleting a processed document drops its DRAFT pending_action."""
+        monkeypatch.setattr(settings, "MAX_CONTEXT_TOKENS", 600)
+        monkeypatch.setattr(settings, "DOCUMENT_BUDGET_FRACTION", 0.6)
+
+        doc = await _upload_doc(client, seeded_project)
+        proc = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+        assert proc.status_code == 200
+        assert await _count(db_session, PendingActionModel) == 1
+
+        resp = await client.delete(f"/api/project/{seeded_project}/documents/{doc['id']}")
+        assert resp.status_code == status.HTTP_200_OK
+
+        # Document AND its draft are both gone.
+        assert await _count(db_session, DocumentModel) == 0
+        assert await _count(db_session, PendingActionModel) == 0
+        # Nothing was ever written to requirement tables (draft-only contract).
+        assert await _count(db_session, RequirementModel) == 0
+        assert await _count(db_session, UserStoryModel) == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_invalid_uuid_and_missing_document(
+        self, seeded_project, client
+    ):
+        bad = await client.delete(f"/api/project/{seeded_project}/documents/not-a-uuid")
+        assert bad.status_code == status.HTTP_400_BAD_REQUEST
+
+        also_bad = await client.delete(
+            f"/api/project/not-a-uuid/documents/not-a-uuid"
+        )
+        assert also_bad.status_code == status.HTTP_400_BAD_REQUEST
+
+        ghost = await client.delete(
+            f"/api/project/{seeded_project}/documents/00000000-0000-0000-0000-000000000000"
+        )
+        assert ghost.status_code == status.HTTP_404_NOT_FOUND

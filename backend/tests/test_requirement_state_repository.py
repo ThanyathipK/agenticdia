@@ -129,7 +129,6 @@ def _user(project_id, seq):
         is_locked=False,
         locked_by=None,
         locked_at=None,
-        lock_reason=None,
     )
 
 
@@ -150,7 +149,6 @@ def _story(project_id, requirement_id, stub, *, status, ticket_code):
         is_locked=False,
         locked_by=None,
         locked_at=None,
-        lock_reason=None,
     )
 
 

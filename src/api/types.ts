@@ -66,7 +66,6 @@ export interface UserStoryPayload {
   is_locked?: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
-  lock_reason?: string | null;
 }
 
 // ----------------------------------------------------------------------------
@@ -84,7 +83,6 @@ export interface RequirementPayload {
   is_locked?: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
-  lock_reason?: string | null;
   user_stories?: UserStoryPayload[];
 }
 
@@ -228,7 +226,6 @@ export interface ArtifactLockMetadata {
   is_locked: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
-  lock_reason?: string | null;
 }
 
 export interface ArtifactLockResponse {
@@ -309,6 +306,13 @@ export interface ProcessDocumentResponse {
   message?: string | null;
 }
 
+export interface DocumentDeleteResponse {
+  status: string;
+  document_id: string;
+  project_id: string;
+  original_filename: string;
+}
+
 // ----------------------------------------------------------------------------
 // PRD preview normalization (`POST /api/prd/convert`)
 //
@@ -347,7 +351,6 @@ export interface PrdSectionPayload {
   is_locked: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
-  lock_reason?: string | null;
   /** Latest version number in prd_section_versions. */
   version_number?: number | null;
   created_at: string;
@@ -417,6 +420,19 @@ export interface PrdVersionDiffPayload {
   to_version: number;
   base_version: number;
   sections: PrdVersionDiffSectionPayload[];
+}
+
+export interface PrdVersionRestorePayload {
+  /** Ledger version number the document was restored from. */
+  restored_from_version: number;
+  /** The NEW version number appended for this restore (append-only ledger). */
+  new_version_number: number;
+  /** Semantic version of the NEW appended snapshot. */
+  semver: string;
+  /** Full PRD markdown after the restore (locked sections preserved). */
+  document_markdown: string;
+  restored_sections: number;
+  preserved_locked_sections: number;
 }
 
 

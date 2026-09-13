@@ -1,9 +1,10 @@
 // VersionHistory
 // Renders the immutable change ledger timeline and diff viewer.
 import { useEffect, useState } from "react";
-import { GitCompare, Plus, Minus, Lock, FileText } from "lucide-react";
+import { GitCompare, Plus, Minus, Lock, FileText, RotateCcw } from "lucide-react";
 import { ProjectState } from "../hooks/useProjectState";
 import { api } from "../api/client";
+import { ConfirmModal } from "./ConfirmModal";
 import type { PrdVersionDiffPayload, PrdVersionDiffSectionPayload } from "../api/types";
 
 /** Renders diff lines: green for additions, red for deletions, grey for context. */
@@ -118,7 +119,16 @@ export function VersionHistory({ state }: { state: ProjectState }) {
     projectId,
     diffBaseVersion,
     setDiffBaseVersion,
+    handleRestoreVersion,
   } = state;
+
+  // Pending restore target: the version number awaiting user confirmation via
+  // the ConfirmModal (null = no restore in flight).
+  const [restoreTarget, setRestoreTarget] = useState<number | null>(null);
+
+  // The ledger is newest-first, so its head is the current document version —
+  // restoring it would be a no-op, hence no Restore button on the first entry.
+  const latestVersion = versionHistory[0]?.version ?? null;
 
   // Auto-select the latest version whenever the history changes — the diff
   // should always compare the most recent snapshot against its predecessor.
@@ -197,14 +207,27 @@ export function VersionHistory({ state }: { state: ProjectState }) {
                 v{v.semVersion || `${v.version}.0`}
               </button>
               <div className="space-y-2">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="text-sm font-bold text-on-surface">Snapshot {v.semVersion || `#${v.version}.0`}</span>
-                  <span className="text-[10.5px] font-mono text-on-surface-variant bg-black/5 px-2 py-0.5 rounded">{v.timestamp}</span>
+                  <span className="text-[10.5px] font-mono text-on-surface-variant bg-black/5 px-2 py-0.5 rounded whitespace-nowrap">{v.timestamp}</span>
                   <ChangeTypeBadge changeType={v.changeType} />
                 </div>
                 <p className="text-xs text-on-surface-variant leading-relaxed">
                   Captured by: <strong className="text-on-surface font-semibold">{v.author}</strong> — <em>"{v.description}"</em>
                 </p>
+                {latestVersion !== null && v.version !== latestVersion && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRestoreTarget(v.version);
+                    }}
+                    className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-primary hover:text-primary/80 bg-primary/5 hover:bg-primary/10 border border-primary/20 rounded-lg px-2.5 py-1 transition-colors cursor-pointer"
+                    title={`Restore the PRD document to v${v.semVersion || `${v.version}.0`}`}
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Restore this version
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -218,24 +241,24 @@ export function VersionHistory({ state }: { state: ProjectState }) {
         )}
 
         {selected && base && (
-          <div className="flex items-center gap-4 mb-4 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-4 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200">
+            <div className="flex items-center gap-2 shrink-0">
               <span className="text-xs text-slate-500">From:</span>
               <span className="text-sm font-bold text-slate-700">v{base.semVersion || `${base.version}.0`}</span>
               <span className="text-xs text-slate-400">({base.timestamp})</span>
             </div>
-            <div className="text-slate-300 text-xs">→</div>
-            <div className="flex items-center gap-2">
+            <div className="text-slate-300 text-xs" aria-hidden="true">→</div>
+            <div className="flex items-center gap-2 shrink-0">
               <span className="text-xs text-slate-500">To:</span>
               <span className="text-sm font-bold text-slate-700">v{selected.semVersion || `${selected.version}.0`}</span>
               <span className="text-xs text-slate-400">({selected.timestamp})</span>
             </div>
             {diff && (
-              <div className="ml-auto flex items-center gap-3 text-xs font-mono">
-                {totalAdded > 0 && <span className="text-emerald-600 font-semibold">+{totalAdded} lines added</span>}
-                {totalRemoved > 0 && <span className="text-red-600 font-semibold">-{totalRemoved} lines removed</span>}
+              <div className="ml-auto flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono">
+                {totalAdded > 0 && <span className="text-emerald-600 font-semibold shrink-0">+{totalAdded} lines added</span>}
+                {totalRemoved > 0 && <span className="text-red-600 font-semibold shrink-0">-{totalRemoved} lines removed</span>}
                 {changedSections > 0 && <span className="text-slate-400">·</span>}
-                {changedSections > 0 && <span className="text-slate-500">{changedSections} sections changed</span>}
+                {changedSections > 0 && <span className="text-slate-500 shrink-0">{changedSections} sections changed</span>}
               </div>
             )}
           </div>
@@ -277,25 +300,42 @@ export function VersionHistory({ state }: { state: ProjectState }) {
           </p>
         )}
 
-        <div className="flex items-center gap-4 mt-6 pt-4 border-t border-black/5 text-[10px] text-on-surface-variant">
-          <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 mt-6 pt-4 border-t border-black/5 text-[10px] text-on-surface-variant">
+          <div className="flex items-center gap-1.5 shrink-0">
             <span className="inline-block w-3 h-3 rounded bg-emerald-50 border border-emerald-300" />
             Added lines
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <span className="inline-block w-3 h-3 rounded bg-red-50 border border-red-300" />
             Removed lines
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <span className="inline-block w-3 h-3 rounded bg-slate-100 border border-slate-300" />
             Unchanged context
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <Lock className="w-3 h-3 text-amber-500" />
             Locked (preserved)
           </div>
         </div>
       </div>
+
+      <ConfirmModal
+        isOpen={restoreTarget !== null}
+        title={`Restore version ${restoreTarget}?`}
+        description={`The PRD document will be restored from snapshot v${
+          versionHistory.find(v => v.version === restoreTarget)?.semVersion || `${restoreTarget}.0`
+        }. This is APPEND-ONLY: the restored content becomes a NEW version and locked sections keep their current content.`}
+        confirmLabel="Restore version"
+        pendingLabel="Restoring..."
+        onConfirm={async () => {
+          if (restoreTarget === null) return false;
+          const ok = await handleRestoreVersion(restoreTarget);
+          if (ok) setRestoreTarget(null);
+          return ok;
+        }}
+        onClose={() => setRestoreTarget(null)}
+      />
     </div>
   );
 }

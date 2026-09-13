@@ -238,10 +238,9 @@ class TestSeedingAndRepository:
         section = await PRDSectionRepository.get_by_key("reviews", project_id, session)
         info = await LockService.lock_artifact(
             "prd_section", section["id"], session,
-            locked_by="user", lock_reason="sign-off received", project_id=project_id,
+            locked_by="user", project_id=project_id,
         )
         assert info["is_locked"] is True
-        assert info["lock_reason"] == "sign-off received"
         status = await LockService.get_lock_status(
             "prd_section", section["id"], session, project_id=project_id
         )
@@ -254,7 +253,7 @@ class TestSeedingAndRepository:
         section = await PRDSectionRepository.get_by_key("reviews", project_id, session)
         await LockService.lock_artifact(
             "prd_section", section["id"], session,
-            locked_by="user", lock_reason="sign-off received", project_id=project_id,
+            locked_by="user", project_id=project_id,
         )
         info = await LockService.unlock_artifact(
             "prd_section", section["id"], session,

@@ -71,7 +71,7 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="w-[320px] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
+        className="w-[320px] max-w-[calc(100vw-1.5rem)] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-label="Create new project"
@@ -81,7 +81,7 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
           <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
             <Plus className="w-4 h-4 text-primary" />
           </div>
-          <div>
+          <div className="min-w-0 flex-1">
             <h3 className="text-[13px] font-bold text-on-surface">New Project</h3>
             <p className="text-[11px] text-on-surface-variant">Name your project to get started</p>
           </div>

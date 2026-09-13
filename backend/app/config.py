@@ -63,11 +63,24 @@ class Settings(BaseSettings):
     # the chunk is joined to the prompt (Option 2 math — never set the chunk near
     # the full context window).
     DOCUMENT_BUDGET_FRACTION: float = 0.6
-    # Target token size of a single document chunk (~10% overlap keeps headings
-    # and context from being clipped at chunk boundaries).
-    DOCUMENT_CHUNK_SIZE: int = 2500
+    # Target token size of a single document chunk (overlap keeps headings and
+    # context from being clipped at chunk boundaries).
+    #
+    # Sizing math (MAX_CONTEXT_TOKENS=8192, gatherer max_tokens=3000, ~700
+    # prompt/system/format tokens): chunk 3500 + overlap 250 = 3750 input tokens
+    # leaves 3750 tokens of headroom for the prompt and the extracted JSON, so a
+    # single pass stays comfortably inside the window. Bigger chunks => fewer
+    # gatherer passes => faster extraction for otherwise-equal document content.
+    DOCUMENT_CHUNK_SIZE: int = 3500
     DOCUMENT_CHUNK_OVERLAP: int = 250
-    # Hard ceiling on how many sequential chunked-lambda runs a single document
+    # Bounded parallelism across chunked gatherer passes. 1 = fully sequential
+    # (safe default for a single-slot local LM Studio model on a 16 GB laptop).
+    # Raise to 2-4 when the inference gateway can serve concurrent requests
+    # (LM Studio multi-slot, or an OpenAI-compatible cloud endpoint) to cut the
+    # wall-clock time of many-chunk documents almost linearly. Results keep their
+    # document order regardless of this value.
+    DOCUMENT_EXTRACTION_CONCURRENCY: int = 1
+    # Hard ceiling on how many chunked gatherer passes a single document
     # extraction may produce. Beyond this the extraction is refused (413) with a
     # clear message instead of silently degrading into a truncation.
     MAX_DOCUMENT_CHUNKS: int = 30

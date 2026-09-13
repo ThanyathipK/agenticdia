@@ -35,7 +35,7 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
         <AlertTriangle className="text-amber-500 mt-0.5" size={20} />
         <div className="flex-1">
           <h3 className="font-semibold text-amber-900">Pending {action.action_type}</h3>
-          <p className="text-sm text-amber-700 mt-1">
+          <p className="text-sm text-amber-700 mt-1 break-words">
             You have a pending change based on: "{action.original_user_message}"
           </p>
           <div className="mt-4 flex gap-2">

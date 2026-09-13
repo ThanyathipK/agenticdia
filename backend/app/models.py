@@ -65,7 +65,6 @@ class ProjectModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -79,7 +78,6 @@ class EpicModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
     status = Column(String(50), nullable=False, default="active", server_default="active")
@@ -98,7 +96,6 @@ class RequirementModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False, server_default="false")
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -122,7 +119,6 @@ class UserStoryModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("project_id", "ticket_code", name="uq_user_stories_project_id_ticket_code"),
@@ -143,7 +139,6 @@ class AcceptanceCriteriaModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
 
 class AuditResultModel(Base):
     __tablename__ = "audit_results"
@@ -170,7 +165,6 @@ class ClarificationQuestionModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -185,7 +179,6 @@ class PRDDocumentModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -259,7 +252,6 @@ class PRDSectionModel(Base):
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 

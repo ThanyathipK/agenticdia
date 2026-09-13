@@ -10,6 +10,7 @@ import type {
   ArtifactLockResponse,
   ConfirmActionResponse,
   ConvertedPrdMarkdownPayload,
+  DocumentDeleteResponse,
   DocumentMarkdownPayload,
   HealthPayload,
   PendingActionPayload,
@@ -17,6 +18,7 @@ import type {
   PrdSectionUpdateResponse,
   PrdVersionDiffPayload,
   PrdVersionPayload,
+  PrdVersionRestorePayload,
   ProcessDocumentResponse,
   ProcessRequirementsRequest,
   ProcessRequirementsResponse,
@@ -142,6 +144,15 @@ export const api = {
       `/api/project/${projectId}/prd-versions/${versionNumber}/diff`,
       baseVersion ? { base_version: baseVersion } : undefined,
     ),
+  // Restore the WHOLE PRD document from a ledger version. APPEND-ONLY: the
+  // backend records the restored content as a NEW version; locked parts keep
+  // their current content. Returns the re-stitched document + new version.
+  restorePrdVersion: (projectId: string, versionNumber: number, restoredBy = 'user') =>
+    post<PrdVersionRestorePayload>(
+      `/api/project/${projectId}/prd-versions/${versionNumber}/restore`,
+      null,
+      { restored_by: restoredBy },
+    ),
 
   // ---- Projects ----------------------------------------------------------
   listProjects: () => get<ProjectSummary[]>('/api/projects'),
@@ -247,6 +258,10 @@ export const api = {
   processDocument: (projectId: string, documentId: string) =>
     post<ProcessDocumentResponse>(
       `/api/project/${projectId}/documents/${documentId}/process`,
+    ),
+  deleteDocument: (projectId: string, documentId: string) =>
+    del<DocumentDeleteResponse>(
+      `/api/project/${projectId}/documents/${documentId}`,
     ),
 
   // ---- PRD file export (LaTeX -> PDF / DOCX) --------------------------------

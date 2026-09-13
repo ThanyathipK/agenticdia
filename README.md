@@ -21,7 +21,7 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 - **Local-first inference** — OpenAI-compatible calls to `http://localhost:1234/v1`; no API keys, no cloud dependency
 - **7-point banking compliance audit** — the Auditor validates against a mandatory banking checklist and raises clarification questions when coverage is incomplete
 - **Automated PRD + Mermaid diagrams** — the Architect synthesizes a full Product Requirements Document and flow diagrams
-- **Document knowledge base & extraction** — upload DOCX / PDF / Markdown / TXT briefs (≤ `MAX_UPLOAD_MB`); they are converted to canonical markdown, then an explicit, user-triggered extraction feeds them through the Gatherer (one pass, or sequential chunks with overlap + SSE progress) into a **single staged pending action** — nothing is written until you confirm
+- **Document knowledge base & extraction** — upload DOCX / PDF / Markdown / TXT briefs (≤ `MAX_UPLOAD_MB`); they are converted to canonical markdown, then an explicit, user-triggered extraction feeds them through the Gatherer (one pass, or chunked passes with overlap, single-tokenized chunking, and bounded concurrency up to `DOCUMENT_EXTRACTION_CONCURRENCY`) into a **single staged pending action** — nothing is written until you confirm. Live chunk progress streams over SSE (`chunk X/N`) without extra project-state downloads
 - **Server-side PRD export** — the generated LaTeX PRD (`template-krungsrinimble.tex`) downloads as **DOCX** (native `python-docx` renderer) and **PDF** (headless LibreOffice, with a Tectonic fallback), so PDF and Word output always match
 - **Version snapshot ledger** — every accepted state bump is an immutable, versioned PRD record with full history
 - **Human-in-the-loop** — LLM changes are staged as *pending actions*; you confirm or cancel before anything is written to the database
@@ -289,8 +289,9 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `LM_STUDIO_DISABLE_THINKING` | `true` | Sends `enable_thinking: false` to Qwen3.x reasoning models so structured-JSON generation (PRD / audit) never exhausts `max_tokens` on chain-of-thought |
 | `MAX_UPLOAD_MB` | `25` | Document upload size gate — the **only** size limit; the full converted markdown is always persisted regardless of size |
 | `DOCUMENT_BUDGET_FRACTION` | `0.6` | Fraction of `MAX_CONTEXT_TOKENS` reserved per document-extraction chunk |
-| `DOCUMENT_CHUNK_SIZE` / `DOCUMENT_CHUNK_OVERLAP` | `2500` / `250` | Token size of one extraction chunk and its ~10% overlap (keeps headings from being clipped) |
-| `MAX_DOCUMENT_CHUNKS` | `30` | Hard ceiling on gatherer passes per document extraction; beyond this the extraction is refused with HTTP 413 |
+| `DOCUMENT_CHUNK_SIZE` / `DOCUMENT_CHUNK_OVERLAP` | `3500` / `250` | Token size of one extraction chunk and its overlap (keeps headings from being clipped). Bigger chunks → fewer gatherer passes → faster extraction for the same content |
+| `DOCUMENT_EXTRACTION_CONCURRENCY` | `1` | Bounded parallel gatherer passes for chunked document extraction. `1` = sequential (safe for a single-slot local model). Raise to `2-4` when the inference gateway serves concurrent requests (LM Studio multi-slot / cloud OpenAI-compatible endpoint) to cut wall-clock time for many-chunk documents; results keep document order regardless |
+| `MAX_DOCUMENT_CHUNKS` | `30` | Hard ceiling on gatherer passes per document extraction; beyond this the extraction is refused with HTTP 413 (with 3500-token chunks this covers ~105k-token documents) |
 | `RATE_LIMIT_ENABLED` | `true` | Master switch for in-process sliding-window rate limiting on LLM-facing endpoints |
 | `RATE_LIMIT_CHAT_LIMIT` / `RATE_LIMIT_CHAT_WINDOW` | `30` / `60` | Max `/api/chat` requests per client IP per window (seconds) |
 | `RATE_LIMIT_WORKFLOW_LIMIT` / `RATE_LIMIT_WORKFLOW_WINDOW` | `60` / `60` | Max workflow-endpoint requests (`process-requirements`, `workflow-router`, `intent-detector`, `requirement-matcher`) per client IP per window (seconds) |
@@ -430,6 +431,8 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `GET` | `/api/project/{project_id}/prd-versions` | List all PRD versions |
 | `GET` | `/api/project/{project_id}/prd-versions/latest` | Latest PRD version |
 | `GET` | `/api/project/{project_id}/prd-versions/{version_number}` | A specific PRD version |
+| `GET` | `/api/project/{project_id}/prd-versions/{version_number}/diff` | Section-level line diff of one version vs an earlier base version |
+| `POST` | `/api/project/{project_id}/prd-versions/{version_number}/restore` | Restore the WHOLE PRD document from a version — APPEND-ONLY (records a NEW version; locked parts preserved) |
 | `GET` | `/api/project/{project_id}/prd/sections` | List the nine editable PRD parts (seeds them on first access) |
 | `GET` | `/api/project/{project_id}/prd/sections/{section_key}` | Fetch one PRD part (content + lock + ownership + review metadata) |
 | `PATCH` | `/api/project/{project_id}/prd/sections/{section_key}` | Edit ONE PRD part — appends an immutable per-part version and re-stitches the document |
@@ -468,15 +471,16 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `POST` | `/api/project/{project_id}/documents/upload` | Upload a `.docx` / `.pdf` / `.md` / `.txt` file (multipart `file`, ≤ `MAX_UPLOAD_MB`) into the project's knowledge base; it is converted to canonical markdown. **Stores source material only — no requirements are created.** A scanned/no-text PDF is kept as a `failed` record with an explicit needs-OCR message (400 bad format, 413 oversized, 422 unreadable PDF) |
 | `GET` | `/api/project/{project_id}/documents` | List the project's uploaded documents (metadata, newest first) |
 | `GET` | `/api/project/{project_id}/documents/{document_id}` | Full canonical markdown for one document (never truncated) |
+| `DELETE` | `/api/project/{project_id}/documents/{document_id}` | Permanently remove an uploaded document (and any still-unconfirmed DRAFT review staged from it) from the knowledge base. Already-confirmed requirements are NOT affected (404 unknown document) |
 | `POST` | `/api/project/{project_id}/documents/{document_id}/process` | Explicit, user-triggered extraction: feeds the document through the Gatherer in one pass (if it fits the document budget) or sequential overlapping chunks (SSE `document_extraction_progress` events), de-duplicates across chunks, and stages **one** `INSERT_CHUNKED_REQUIREMENTS` pending action — applied atomically with a single version bump on confirm (400 on failed/OCR doc, 413 too large, 502 gatherer failure) |
 
 ### Locking & Pending Actions
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock` | Generic lock. `artifact_type ∈ {project, epic, requirement, user_story, acceptance_criteria, clarification_question, prd_document}`; body `{locked_by?, lock_reason?}` |
+| `POST` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock` | Generic lock. `artifact_type ∈ {project, epic, requirement, user_story, acceptance_criteria, clarification_question, prd_document}`; body `{locked_by?}` |
 | `POST` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/unlock` | Generic unlock (same body) |
-| `GET` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock-status` | Read lock metadata (`is_locked`, `locked_by`, `locked_at`, `lock_reason`) |
+| `GET` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock-status` | Read lock metadata (`is_locked`, `locked_by`, `locked_at`) |
 | `GET` | `/api/pending-actions/{project_id}` | List pending actions awaiting confirmation |
 | `POST` | `/api/confirm-action/{action_id}?project_id=...` | Apply a staged AI change to the database |
 | `POST` | `/api/cancel-action/{action_id}?project_id=...` | Discard a staged AI change |

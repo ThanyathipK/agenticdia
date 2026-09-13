@@ -28,7 +28,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
   return (
     <div className="space-y-8 animate-fadeIn">
       {/* Styled markdown content rendering */}
-      <article className="bg-white p-6 md:p-10 rounded-3xl border border-outline shadow-sm prose prose-neutral max-w-none">
+      <article className="bg-white p-4 sm:p-6 md:p-10 rounded-3xl border border-outline shadow-sm prose prose-neutral max-w-none min-w-0">
         
         {/* Header decorative accent */}
         <div className="h-1 w-24 bg-primary mb-6 rounded-full no-print"></div>
@@ -51,18 +51,18 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                   key={section.id} 
                   className={`relative group pt-8 first:pt-0 transition-all duration-200 ${
                     isEditing 
-                      ? 'bg-slate-50/50 p-6 rounded-2xl border border-primary/20 shadow-sm' 
+                      ? 'bg-slate-50/50 p-3.5 sm:p-6 rounded-2xl border border-primary/20 shadow-sm' 
                       : 'border-transparent hover:bg-slate-50/20 px-2 rounded-2xl'
                   }`}
                 >
                   {/* Header Area with Title & Edit button */}
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2.5 mb-5">
-                    <h3 className="text-xs font-bold font-mono text-primary uppercase tracking-wider flex items-center gap-2">
-                      <span className="opacity-40 font-semibold text-[10px]">#0{sectionIdx + 1}</span>
-                      <span>{safeTitle}</span>
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-100 pb-2.5 mb-5">
+                    <h3 className="text-xs font-bold font-mono text-primary uppercase tracking-wider flex items-center gap-2 min-w-0 break-words">
+                      <span className="opacity-40 font-semibold text-[10px] shrink-0">#0{sectionIdx + 1}</span>
+                      <span className="min-w-0">{safeTitle}</span>
                     </h3>
                     
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       {/* Per-part ownership + review badges */}
                       {(() => {
                         const lock = sectionLocks[section.id];
@@ -158,8 +158,8 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                         className="w-full text-sm font-sans text-slate-800 bg-white border border-slate-200 rounded-2xl p-4.5 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all resize-y custom-scrollbar shadow-inner min-h-[120px]"
                         placeholder="Enter section content in markdown..."
                       />
-                      <div className="flex items-center justify-between pt-3 border-t border-slate-100 mt-2">
-                        <p className="text-[11px] text-slate-500 italic">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100 mt-2">
+                        <p className="text-[11px] text-slate-500 italic min-w-0">
                           Saved & versioned per part — lock an approved part and the Architect will never overwrite it.
                         </p>
                         <div className="flex items-center gap-2">
@@ -183,7 +183,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                       </div>
                     </div>
                   ) : (
-                    <div className="prose prose-slate max-w-none pb-4">
+                    <div className="prose prose-slate max-w-none pb-4 min-w-0 break-words">
                       {parseAndRenderMarkdown(safeContent)}
                     </div>
                   )}

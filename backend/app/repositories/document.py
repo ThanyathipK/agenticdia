@@ -92,3 +92,27 @@ class DocumentRepository:
         await session.flush()
         await session.refresh(doc)
         return serialize_document(doc)
+
+    @staticmethod
+    async def delete(document_id: str, project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
+        """Hard-delete an uploaded document, scoped to the owning project.
+
+        Returns the removed record (for logging/audit) or ``None`` when the
+        document does not exist. Watch out: any DRAFT merge preview already
+        staged from this document (a pending_action whose
+        ``proposed_changes._document_ref.document_id`` matches) is handled by
+        the DELETE route, not here.
+        """
+        did = as_uuid(document_id)
+        pid = as_uuid(project_id)
+        stmt = select(DocumentModel).where(
+            DocumentModel.id == did,
+            DocumentModel.project_id == pid,
+        )
+        result = await session.execute(stmt)
+        doc = result.scalar_one_or_none()
+        if not doc:
+            return None
+        await session.delete(doc)
+        await session.flush()
+        return serialize_document(doc)

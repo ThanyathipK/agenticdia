@@ -156,6 +156,9 @@ export interface RequirementStore {
   loadSectionLocks: (projId: string) => Promise<void>;
   /** Fetch the immutable PRD version ledger (AI + manual snapshots). */
   loadVersionHistory: (projId: string) => Promise<void>;
+  /** Restore the whole PRD document from a ledger version (append-only;
+   *  locked parts are preserved). Resolves to true on success. */
+  handleRestoreVersion: (versionNumber: number) => Promise<boolean>;
   /** Lock/unlock ONE PRD part (blocks edits + AI regeneration when locked). */
   handleToggleSectionLock: (sectionId: string) => Promise<void>;
   sectionLocks: Record<string, PrdSectionLockState>;
@@ -388,6 +391,31 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     }
   };
 
+  // Restore the WHOLE PRD document from a ledger version. The backend is
+  // append-only: the restored content becomes a NEW version (history is never
+  // rewritten) and locked parts keep their current content. On success the
+  // store document, preview copy, current version and ledger all refresh.
+  // Resolves to true only on success so ConfirmModal closes on success.
+  const handleRestoreVersion = async (versionNumber: number): Promise<boolean> => {
+    if (!projectId) return false;
+    setSyncStatus(`Restoring version ${versionNumber}...`);
+    try {
+      const res = await api.restorePrdVersion(projectId, versionNumber);
+      setPrdMarkdown(res.document_markdown);
+      setPrdMarkdownDisplay(res.document_markdown);
+      setCurrentVersion(res.new_version_number);
+      // Reload the ledger + per-part metadata so the timeline shows the NEW
+      // appended version and section lock/version info stays accurate.
+      await Promise.all([loadVersionHistory(projectId), loadSectionLocks(projectId)]);
+      setSyncStatus(`Restored from version ${versionNumber} — new version ${res.new_version_number} created.`);
+      return true;
+    } catch (err) {
+      handleError(`Failed to restore version ${versionNumber}.`, err);
+      setSyncStatus('Restore failed.');
+      return false;
+    }
+  };
+
   const handleToggleSectionLock = async (sectionId: string) => {
     if (!projectId) return;
     const current = sectionLocks[sectionId];
@@ -493,6 +521,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     handleSaveSection,
     loadSectionLocks,
     loadVersionHistory,
+    handleRestoreVersion,
     handleToggleSectionLock,
     sectionLocks,
   };

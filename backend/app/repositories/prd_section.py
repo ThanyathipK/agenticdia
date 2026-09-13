@@ -91,7 +91,6 @@ class PRDSectionRepository:
             is_locked=bool(data.get("is_locked", False)),
             locked_by=data.get("locked_by"),
             locked_at=data.get("locked_at"),
-            lock_reason=data.get("lock_reason"),
         )
         session.add(section)
         await session.flush()

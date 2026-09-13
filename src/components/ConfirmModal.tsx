@@ -70,7 +70,7 @@ export function ConfirmModal({
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="w-[320px] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
+        className="w-[320px] max-w-[calc(100vw-1.5rem)] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -80,9 +80,9 @@ export function ConfirmModal({
           <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${danger ? 'bg-red-50' : 'bg-primary/10'}`}>
             <AlertTriangle className={`w-4 h-4 ${danger ? 'text-red-500' : 'text-primary'}`} />
           </div>
-          <div>
-            <h3 className="text-[13px] font-bold text-on-surface">{title}</h3>
-            <p className="text-[11px] text-on-surface-variant mt-0.5 leading-relaxed">{description}</p>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[13px] font-bold text-on-surface break-words">{title}</h3>
+            <p className="text-[11px] text-on-surface-variant mt-0.5 leading-relaxed break-words">{description}</p>
           </div>
         </div>
 

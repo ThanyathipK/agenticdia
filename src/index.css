@@ -169,6 +169,17 @@ body.is-resizing {
   }
 }
 
+/* Below `lg` the fixed sidebar-drawer toggle floats at the top-left of the
+   content area (left-3, 36px wide). Give the stacked chat panel header and the
+   projects dashboard hero matching left clearance so their content never hides
+   underneath the button. */
+@media (max-width: 1023px) {
+  #chat-panel-header,
+  #projects-dashboard-content {
+    padding-left: 3.5rem;
+  }
+}
+
 @media print {
   /* Hide all interactive and layout items that are not part of the printed content */
   header,

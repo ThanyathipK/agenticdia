@@ -21,6 +21,7 @@ import { ProjectState } from '../hooks/useProjectState';
 import { ChatEmptyState } from './ChatEmptyState';
 import { Tooltip } from './Tooltip';
 import { highlightMatch } from '../utils/highlight';
+import { renderInlineFormatting } from './MarkdownRenderer';
 
 export function ChatPanel({ state }: { state: ProjectState }) {
   const {
@@ -163,7 +164,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
   return (
     <section className="chat-panel flex flex-col bg-surface border-r border-outline relative z-10" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${state.splitPct}%` }}>
       {/* Section Header */}
-      <div className="p-3 md:p-4 border-b border-outline flex items-center justify-between bg-glass-bg backdrop-blur-md">
+      <div id="chat-panel-header" className="p-3 md:p-4 border-b border-outline flex items-center justify-between bg-glass-bg backdrop-blur-md">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
             <Network className="text-primary w-4.5 h-4.5" />
@@ -188,8 +189,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
         </span>
       </div>
 
-      {/* Chat Logs scroll list */}
-      <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar pb-32">
+      {/* Chat Logs scroll list — extra bottom padding on <sm screens because
+          the action buttons stack into two rows and the composer grows taller. */}
+      <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-6 custom-scrollbar pb-44 sm:pb-32">
         {messages.length === 0 && (
           <ChatEmptyState
             disabled={!projectId || isLoading || isProcessing}
@@ -216,7 +218,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                   animate={{ opacity: 1, y: 0 }}
                   className="mx-auto max-w-sm text-center py-2"
                 >
-                  <span className="inline-block px-3 py-1 bg-black/5 rounded-full text-[10.5px] font-mono text-on-surface-variant border border-black/5">
+                  <span className="inline-block max-w-full px-3 py-1 bg-black/5 rounded-full text-[10.5px] font-mono text-on-surface-variant border border-black/5 break-words">
                     {highlightMatch(msg.content, projectSearchQuery)}
                   </span>
                 </motion.div>
@@ -251,8 +253,8 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                       ? 'bg-primary text-on-primary border-primary rounded-tr-none' 
                       : 'bg-primary/5 text-on-surface border-primary/15 rounded-tl-none'
                   }`}>
-                    <p className="whitespace-pre-line">
-                      {highlightMatch(msg.content, projectSearchQuery, bubbleHighlightClass)}
+                    <p className="whitespace-pre-line break-words">
+                      {renderInlineFormatting(msg.content, projectSearchQuery, bubbleHighlightClass)}
                     </p>
                   </div>
 
@@ -277,16 +279,16 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                         className="space-y-3 relative z-10"
                       >
                         {msg.auditResultSnapshot.clarification_questions.map((q, idx) => (
-                          <div key={idx} className="space-y-1.5 bg-black/5 p-3 rounded-xl border border-black/5">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-1.5 py-0.5 rounded">
+                          <div key={idx} className="space-y-1.5 bg-black/5 p-3 rounded-xl border border-black/5 min-w-0">
+                            <div className="flex flex-wrap items-center justify-between gap-1.5">
+                              <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-1.5 py-0.5 rounded break-words">
                                 {q.checklist_category}
                               </span>
-                              <span className="text-[10px] font-mono text-on-surface-variant font-semibold">
+                              <span className="text-[10px] font-mono text-on-surface-variant font-semibold break-words min-w-0 text-right">
                                 Target: {q.target_user_story_id}
                               </span>
                             </div>
-                            <p className="text-[12.5px] font-medium text-on-surface leading-tight">
+                            <p className="text-[12.5px] font-medium text-on-surface leading-tight break-words">
                               {q.question_text}
                             </p>
                             <input
@@ -347,7 +349,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.15 }}
             onClick={scrollToLatest}
-            className="absolute left-1/2 -translate-x-1/2 bottom-[150px] z-30 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-surface border border-outline shadow-lg text-[11px] font-bold text-on-surface hover:border-primary/40 hover:text-primary transition-colors cursor-pointer"
+            className="absolute left-1/2 -translate-x-1/2 bottom-[190px] sm:bottom-[150px] z-30 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-surface border border-outline shadow-lg text-[11px] font-bold text-on-surface hover:border-primary/40 hover:text-primary transition-colors cursor-pointer"
           >
             <ArrowDown className="w-3.5 h-3.5" />
             <span>Jump to latest</span>
@@ -357,7 +359,8 @@ export function ChatPanel({ state }: { state: ProjectState }) {
 
       {/* Conversational Fixed Input Container */}
       <div className="absolute bottom-0 w-full p-4 glass-panel border-t border-outline bg-white/90 z-20 space-y-3">
-        {/* Agent Actions Row */}
+        {/* Agent Actions Row — buttons stack on very narrow panels instead of
+            overflowing; the min-width keeps each label on one line. */}
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleValidateRequirements}
@@ -427,7 +430,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
               }
             }}
             placeholder={isLoading || isProcessing ? 'Processing...' : 'Describe a change or write feedback… (Shift+Enter for a new line)'}
-            className="flex-1 bg-transparent border-none focus:ring-0 font-body-sm text-sm placeholder:text-on-surface-variant/55 text-on-surface outline-none resize-none max-h-40 leading-relaxed py-1 custom-scrollbar"
+            className="flex-1 min-w-0 bg-transparent border-none focus:ring-0 font-body-sm text-sm placeholder:text-on-surface-variant/55 text-on-surface outline-none resize-none max-h-40 leading-relaxed py-1 custom-scrollbar"
           />
           {isLoading || isProcessing ? (
             <Tooltip label="Stop generating" side="top">

@@ -86,7 +86,6 @@ async def lock_artifact(
             artifact_id=artifact_id,
             session=session,
             locked_by=payload.locked_by or "user",
-            lock_reason=payload.lock_reason,
             project_id=project_id
         )
         await event_manager.publish(project_id, "artifact_locked", {

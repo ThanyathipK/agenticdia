@@ -107,16 +107,16 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
     <div className="space-y-6 animate-fadeIn">
       
       {/* Visual SVG diagram view with interactive controls */}
-      <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm overflow-hidden relative">
-        <div className="flex items-center justify-between mb-4 pb-3 border-b border-black/5">
-          <div className="flex items-center gap-2">
-            <Network className="text-primary w-5 h-5" />
-            <div>
+      <div className="bg-white rounded-3xl border border-outline p-4 sm:p-6 shadow-sm overflow-hidden relative">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-4 pb-3 border-b border-black/5">
+          <div className="flex items-center gap-2 min-w-0">
+            <Network className="text-primary w-5 h-5 shrink-0" />
+            <div className="min-w-0">
               <h3 className="font-bold text-sm text-on-surface">Interactive System Flowchart</h3>
-              <p className="text-[11px] text-on-surface-variant font-mono">Rendering: flowchart TD • Derived from the PRD</p>
+              <p className="text-[11px] text-on-surface-variant font-mono break-words">Rendering: flowchart TD • Derived from the PRD</p>
             </div>
           </div>
-          <div className="flex bg-black/5 rounded-xl p-1">
+          <div className="flex bg-black/5 rounded-xl p-1 shrink-0">
             <Tooltip label="Zoom out" side="bottom">
               <button
                 onClick={() => setDiagramZoom(prev => Math.max(70, prev - 15))}
@@ -141,9 +141,13 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
 
         {/* Interactive Flowchart Stage — derived from the PRD dataset */}
         <div 
-          className="w-full flex items-center justify-center p-6 bg-background border border-outline rounded-2xl overflow-x-auto transition-transform duration-300"
-          style={{ transform: `scale(${diagramZoom / 100})`, transformOrigin: 'top center' }}
+          className="w-full flex items-center justify-center p-4 sm:p-6 bg-background border border-outline rounded-2xl overflow-x-auto custom-scrollbar"
         >
+          {/* Inner wrapper carries the zoom transform so the scroll container keeps full width */}
+          <div
+            className="min-w-0 transition-transform duration-300"
+            style={{ transform: `scale(${diagramZoom / 100})`, transformOrigin: 'top center' }}
+          >
           {hasPrdInfo ? (
           <svg className="w-full max-w-2xl font-mono" viewBox={`0 0 650 ${viewH}`} fill="none">
             {/* Arrowhead marker */}
@@ -215,7 +219,7 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
 
           </svg>
           ) : (
-          <div className="p-10 m-2 border border-dashed border-outline rounded-2xl flex flex-col items-center justify-center gap-1.5 text-center">
+          <div className="p-6 sm:p-10 m-2 border border-dashed border-outline rounded-2xl flex flex-col items-center justify-center gap-1.5 text-center">
             <FileCode className="w-7 h-7 text-primary/40" />
             <span className="text-sm font-bold text-on-surface">No info yet</span>
             <p className="text-xs text-on-surface-variant italic max-w-sm">
@@ -223,6 +227,7 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
             </p>
           </div>
           )}
+          </div>
         </div>
 
         <div className="mt-4 p-4.5 bg-black/5 rounded-2xl border border-black/5 space-y-2">

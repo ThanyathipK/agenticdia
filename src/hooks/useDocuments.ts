@@ -26,6 +26,13 @@ export interface DocumentsDeps {
   projectId: string | null;
   pendingActions: PendingActionPayload[];
   setPendingActions: Dispatch<SetStateAction<PendingActionPayload[]>>;
+  /**
+   * SSE bridge supplied by the composition root: `useProjectSync` forwards
+   * `document_extraction_progress` frames here so the progress readout updates
+   * LIVE (chunk X/N) during long extractions instead of hanging on the
+   * optimistic placeholder set when processing starts.
+   */
+  registerLiveProgress?: (fn: (p: DocumentExtractionProgress | null) => void) => void;
 }
 
 export interface UseDocumentsResult {
@@ -33,10 +40,13 @@ export interface UseDocumentsResult {
   isLoadingDocuments: boolean;
   isUploading: boolean;
   processingDocId: string | null;
+  deletingDocId: string | null;
   extractionProgress: DocumentExtractionProgress | null;
   lastDraftMessage: string | null;
   handleUploadDocument: (file: File) => Promise<void>;
   handleProcessDocument: (doc: UploadedDocumentPayload) => Promise<void>;
+  /** Permanently removes a document; resolves to true on success. */
+  handleDeleteDocument: (doc: UploadedDocumentPayload) => Promise<boolean>;
   refreshDocuments: () => Promise<void>;
 }
 
@@ -45,6 +55,7 @@ export function useDocuments(deps: DocumentsDeps): UseDocumentsResult {
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [processingDocId, setProcessingDocId] = useState<string | null>(null);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [extractionProgress, setExtractionProgress] = useState<DocumentExtractionProgress | null>(null);
   const [lastDraftMessage, setLastDraftMessage] = useState<string | null>(null);
   const prevPendingCount = useRef<number>(0);
@@ -69,6 +80,17 @@ export function useDocuments(deps: DocumentsDeps): UseDocumentsResult {
   useEffect(() => {
     void refreshDocuments();
   }, [refreshDocuments]);
+
+  // SSE live-progress bridge. `useProjectState` wires a stable setter here that
+  // `useProjectSync`'s SSE handler drives with document_extraction_progress
+  // frames, so the DocumentLibrary's "chunk X/N" readout advances in real time
+  // (the old optimist placeholder stayed at 0/N for the whole run).
+  useEffect(() => {
+    if (!deps.registerLiveProgress) return;
+    deps.registerLiveProgress(setExtractionProgress);
+    return () => deps.registerLiveProgress?.(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deps.registerLiveProgress]);
 
   // When a draft is resolved (confirm or cancel removes it from the shared
   // pendingActions), refresh so extraction_status chips stay truthful.
@@ -137,15 +159,34 @@ export function useDocuments(deps: DocumentsDeps): UseDocumentsResult {
     }
   }, [deps, processingDocId, refreshDocuments]);
 
+  const handleDeleteDocument = useCallback(async (doc: UploadedDocumentPayload) => {
+    if (!deps.projectId || deletingDocId) return false;
+    setDeletingDocId(doc.id);
+    try {
+      await api.deleteDocument(deps.projectId, doc.id);
+      // The deleted doc's DRAFT pending_action was discarded server-side; the
+      // next SSE sync / project refresh will evict it from the pending panel.
+      await refreshDocuments();
+      return true;
+    } catch (err) {
+      handleError('Failed to remove the document.', err);
+      return false;
+    } finally {
+      setDeletingDocId(null);
+    }
+  }, [deps.projectId, deletingDocId, refreshDocuments]);
+
   return {
     documents,
     isLoadingDocuments,
     isUploading,
     processingDocId,
+    deletingDocId,
     extractionProgress,
     lastDraftMessage,
     handleUploadDocument,
     handleProcessDocument,
+    handleDeleteDocument,
     refreshDocuments,
   };
 }

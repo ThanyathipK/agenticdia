@@ -41,8 +41,11 @@ from app.schemas import (
     ConversationMessageResponse,
     PRDVersionResponse,
     PrdVersionDiffResponse,
+    PrdVersionRestoreResponse,
     PRDExportResponse,
 )
+from app.prd_section_service import ensure_sections_seeded, assemble_document_markdown
+from app.repositories.prd_section import PRDSectionRepository
 from app.prompt_loader import load_prd_template, load_prd_latex_template
 from app.event_manager import event_manager
 
@@ -979,3 +982,136 @@ async def get_prd_version_by_number(project_id: str, version_number: int, sessio
     if not version:
         raise HTTPException(status_code=404, detail=f"PRD version {version_number} not found for this project")
     return version
+
+
+@router.post(
+    "/api/project/{project_id}/prd-versions/{version_number}/restore",
+    response_model=PrdVersionRestoreResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def restore_prd_version(
+    project_id: str,
+    version_number: int,
+    restored_by: str = "user",
+    session: AsyncSession = Depends(get_db),
+) -> PrdVersionRestoreResponse:
+    """Restore the whole PRD document from a ledger version.
+
+    APPEND-ONLY: the snapshot's content becomes a NEW version — history is
+    never rewritten. Lock contract: the restore flows through the SAME part
+    mutation path as manual edits, so project > document > section locks are
+    all enforced and locked parts keep their current content untouched.
+    """
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    from app.lock_service import LockService, ArtifactLockError
+
+    # Coarse lock: the project itself is frozen -> no restore.
+    try:
+        lock_info = await LockService.get_lock_status("project", project_id, session, project_id=project_id)
+        LockService.raise_if_locked("project", project_id, lock_info)
+    except ArtifactLockError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    target = await PRDVersionRepository.get_by_version_number(project_id, version_number, session)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"PRD version {version_number} not found for this project")
+
+    # The PRD document lock is the coarse switch: a locked document freezes
+    # every part, so a restore must be refused as well.
+    from app.repositories.prd import PRDDocumentRepository
+    docs = await PRDDocumentRepository.get_by_project(project_id, session)
+    if docs:
+        try:
+            doc_lock_info = await LockService.get_lock_status(
+                "prd_document", docs[0]["id"], session, project_id=project_id
+            )
+            LockService.raise_if_locked(
+                "prd_document", docs[0]["id"], doc_lock_info,
+                message=f"The PRD document is locked by {doc_lock_info.get('locked_by') or 'unknown'}. "
+                        "Unlock the document before restoring a version.",
+            )
+        except ArtifactLockError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError:
+            pass  # document row vanished — nothing to enforce
+
+    # Seed the nine lockable parts from the CURRENT document first so the
+    # restore always has rows to write into (no-op when they already exist).
+    state = await RequirementStateRepository.get_by_project_id(project_id, session)
+    current_document = (state or {}).get("generated_prd") or target["generated_prd"]
+    sections = await ensure_sections_seeded(project_id, session, source_markdown=current_document)
+
+    # Which stored part holds which content + which are locked. Locked parts
+    # keep their current content — the ledger proves the lock was honoured.
+    current_map = {s["section_key"]: (s.get("content") or "") for s in sections}
+    locked_map = {s["section_key"]: bool(s.get("is_locked")) for s in sections}
+    id_map = {s["section_key"]: s["id"] for s in sections}
+
+    from app.prd_section_service import split_markdown_sections
+    from app.version_service import record_prd_version
+
+    restored_sections = 0
+    preserved_locked = 0
+    for part in split_markdown_sections(target["generated_prd"] or ""):
+        key = part["section_key"]
+        target_content = part["content"].strip()
+        if locked_map.get(key):
+            preserved_locked += 1
+            continue
+        stored = current_map.get(key)
+        if stored is not None and stored.strip() == target_content:
+            continue  # identical — no section version churn for unchanged parts
+        updated = await PRDSectionRepository.update_content(
+            id_map[key], project_id, target_content, session,
+            changed_by=restored_by or "user",
+            change_summary=f"Restored from PRD version {version_number}.",
+        )
+        if updated is not None:
+            restored_sections += 1
+
+    # Re-stitch the document from the parts table (locked parts included with
+    # their preserved content) and record it as a NEW immutable ledger version.
+    document_markdown = await assemble_document_markdown(project_id, session)
+    try:
+        new_version = await record_prd_version(
+            project_id, session,
+            generated_prd=document_markdown,
+            generated_by=restored_by or "user",
+            change_type="manual",
+            change_summary=f"Restored document from version {version_number}.",
+        )
+    except Exception as ver_err:  # never block a valid restore on ledger bookkeeping
+        logger.warning("[PRD VERSIONS] Failed to record restore version: %s", ver_err)
+        new_version = {"version_number": version_number, "semver": ""}
+
+    # Persist the restored document as the requirement state's current PRD.
+    await RequirementStateRepository.save_or_update(project_id, {
+        "generated_prd": document_markdown,
+    }, session)
+
+    await event_manager.publish(project_id, "prd_version_restored", {
+        "project_id": project_id,
+        "restored_from_version": version_number,
+        "new_version_number": new_version.get("version_number"),
+    })
+
+    logger.info(
+        "[PRD VERSIONS] Restored project %s from v%d -> new v%s (restored=%d preserved_locked=%d)",
+        project_id, version_number, new_version.get("version_number"),
+        restored_sections, preserved_locked,
+    )
+
+    return PrdVersionRestoreResponse(
+        restored_from_version=version_number,
+        new_version_number=new_version.get("version_number") or version_number,
+        semver=new_version.get("semver") or "",
+        document_markdown=document_markdown,
+        restored_sections=restored_sections,
+        preserved_locked_sections=preserved_locked,
+    )

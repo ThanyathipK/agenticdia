@@ -32,8 +32,10 @@ import {
   Pin,
   PinOff,
   Menu,
+  ChevronDown,
 } from 'lucide-react';
 import { useProjectState } from '../hooks/useProjectState';
+import type { WorkspaceTab } from '../hooks/useWorkspaceUi';
 import { ChatPanel } from './ChatPanel';
 import { PRDEditor } from './PRDEditor';
 import { ArchitectureFlows } from './ArchitectureFlows';
@@ -46,6 +48,16 @@ import { ConfirmModal } from './ConfirmModal';
 import { ProjectsDashboard } from './ProjectsDashboard';
 import { Tooltip, TooltipBubble } from './Tooltip';
 import { highlightMatch } from '../utils/highlight';
+
+// Workspace tabs (PRD Documents / Requirements / Flows / Versions). Declared
+// once and shared by both the desktop pill navigation and the tablet/mobile
+// dropdown selector so the active-tab behavior can never drift apart.
+const TAB_ITEMS: ReadonlyArray<{ id: WorkspaceTab; label: string; icon: typeof FileText }> = [
+  { id: 'prd', label: 'PRD Documents', icon: FileText },
+  { id: 'trace', label: 'Requirements', icon: GitBranch },
+  { id: 'flows', label: 'Flows', icon: Network },
+  { id: 'history', label: 'Versions', icon: Clock },
+];
 
 export default function Dashboard() {
   const state = useProjectState();
@@ -92,7 +104,6 @@ export default function Dashboard() {
     lockedRequirements,
     handleLockRequirement,
     handleUnlockRequirement,
-    currentVersion,
     documents,
   } = state;
 
@@ -106,6 +117,12 @@ export default function Dashboard() {
   // drawer via a hamburger button in the top-left, so it never eats horizontal
   // space on small screens.
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
+  // Tablet/mobile tab selector (<lg): the horizontal pill is replaced by a compact
+  // active-tab dropdown. Selection still routes through the usual setActiveTab
+  // handler; this state only owns the dropdown's open/close + outside-click/Escape
+  // dismissal (same pattern as the dashboard's dropdowns).
+  const [mobileTabsOpen, setMobileTabsOpen] = useState<boolean>(false);
+  const mobileTabsRef = useRef<HTMLDivElement>(null);
   const collapsed = historyCollapsed && !mobileSidebarOpen;
   const expanded = !collapsed;
 
@@ -114,6 +131,26 @@ export default function Dashboard() {
       searchInputRef.current?.focus();
     }
   }, [isSearchOpen]);
+
+  // Close the tablet/mobile tab dropdown on outside click or Escape so it never
+  // lingers over the document (matches the dashboard dropdown dismissal pattern).
+  useEffect(() => {
+    if (!mobileTabsOpen) return;
+    const handlePointer = (e: MouseEvent) => {
+      if (mobileTabsRef.current && !mobileTabsRef.current.contains(e.target as Node)) {
+        setMobileTabsOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileTabsOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointer);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('mousedown', handlePointer);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [mobileTabsOpen]);
 
   const handleToggleProjectSearch = () => {
     // Expanding the sidebar first guarantees the input row is visible.
@@ -132,6 +169,37 @@ export default function Dashboard() {
   // Pinned chats sort first; the list below renders them as two clearly
   // separated sections ("Pinned" vs "Recent Projects") instead of one blend.
   const visibleProjects = [...projects].sort((a, b) => Number(!!b.is_pinned) - Number(!!a.is_pinned));
+
+  // Current tab metadata, reused by the tablet/mobile dropdown trigger.
+  const currentTab = TAB_ITEMS.find((t) => t.id === activeTab) ?? TAB_ITEMS[0];
+
+  // DOCX/PDF export buttons — shared by the desktop pill and the tablet/mobile
+  // bar so both stay identical (same handlers, same style; only sizing varies).
+  const exportButtons = (btnCls: string) => (
+    <>
+      <Tooltip label="Export Word (DOCX)" side="bottom">
+        <button
+          onClick={handleDownloadDocx}
+          aria-label="Export Word (DOCX)"
+          className={btnCls}
+        >
+          <Download className="w-3.5 h-3.5 text-primary shrink-0" />
+          <span>DOCX</span>
+        </button>
+      </Tooltip>
+
+      <Tooltip label="Export PDF" side="bottom">
+        <button
+          onClick={handlePrintPDF}
+          aria-label="Export PDF"
+          className={btnCls}
+        >
+          <Printer className="w-3.5 h-3.5 text-primary shrink-0" />
+          <span>PDF</span>
+        </button>
+      </Tooltip>
+    </>
+  );
 
   return (
     <div className="flex-1 flex overflow-hidden h-full">
@@ -424,8 +492,11 @@ export default function Dashboard() {
         {/* Context Menu */}
         {projectContextMenu && (
           <div
-            className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-xl py-1 min-w-[160px]"
-            style={{ left: projectContextMenu.x, top: projectContextMenu.y }}
+            className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-xl py-1 min-w-[160px] max-w-[calc(100vw-1rem)]"
+            style={{
+              left: Math.min(projectContextMenu.x, Math.max(8, window.innerWidth - 176)),
+              top: Math.min(projectContextMenu.y, Math.max(8, window.innerHeight - 150)),
+            }}
           >
             <button
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
@@ -519,94 +590,88 @@ export default function Dashboard() {
               Versions) modeled on the PRD nav reference; each tab is wired to its
               live workspace panel, and the DOCX/PDF exports sit at the pill's right
               edge (inside it) like the reference's Export button. */}
-          <div className="min-h-13 bg-glass-bg border-b border-outline flex flex-wrap items-center px-4 md:px-6 gap-2 shrink-0 select-none">
-            <div className="flex flex-1 bg-tab-pill border border-tab-pill-border rounded-[10px] p-1 h-[53px] items-center gap-1">
-              <Tooltip label="PRD Documents" side="bottom" className="h-full">
-                <button
-                  onClick={() => setActiveTab('prd')}
-                  aria-label="PRD Documents tab"
-                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
-                    activeTab === 'prd'
-                      ? 'bg-tab-active text-white shadow-sm'
-                      : 'text-tab-text hover:bg-tab-hover'
-                  }`}
-                >
-                  <FileText className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">PRD Documents</span>
-                </button>
-              </Tooltip>
-
-              <Tooltip label="Requirements" side="bottom" className="h-full">
-                <button
-                  onClick={() => setActiveTab('trace')}
-                  aria-label="Requirements tab"
-                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
-                    activeTab === 'trace'
-                      ? 'bg-tab-active text-white shadow-sm'
-                      : 'text-tab-text hover:bg-tab-hover'
-                  }`}
-                >
-                  <GitBranch className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Requirements</span>
-                </button>
-              </Tooltip>
-
-              <Tooltip label="Flows" side="bottom" className="h-full">
-                <button
-                  onClick={() => setActiveTab('flows')}
-                  aria-label="Flows tab"
-                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
-                    activeTab === 'flows'
-                      ? 'bg-tab-active text-white shadow-sm'
-                      : 'text-tab-text hover:bg-tab-hover'
-                  }`}
-                >
-                  <Network className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Flows</span>
-                </button>
-              </Tooltip>
-
-              <Tooltip label="Versions" side="bottom" className="h-full">
-                <button
-                  onClick={() => setActiveTab('history')}
-                  aria-label="Versions tab"
-                  className={`h-[43px] px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center gap-1.5 ${
-                    activeTab === 'history'
-                      ? 'bg-tab-active text-white shadow-sm'
-                      : 'text-tab-text hover:bg-tab-hover'
-                  }`}
-                >
-                  <Clock className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Versions</span>
-                </button>
-              </Tooltip>
+          <div className="min-h-13 bg-glass-bg border-b border-outline shrink-0 select-none">
+            {/* DESKTOP (lg+): the existing horizontal pill navigation — unchanged. */}
+            <div className="hidden lg:flex flex flex-col sm:flex-row items-stretch sm:items-center gap-1 px-3 sm:px-4 md:px-6 overflow-x-auto custom-scrollbar">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1 p-1 sm:h-[53px] bg-tab-pill border border-tab-pill-border rounded-[10px]">
+              {TAB_ITEMS.map((tab) => (
+                <Tooltip key={tab.id} label={tab.label} side="bottom">
+                  <button
+                    onClick={() => setActiveTab(tab.id)}
+                    aria-label={`${tab.label} tab`}
+                    className={`w-full sm:w-auto h-[43px] px-2.5 sm:px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center justify-start gap-1.5 ${
+                      activeTab === tab.id
+                        ? 'bg-tab-active text-white shadow-sm'
+                        : 'text-tab-text hover:bg-tab-hover'
+                    }`}
+                  >
+                    <tab.icon className="w-3.5 h-3.5 shrink-0" />
+                    <span>{tab.label}</span>
+                  </button>
+                </Tooltip>
+              ))}
 
               {/* Export actions — kept inside the pill, pushed to the far right like
                   the reference's Export button. Both compile server-side (LaTeX
                   service), so these only trigger the existing handlers. */}
-              <div className="ml-auto flex items-center gap-1 shrink-0 no-print">
-                <Tooltip label="Export Word (DOCX)" side="bottom">
-                  <button
-                    onClick={handleDownloadDocx}
-                    aria-label="Export Word (DOCX)"
-                    className="h-[39px] px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                  >
-                    <Download className="w-3.5 h-3.5 text-primary" />
-                    <span className="hidden md:inline">DOCX</span>
-                  </button>
-                </Tooltip>
-
-                <Tooltip label="Export PDF" side="bottom">
-                  <button
-                    onClick={handlePrintPDF}
-                    aria-label="Export PDF"
-                    className="h-[39px] px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                  >
-                    <Printer className="w-3.5 h-3.5 text-primary" />
-                    <span className="hidden md:inline">PDF</span>
-                  </button>
-                </Tooltip>
+              <div className="flex items-center gap-1 sm:ml-auto shrink-0 no-print">
+                {exportButtons('w-full sm:w-auto h-[39px] px-2.5 sm:px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap')}
               </div>
+              </div>
+            </div>
+
+            {/* TABLET/MOBILE (<lg): compact dropdown selector showing the active tab.
+                The menu is absolutely anchored left/right against this relative bar so
+                it spans the content width and can never overflow the viewport. The same
+                setActiveTab handler drives it, so active state + navigation are unchanged. */}
+            <div ref={mobileTabsRef} className="lg:hidden relative flex items-center gap-1.5 px-3 sm:px-4 md:px-6">
+              <div className="flex-1 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setMobileTabsOpen((v) => !v)}
+                  aria-label={`Tab selector (currently ${currentTab.label})`}
+                  aria-haspopup="menu"
+                  aria-expanded={mobileTabsOpen}
+                  className={`w-full h-[43px] rounded-[10px] font-label-md text-xs font-semibold transition-colors duration-200 flex items-center justify-between gap-2 px-2.5 bg-tab-active text-white shadow-sm ${
+                    mobileTabsOpen ? 'ring-2 ring-primary/30' : ''
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <currentTab.icon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{currentTab.label}</span>
+                  </span>
+                  <ChevronDown className={`w-4 h-4 shrink-0 text-white transition-transform duration-200 ${mobileTabsOpen ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0 no-print">
+                {exportButtons('h-[39px] px-2.5 sm:px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0')}
+              </div>
+
+              {mobileTabsOpen && (
+                <div role="menu" aria-label="Available tabs" className="absolute left-0 right-0 top-full mt-1 z-50 rounded-[10px] bg-surface border border-tab-pill-border shadow-xl py-1">
+                  {TAB_ITEMS.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setActiveTab(tab.id);
+                        setMobileTabsOpen(false);
+                      }}
+                      className={`w-full text-left px-3 py-2.5 rounded-lg text-[13px] font-semibold transition-colors duration-200 flex items-center gap-2.5 ${
+                        activeTab === tab.id
+                          ? 'bg-tab-active text-white'
+                          : 'text-tab-text hover:bg-tab-hover'
+                      }`}
+                    >
+                      <tab.icon className="w-4 h-4 shrink-0" />
+                      <span className="flex-1 truncate">{tab.label}</span>
+                      {activeTab === tab.id && <Check className="w-4 h-4 shrink-0" />}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -635,12 +700,12 @@ export default function Dashboard() {
                 className="max-w-4xl mx-auto mb-8 bg-white border-2 border-primary/30 rounded-3xl p-6 shadow-xl relative overflow-hidden"
               >
                 <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none"></div>
-                <div className="flex items-center gap-3 mb-4 relative z-10">
-                  <div className="w-10 h-10 rounded-2xl bg-primary/10 flex items-center justify-center text-primary">
+                <div className="flex items-center gap-3 mb-4 relative z-10 min-w-0">
+                  <div className="w-10 h-10 rounded-2xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
                     <AlertTriangle className="w-5 h-5" />
                   </div>
-                  <div>
-                    <h2 className="font-heading font-bold text-base text-on-surface">
+                  <div className="min-w-0">
+                    <h2 className="font-heading font-bold text-base text-on-surface break-words">
                       Compliance Audit Clarification Required (Waiting Clarification)
                     </h2>
                     <p className="text-xs text-on-surface-variant">
@@ -654,16 +719,16 @@ export default function Dashboard() {
                     .map((q, idx) => ({ q, idx }))
                     .filter(({ q }) => !q.is_resolved)
                     .map(({ q, idx }) => (
-                      <div key={idx} className="bg-slate-50 border border-outline/60 p-4 rounded-2xl space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-2 py-0.5 rounded">
+                      <div key={idx} className="bg-slate-50 border border-outline/60 p-4 rounded-2xl space-y-2 min-w-0">
+                        <div className="flex flex-wrap items-center justify-between gap-1.5">
+                          <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-2 py-0.5 rounded break-words">
                             {q.checklist_category}
                           </span>
-                          <span className="text-[10px] font-mono text-on-surface-variant font-semibold">
+                          <span className="text-[10px] font-mono text-on-surface-variant font-semibold break-words min-w-0 text-right">
                             Target: {q.target_user_story_id || "General"}
                           </span>
                         </div>
-                        <p className="text-sm font-medium text-on-surface">
+                        <p className="text-sm font-medium text-on-surface break-words">
                           {q.question_text}
                         </p>
                         <input
@@ -687,36 +752,15 @@ export default function Dashboard() {
                 </form>
               </motion.div>
             )}
-{/* Metadata card preview */}
-            <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-2xl flex flex-wrap gap-4 items-center justify-between shadow-sm">
-              <div className="flex items-center gap-3">
-                <span className="bg-primary/15 text-primary text-[10.5px] px-2.5 py-1 rounded border border-primary/25 font-bold uppercase tracking-wider font-mono">
-                  {projectId}
-                </span>
-                <div className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                  <span>Version Reviewed:</span>
-                  <span className="text-primary font-bold font-mono">v{currentVersion}.0</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                <span className="text-xs text-on-surface-variant font-medium">
-                  State: {auditResult.is_valid ? (
-                    <span className="text-emerald-600 font-bold">Passed Technical Audit</span>
-                  ) : (
-                    <span className="text-orange-600 font-bold">Unresolved Queries Pending</span>
-                  )}
-                </span>
-              </div>
-            </div>
 
-            {/* Requirement Lock Status Panel */}
-            {(structuredRequirements.requirements && structuredRequirements.requirements.length > 0) && (
+
+            {/* Requirement Lock Status Panel — only shown on the Requirements tab */}
+            {activeTab === 'trace' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (
               <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-2xl shadow-sm">
-                <div className="flex items-center gap-2 mb-3">
-                  <Lock className="text-primary w-4 h-4" />
-                  <h3 className="font-bold text-sm text-on-surface">Requirement Lock Status</h3>
-                  <span className="text-[10px] text-on-surface-variant font-mono ml-auto">
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <Lock className="text-primary w-4 h-4 shrink-0" />
+                  <h3 className="font-bold text-sm text-on-surface min-w-0">Requirement Lock Status</h3>
+                  <span className="text-[10px] text-on-surface-variant font-mono basis-full sm:basis-auto sm:ml-auto">
                     Locked requirements cannot be updated, deleted, merged, or modified by AI
                   </span>
                 </div>
@@ -724,13 +768,13 @@ export default function Dashboard() {
                   {structuredRequirements.requirements.map((req) => {
                     const isLocked = req.is_locked || lockedRequirements[req.requirement_code]?.is_locked;
                     return (
-                      <div key={req.requirement_code} className={`flex items-center justify-between p-3 rounded-xl border ${isLocked ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+                      <div key={req.requirement_code} className={`flex items-center justify-between gap-2 sm:gap-3 p-3 rounded-xl border ${isLocked ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
                         <div className="flex items-center gap-3 min-w-0">
                           <span className={`w-2 h-2 rounded-full shrink-0 ${isLocked ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-mono font-bold text-on-surface">{req.requirement_code}</span>
-                              <span className="text-xs text-on-surface truncate">{req.title}</span>
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
+                              <span className="text-xs font-mono font-bold text-on-surface shrink-0">{req.requirement_code}</span>
+                              <span className="text-xs text-on-surface break-words min-w-0">{req.title}</span>
                             </div>
                             {isLocked && (
                               <p className="text-[10px] text-amber-700 font-mono mt-0.5">
@@ -742,7 +786,7 @@ export default function Dashboard() {
                         </div>
                         <button
                           onClick={() => isLocked ? handleUnlockRequirement(req.requirement_code) : handleLockRequirement(req.requirement_code)}
-                          className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                          className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
                             isLocked 
                               ? 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200' 
                               : 'bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20'

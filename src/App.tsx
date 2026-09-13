@@ -15,9 +15,9 @@ export default function App() {
           <div className="w-8 h-8 rounded-xl bg-primary flex items-center justify-center text-on-primary text-[11px] font-bold shrink-0 shadow-sm">
             Ai
           </div>
-          <div className="hidden sm:flex items-baseline gap-2.5 min-w-0">
+          <div className="flex items-baseline gap-2.5 min-w-0">
             <h1 className="font-bold text-sm text-on-surface truncate">Agentic-AI</h1>
-            <span className="text-xs text-on-surface-variant whitespace-nowrap">Requirements Workspace</span>
+            <span className="hidden md:inline text-xs text-on-surface-variant whitespace-nowrap">Requirements Workspace</span>
           </div>
         </div>
         

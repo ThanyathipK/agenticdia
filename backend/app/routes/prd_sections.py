@@ -316,7 +316,6 @@ async def lock_prd_section(
             artifact_id=section["id"],
             session=session,
             locked_by=payload.locked_by or "user",
-            lock_reason=payload.lock_reason,
             project_id=project_id,
         )
     except ArtifactLockError as e:

@@ -135,7 +135,6 @@ class ProcessRequirementsRequest(BaseModel):
 class ArtifactLockRequest(BaseModel):
     """Request body for locking/unlocking any artifact."""
     locked_by: Optional[str] = Field(default="user", description="Identifier of who is locking/unlocking the artifact.")
-    lock_reason: Optional[str] = Field(default=None, description="Optional reason for locking the artifact.")
 
 
 class RequirementLockRequest(BaseModel):
@@ -274,7 +273,6 @@ class UserStoryDetail(BaseModel):
     is_locked: Optional[bool] = Field(False, description="Whether the story is locked.")
     locked_by: Optional[str] = Field(None, description="Locking actor.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
-    lock_reason: Optional[str] = Field(None, description="Lock reason.")
 
 
 class BusinessGoalItem(BaseModel):
@@ -333,7 +331,6 @@ class RequirementDetail(BaseModel):
     is_locked: Optional[bool] = Field(False, description="Whether locked against edits.")
     locked_by: Optional[str] = Field(None, description="Locking actor.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
-    lock_reason: Optional[str] = Field(None, description="Lock reason.")
     user_stories: Optional[List[UserStoryDetail]] = Field(default_factory=list, description="User stories under this requirement.")
 
 
@@ -460,7 +457,6 @@ class LockStatusResponse(BaseModel):
     is_locked: bool = Field(False, description="Whether the artifact is currently locked.")
     locked_by: Optional[str] = Field(None, description="Identifier of the current locking user/agent.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp, if locked.")
-    lock_reason: Optional[str] = Field(None, description="Reason supplied when locking, if any.")
 
 
 class PendingActionResponse(BaseModel):
@@ -648,13 +644,27 @@ class DocumentProcessResponse(BaseModel):
     the existing ``/api/confirm-action/{action_id}`` flow.
     """
     status: str = Field(..., description="Outcome: 'draft_ready' | 'failed'.")
-    mode: str = Field(..., description="'full' (single pass) | 'chunked' (sequential chunked passes).")
+    mode: str = Field(..., description="'full' (single pass) | 'chunked' (chunked passes with overlap).")
     chunk_count: int = Field(..., description="Number of gatherer passes executed (1 for full mode).")
     processed_tokens: int = Field(..., description="Total document tokens fed through extraction.")
     pending_action_id: Optional[str] = Field(None, description="Pending-action UUID holding the merged draft, awaiting confirmation.")
     excluded_anything: bool = Field(False, description="True when any content was left out of extraction (never silently).")
     message: str = Field("", description="Human-readable summary including which mode ran and chunk count.")
     document_id: str = Field(..., description="Source document UUID string.")
+
+
+class DocumentDeleteResponse(BaseModel):
+    """Confirmation returned by ``DELETE .../documents/{document_id}``.
+
+    The removal is permanent: the full canonical markdown stored for the
+    document is gone. Requirements that were already extracted and confirmed
+    from it are NOT affected — they live in the requirement tables and PRD
+    version ledger and are untouched by this endpoint.
+    """
+    status: str = Field(..., description="Outcome, always 'deleted' on success.")
+    document_id: str = Field(..., description="UUID of the removed document.")
+    project_id: str = Field(..., description="Owning project UUID string.")
+    original_filename: str = Field("", description="Name of the removed file.")
 
 
 # ==========================================
@@ -693,7 +703,6 @@ class PrdSectionResponse(BaseModel):
     is_locked: bool = Field(False, description="When True, edits AND AI regeneration are blocked.")
     locked_by: Optional[str] = Field(None, description="Who locked the part.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
-    lock_reason: Optional[str] = Field(None, description="Optional lock reason.")
     version_number: Optional[int] = Field(None, description="Latest version number in prd_section_versions.")
     created_at: str = Field("", description="ISO8601 creation timestamp.")
     updated_at: str = Field("", description="ISO8601 last-update timestamp.")
@@ -731,6 +740,22 @@ class PrdSectionRevertResponse(BaseModel):
     restored_from_version: int = Field(..., description="Version number the content was restored from.")
 
 
+class PrdVersionRestoreResponse(BaseModel):
+    """Result of restoring the whole PRD document from a ledger version.
+
+    APPEND-ONLY: the restore is recorded as a NEW version; history is never
+    rewritten and locked sections are preserved untouched.
+    """
+    restored_from_version: int = Field(..., description="Ledger version number the document was restored from.")
+    new_version_number: int = Field(..., description="The NEW version number appended for this restore.")
+    semver: str = Field("", description="Semantic version of the NEW appended snapshot.")
+    document_markdown: str = Field(..., description="Full PRD markdown after the restore (locked sections preserved).")
+    restored_sections: int = Field(0, description="Number of unlocked PRD parts whose content was replaced.")
+    preserved_locked_sections: int = Field(0, description="Number of locked PRD parts left untouched by the restore.")
+
+
+# --------------------------------------------------------------------------
+# Requirement Traceability Matrix (derived, read-only)
 # --------------------------------------------------------------------------
 # Requirement Traceability Matrix (derived, read-only)
 #
