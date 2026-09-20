@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏦 Agentic AI
+# Agentic AI
 
 ### Enterprise Requirements Architecture Core
 
@@ -8,14 +8,14 @@
 
 </div>
 
-Agentic AI turns plain-English banking product briefs into **audited, versioned, engineering-ready requirements**. You describe a feature in the chat — or upload an existing brief / BRD document (DOCX, PDF, Markdown, TXT) into the project's knowledge base; a LangGraph workflow of specialist agents (Router, Matcher, Gatherer, Auditor, Architect) runs **fully locally** against a model served by [LM Studio](https://lmstudio.ai), then persists only the changes you confirm to a PostgreSQL database — with per-artifact locking along the way.
+Agentic AI turns plain-English banking product briefs into **audited, versioned, engineering-ready requirements**. You sign in, describe a feature in the chat — or upload an existing brief / BRD document (DOCX, PDF, Markdown, TXT) into the project's knowledge base; a LangGraph workflow of specialist agents (Router, Matcher, Gatherer, Auditor, Architect) runs **fully locally** against a model served by [LM Studio](https://lmstudio.ai), then persists only the changes you confirm to a PostgreSQL database — with per-artifact locking along the way. A per-project **semantic memory** layer keeps durable decisions recallable across sessions, and a derived **traceability matrix** proves every requirement is covered by stories, criteria, PRD sections, and diagrams.
 
 > [!IMPORTANT]
 > This project **does not** use Gemini or any cloud LLM API key. All inference happens 100% locally through LM Studio. There is **no** `.env.local` and no `GEMINI_API_KEY` setup — backend configuration lives in [`backend/.env`](backend/.env.example).
 
 ---
 
-## ✨ Features
+## Features
 
 - **Multi-agent LangGraph workflow** — `router_node`, `requirement_matcher_node`, `gatherer_node`, `auditor_node`, `architect_node` (on-demand execution driven by a persisted workflow state machine)
 - **Local-first inference** — OpenAI-compatible calls to `http://localhost:1234/v1`; no API keys, no cloud dependency
@@ -23,17 +23,22 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 - **Automated PRD + Mermaid diagrams** — the Architect synthesizes a full Product Requirements Document and flow diagrams
 - **Document knowledge base & extraction** — upload DOCX / PDF / Markdown / TXT briefs (≤ `MAX_UPLOAD_MB`); they are converted to canonical markdown, then an explicit, user-triggered extraction feeds them through the Gatherer (one pass, or chunked passes with overlap, single-tokenized chunking, and bounded concurrency up to `DOCUMENT_EXTRACTION_CONCURRENCY`) into a **single staged pending action** — nothing is written until you confirm. Live chunk progress streams over SSE (`chunk X/N`) without extra project-state downloads
 - **Server-side PRD export** — the generated LaTeX PRD (`template-krungsrinimble.tex`) downloads as **DOCX** (native `python-docx` renderer) and **PDF** (headless LibreOffice, with a Tectonic fallback), so PDF and Word output always match
-- **Version snapshot ledger** — every accepted state bump is an immutable, versioned PRD record with full history
+- **Version snapshot ledger** — every accepted state bump is an immutable, versioned PRD record (integer `version` + display `semver`) with line-level diffs against any earlier version and append-only restore
 - **Human-in-the-loop** — LLM changes are staged as *pending actions*; you confirm or cancel before anything is written to the database
 - **Workflow Stop button** — an in-flight `process-requirements` run can be cancelled server-side (`POST /api/process-requirements/cancel`); partial work is discarded, never persisted
-- **Generic artifact locking** — lock/unlock projects, epics, requirements, user stories, acceptance criteria, clarification questions, and PRD documents; optimistic UI with automatic rollback
+- **Generic artifact locking** — lock/unlock projects, epics, requirements, user stories, acceptance criteria, clarification questions, PRD documents, and individual PRD sections; optimistic UI with automatic rollback
 - **Real-time updates** — Server-Sent Events push state changes to the dashboard instead of polling
 - **Rate limiting** — in-process sliding-window limiter guards the LLM-facing endpoints (chat, workflow, document extraction) with per-IP 429s (Finding #39)
 - **LM Studio health check & graceful degradation** — the backend probes the local gateway at startup and on every `/api/health` call; the chat header shows an **LLM Offline** pill when the local server is down (auto-refreshing, no restart needed) instead of failing with opaque 503s (Finding #40)
+- **JWT authentication & role-based accounts** — self-service sign-up (`SIGNUP_ENABLED`, canonical roles only), `POST /api/auth/login` (OAuth2 password flow), `/api/auth/me`, password change, and bcrypt-hashed credentials stored in `users.password_hash`; projects are **scoped to the signed-in owner**, so each account sees only its own workspace
+- **Semantic memory across sessions** — after every chat turn a small LLM pass distils durable facts/decisions ("project requires SSO"), embeds them via the local `LM_STUDIO_EMBEDDING_MODEL`, and stores them in `semantic_memories`; later turns recall the top-k by blended cosine relevance + recency decay (hard-capped at `MEMORY_CONTEXT_MAX_TOKENS`) — entirely **fail-open**, so memory can never break a chat turn
+- **Requirement Traceability Matrix** — derived, read-only view linking Requirements ↔ User Stories ↔ Acceptance Criteria ↔ PRD sections ↔ diagrams, with a project-wide coverage/gap report
+- **Impact analysis before you confirm** — `GET /api/pending-actions/{action_id}/impact` predicts what a staged change touches (stories, PRD sections, diagrams) so reviewers see *what changes* and *what is affected*, including `DANGLING` references to non-existent `REQ-`/`US-` codes
+- **Part-level PRD editing & versioning** — a PRD is stored as nine independently editable, lockable, versioned parts (`prd_sections` / `prd_section_versions`); human-owned sections (`ai_generatable=false`) and locked parts survive every AI regeneration untouched, and per-part reverts append a new version instead of rewriting history
 
 ---
 
-## 🧱 Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -47,14 +52,18 @@ flowchart LR
     end
 
     subgraph Backend["FastAPI — 127.0.0.1:8000"]
-        ROUTERS["REST routers · chat / projects<br/>requirements / documents / lock / events"]
+        AUTH["auth.py · JWT issue/verify<br/>get_current_user dependency"]
+        ROUTERS["REST routers · auth / chat / projects<br/>requirements / documents / lock / events<br/>prd_sections / traceability"]
         WF["LangGraph prd_workflow<br/>Router → Matcher → Gatherer<br/>on-demand: Auditor · Architect"]
         LOCKSRV["LockService"]
+        MEM["Semantic memory<br/>distil → embed → recall"]
+        DERIVED["VersionService · TraceabilityService<br/>ImpactService"]
         ESM["EventManager<br/>(in-memory pub/sub)"]
     end
 
     subgraph LLMSrv["LM Studio — localhost:1234/v1"]
         MODEL["OpenAI-compatible /chat/completions<br/>(e.g. qwen3.5-9b-instruct)"]
+        EMB["/embeddings<br/>(text-embedding-nomic-embed-text-v1.5)"]
     end
 
     subgraph Data["Data layer"]
@@ -65,33 +74,38 @@ flowchart LR
     UI --> PROXY
     UI -->|"opens EventSource /api/..."| SSE_C
     SSE_C --> PROXY
-    PROXY --> ROUTERS
+    PROXY --> AUTH
+    AUTH --> ROUTERS
     ROUTERS --> WF
     ROUTERS --> LOCKSRV
+    ROUTERS --> MEM
+    ROUTERS --> DERIVED
     WF --> ESM
     ROUTERS --> ESM
     LOCKSRV --> ESM
     ESM -->|"SSE frames"| SSE_C
     WF -->|"httpx / LangChain OpenAI client"| MODEL
+    MEM -->|"embeddings"| EMB
     ROUTERS -->|"async SQLAlchemy 2 + Alembic"| PG
     WF -->|"async SQLAlchemy 2 + Alembic"| PG
     ROUTERS -.->|"fallback when DATABASE_URL unset"| SQLITE
     WF -.->|"fallback when DATABASE_URL unset"| SQLITE
 ```
 
-**Control flow.** The Vite dev server proxies every `/api/*` request (including the SSE stream) to FastAPI on port 8000. The chat / requirements routers feed a user message into the compiled LangGraph graph. Each agent node calls the local LM Studio model, and state is persisted through async SQLAlchemy into PostgreSQL. Any mutation publishes an event on the in-memory bus, which the EventManager streams back to the browser over SSE so the dashboard refreshes automatically.
-## 🧰 Tech Stack
+**Control flow.** The Vite dev server proxies every `/api/*` request (including the SSE stream) to FastAPI on port 8000. Requests are authenticated first (`Authorization: Bearer <jwt>`, resolved against the `users` table) and project-scoped to the owner. The chat / requirements routers feed a user message into the compiled LangGraph graph. Each agent node calls the local LM Studio model, and state is persisted through async SQLAlchemy into PostgreSQL. Before the prompt is built, the **semantic memory** layer recalls relevant project facts; after the turn it distils and embeds new ones. **VersionService**, **TraceabilityService**, and **ImpactService** sit alongside the graph as deterministic, non-LLM readers of the same tables. Any mutation publishes an event on the in-memory bus, which the EventManager streams back to the browser over SSE so the dashboard refreshes automatically.
+
+## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Frontend | React 19 · TypeScript · Vite 6 · Tailwind CSS 4 · Motion · lucide-react · axios |
-| Backend | Python 3.12+ (developed on 3.14) · FastAPI · uvicorn · SQLAlchemy 2 (async) · Alembic · Pydantic v2 · python-docx / pypdf / mammoth (document ingestion) |
+| Backend | Python 3.12+ (developed on 3.14) · FastAPI · uvicorn · SQLAlchemy 2 (async) · Alembic · Pydantic v2 · python-docx / pypdf / mammoth (document ingestion) · PyJWT + bcrypt (auth) |
 | AI orchestration | LangGraph · LangChain · LangChain-OpenAI client (pointed at LM Studio) |
-| Inference | **LM Studio** — local OpenAI-compatible server (`http://localhost:1234/v1`), e.g. `qwen3.5-9b-instruct` |
+| Inference | **LM Studio** — local OpenAI-compatible server (`http://localhost:1234/v1`), e.g. `qwen3.5-9b-instruct` for chat + an embedding model for semantic memory |
 | Database | Supabase PostgreSQL (transaction pooler compatible) · SQLite fallback via `sqlite+aiosqlite:///app.db` |
-| Realtime | Server-Sent Events (SSE) over FastAPI `StreamingResponse` |
+| Realtime | Server-Sent Events (SSE) over FastAPI `StreamingResponse` (replay-capable via `Last-Event-ID`) |
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 agenticdia/
@@ -108,22 +122,29 @@ agenticdia/
 │   ├── api/                    # Typed HTTP client (client.ts / types.ts / transforms.ts)
 │   ├── hooks/                  # useChat · useProjects · useProjectState · useProjectSync
 │   │                           # useRequirementStore · useDocuments · useArtifactLocks
-│   │                           # useLmStudioHealth · useWorkspaceUi
+│   │                           # useAuth · useModalBehavior · useLmStudioHealth · useWorkspaceUi
 │   ├── schema/                 # DDL parser (npm run schema:parse self-check tool)
 │   ├── utils/                  # markdown helpers
 │   └── components/
 │       ├── Dashboard.tsx       # Multi-agent requirements workspace (SSE, locks, PRD)
+│       ├── ProjectsDashboard.tsx # Cross-project overview (pins, flags, status)
 │       ├── ChatPanel.tsx       # Agent chat · LLM-health pill · Stop button
+│       ├── ChatEmptyState.tsx  # Onboarding prompts for an empty conversation
 │       ├── DocumentLibrary.tsx # Knowledge-base uploads + requirement extraction
-│       ├── PRDEditor.tsx       # LaTeX/markdown PRD editor + PDF/DOCX export
-│       ├── VersionHistory.tsx  # Immutable PRD version ledger
+│       ├── PRDEditor.tsx       # LaTeX/markdown PRD editor + per-part editing + PDF/DOCX export
+│       ├── VersionHistory.tsx  # Immutable PRD version ledger (semver, diff, restore)
+│       ├── RequirementTraceability.tsx # Requirements ↔ stories ↔ AC ↔ PRD ↔ diagrams matrix
+│       ├── AuthModal.tsx / AuthPanel.tsx # Sign-in / sign-up + signed-in user chip
 │       ├── ConfirmationPanel.tsx / ConfirmModal.tsx / NewProjectModal.tsx
-│       ├── MarkdownRenderer.tsx / ArchitectureFlows.tsx / Toast.tsx
+│       ├── MarkdownRenderer.tsx / ArchitectureFlows.tsx / Toast.tsx / Tooltip.tsx
 ├── backend/
 │   ├── .env.example            # ← copy to backend/.env
 │   ├── requirements.txt        # Python dependencies
 │   ├── alembic.ini
-│   ├── alembic/                # Migrations 0001 initial · 0002 locks rename · 0003 pinned · 0004 uploaded_documents · 0009 flagged
+│   ├── alembic/                # 0001 initial · 0002 is_locked rename · 0003 pinned · 0004 uploaded_documents
+│   │                           # 0005 prd_sections · 0006 drop unused columns · 0007 project status
+│   │                           # 0008 semantic_memories · 0009 flagged · 0010 prd version metadata
+│   │                           # 0011 prd semver · 0012 drop lock_reason · 0013 password_hash
 │   ├── init.sql                # Full PostgreSQL reference DDL
 │   ├── check_schema_drift.py   # init.sql ↔ models.py drift harness
 │   ├── test_sse.py             # End-to-end SSE stream test
@@ -134,6 +155,7 @@ agenticdia/
 │       ├── database.py         # Async SQLAlchemy engine / session factory
 │       ├── models.py           # SQLAlchemy ORM models
 │       ├── schemas.py          # Request/response Pydantic schemas
+│       ├── auth.py             # JWT issue/verify + get_current_user dependency
 │       ├── repositories/       # Per-entity repositories (requirement_state, documents, …)
 │       ├── migrations.py       # Startup Alembic runner + default user seed
 │       ├── llm_client.py       # Direct LM Studio HTTP client (strict JSON mode)
@@ -141,7 +163,11 @@ agenticdia/
 │       ├── llm_utils.py        # Structured-output helpers
 │       ├── agents.py           # LangGraph nodes + compiled prd_workflow graph
 │       ├── semantic_service.py # Workflow router / intent / matcher agents
+│       ├── semantic_memory.py  # Long-term per-project memory (distil → embed → recall)
 │       ├── merge_service.py    # User story reconciliation (unit-testable core)
+│       ├── version_service.py  # Immutable PRD version snapshots + diffs
+│       ├── traceability_service.py # Derived Requirement Traceability Matrix
+│       ├── impact_service.py   # Downstream impact prediction for pending actions
 │       ├── document_processor.py # Upload → markdown routing + extraction chunk planning
 │       ├── prd_filler.py       # LaTeX template filling for PRD export
 │       ├── latex_service.py    # LaTeX → PDF / DOCX conversion pipeline
@@ -150,18 +176,18 @@ agenticdia/
 │       ├── input_validation.py # MAX_CONTEXT_TOKENS budget guards (413 on oversized payloads)
 │       ├── workflow_cancellation.py # Server-side Stop support for the workflow
 │       ├── lock_service.py     # Generic artifact lock/unlock engine
-│       ├── event_manager.py    # In-memory SSE pub/sub
+│       ├── event_manager.py    # In-memory SSE pub/sub (replay-capable)
 │       ├── prompt_loader.py    # Loads prompts from app/prompts/*.md
 │       ├── prompts/            # gatherer / auditor / architect / router / matcher / …
 │       │                       # + template-krungsrinimble.tex (PRD template)
-│       └── routes/             # chat.py projects.py requirements.py documents.py
-│                               # lock.py events.py
+│       └── routes/             # auth.py chat.py projects.py requirements.py documents.py
+│                               # lock.py events.py prd_sections.py traceability.py
 └── venv/                       # Local Python virtual environment
 ```
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -194,7 +220,7 @@ Backend settings are loaded by [pydantic-settings](backend/app/config.py) from *
 cp backend/.env.example backend/.env
 ```
 
-Then edit the two things that matter:
+Then edit the settings that matter:
 
 - **`DATABASE_URL`** — point it at your Supabase Postgres, e.g.
   `postgresql://postgres.<ref>:<password>@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`.
@@ -203,12 +229,30 @@ Then edit the two things that matter:
   uses the SQLite fallback instead of failing with asyncpg's `tenant/user postgres.[YOUR_PROJECT_REF] not found`
   (set `ALLOW_SQLITE_FALLBACK=false` to turn that into a hard startup error in production).
 - **`LM_STUDIO_MODEL_FALLBACK`** — must match a model you have loaded in LM Studio.
+- **`JWT_SECRET_KEY`** — generate one with `openssl rand -hex 32`. An empty value or an unfilled
+  placeholder falls back to the development secret **with a startup warning** (a placeholder is never
+  silently used as a real secret). Tokens live for `JWT_EXPIRATION_MINUTES` (default 60).
+- **`SIGNUP_ENABLED`** — gate for `POST /api/auth/register`. Leave `true` locally; set `false` in shared
+  or production deployments so anonymous callers cannot create accounts (the endpoint then answers `403`,
+  and the UI hides the sign-up form via `GET /api/auth/config`).
+- **`SYSTEM_USER_*`** — the bootstrap account seeded on startup. Its id **must stay**
+  `00000000-0000-0000-0000-000000000000` because it also owns every project created without an
+  authenticated caller. Set `SYSTEM_USER_PASSWORD`, otherwise `POST /api/auth/login` cannot work for it;
+  the value is bcrypt-hashed into `users.password_hash`, and an already-provisioned password is never
+  overwritten (rotate it through `POST /api/auth/change-password`).
+- **Semantic memory** (optional, on by default) — `MEMORY_ENABLED`, `MEMORY_FACT_EXTRACTION_ENABLED`,
+  `MEMORY_TOP_K` (6), `MEMORY_CONTEXT_MAX_TOKENS` (800), `MEMORY_CANDIDATE_LIMIT` (400),
+  `MEMORY_RELEVANCE_WEIGHT` (0.7 cosine / 0.3 recency), `MEMORY_RECENCY_HALF_LIFE_DAYS` (30) and
+  `LM_STUDIO_EMBEDDING_MODEL` (default `text-embedding-nomic-embed-text-v1.5`). Every memory path is
+  **fail-open** — if the embedding model is missing the feature silently no-ops and chat still works.
 
 ### 4. Start LM Studio
 
 1. Open **LM Studio** and load a chat model (e.g. `qwen3.5-9b-instruct`).
-2. Go to the **Developer / Local Server** tab and click **Start Server** (it listens on `http://localhost:1234/v1`).
-3. Keep the window open while you use the app.
+2. Optionally load an embedding model (`text-embedding-nomic-embed-text-v1.5`) so semantic memory can
+   distil and recall project facts; without it, memory is skipped and everything else still works.
+3. Go to the **Developer / Local Server** tab and click **Start Server** (it listens on `http://localhost:1234/v1`).
+4. Keep the window open while you use the app.
 
 ### 5. Run the app
 
@@ -276,7 +320,7 @@ Expect a JSON response naming the app, the LM Studio gateway, and the context bu
 
 ---
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI_API_KEY` or `APP_URL` are **legacy/no-ops** — ignored by the current codebase.
 
@@ -304,12 +348,26 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `SSE_HISTORY_BUFFER_SIZE` | `1000` | Per-project ring buffer replayed to reconnecting SSE clients via `Last-Event-ID` |
 | `SSE_ALLOW_MULTI_PROCESS_IN_PROCESS` | `false` | Explicit opt-out: run N workers with the in-process SSE bus (broken/duplicate event delivery by construction — not recommended) |
 | `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_IPS` | `false` / *(empty)* | Behind a reverse proxy, trust `X-Forwarded-For`/`Forwarded` client IPs **only from your own proxy IPs**, so every caller keeps its own rate-limit bucket |
+| `JWT_SECRET_KEY` | *(dev fallback + startup warning)* | HMAC secret for signing access tokens (`JWT_ALGORITHM=HS256`). Generate with `openssl rand -hex 32`; an empty value or an unfilled placeholder is **never** silently used as a real secret |
+| `JWT_EXPIRATION_MINUTES` | `60` | Access-token lifetime; also exposed to the SPA through `GET /api/auth/config` |
+| `SIGNUP_ENABLED` | `true` | Gate for `POST /api/auth/register` — set `false` so anonymous callers cannot create accounts (`403`, and the UI hides the sign-up form) |
+| `SYSTEM_USER_ID` / `_EMAIL` / `_NAME` / `_ROLE` / `_PASSWORD` | `00000000-…` / `system@banking.com` / `System User` / `Developer` / *(empty)* | Bootstrap account seeded on startup. The id **must stay** `00000000-0000-0000-0000-000000000000` (it owns projects created without an authenticated caller); `_PASSWORD` is required for `/api/auth/login` and is bcrypt-hashed into `users.password_hash` |
+| `MEMORY_ENABLED` | `true` | Master switch for the long-term semantic memory layer (per-project facts) |
+| `MEMORY_FACT_EXTRACTION_ENABLED` | `true` | Distil durable facts from each chat turn; disable to keep recall-only behaviour |
+| `LM_STUDIO_EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model id served by LM Studio; missing → memory silently no-ops (fail-open) |
+| `MEMORY_EMBEDDING_TIMEOUT_SECONDS` | `10.0` | Timeout for one embedding round-trip before the memory path gives up |
+| `MEMORY_TOP_K` | `6` | Memories injected into the prompt per turn |
+| `MEMORY_CONTEXT_MAX_TOKENS` | `800` | Hard cap on the recalled-memory block added to the context budget |
+| `MEMORY_CANDIDATE_LIMIT` | `400` | Most recent memories scanned per project (relevance scoring happens in process) |
+| `MEMORY_RELEVANCE_WEIGHT` / `MEMORY_RECENCY_HALF_LIFE_DAYS` | `0.7` / `30.0` | Recall score = `weight · cosine + (1 − weight) · 0.5^(age_days / half_life)` |
+| `MEMORY_DEDUPE_SIMILARITY` | `0.92` | Cosine threshold above which a new fact refreshes the existing memory instead of inserting a near-duplicate |
+| `MEMORY_MAX_FACTS_PER_TURN` | `8` | Ceiling on facts stored from a single turn |
 | `DEBUG` | `false` | Enables uvicorn `--reload` and SQL echo |
 | `APP_NAME` | `Enterprise Requirements Architecture Core` | Display name used in health/docs |
 
 ---
 
-## 🤖 Multi-Agent Pipeline
+## Multi-Agent Pipeline
 
 The backend compiles a LangGraph state machine (`prd_workflow`) in [`backend/app/agents.py`](backend/app/agents.py). Each node runs prompts from [`backend/app/prompts/`](backend/app/prompts) and returns structured JSON.
 
@@ -341,12 +399,14 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 
 | Node | Role |
 |------|------|
-| **router_node** | Classifies each message as `CHAT`, `QUESTION`, `COMMAND`, or `REQUIREMENT` (with heuristic fallback). |
-| **requirement_matcher_node** | Maps the message to existing user stories (e.g. `US-001`) and proposes `NEW / UPDATE / DELETE / CLARIFY` via `requirement-matcher` + semantic change detection. |
-| **gatherer_node** | Parses the requirement text into structured **user stories + acceptance criteria**; reconciles them against previously persisted stories (create / update / archive / unchanged) using the merge service. |
-| **auditor_node** | Runs the **7-point banking compliance checklist** over changed stories, marks validation status, and emits clarification questions for anything ambiguous or non-compliant. |
-| **architect_node** | Synthesizes the final **PRD markdown** and a **Mermaid diagram** from the audited state. |
-| **delete_requirement_node** | Handles `DELETE_REQUIREMENT` intent to archive/remove a requirement. |
+| **router_node** | Classifies each message as `CHAT`, `QUESTION`, `COMMAND`, or `REQUIREMENT` with a confidence score and reason (heuristic fallback). Below the confidence floor it asks a clarifying question instead of guessing. |
+| **requirement_matcher_node** | Maps the message to existing user stories (e.g. `US-001`) and proposes `NEW / UPDATE / DELETE / CLARIFY` via `requirement-matcher` + semantic change detection; low-confidence matches stop the workflow rather than mutate the wrong story. |
+| **gatherer_node** | Parses the requirement text into structured **user stories + acceptance criteria**; sanitizes and re-codes the LLM output, then reconciles it against previously persisted stories (create / update / archive / unchanged) using the merge service. |
+| **auditor_node** | Runs the **7-point banking compliance checklist** over changed stories, marks validation status, and emits clarification questions for anything ambiguous or non-compliant. `is_valid` is recomputed in code as *“no open questions remain”*, and every new question is merged with the previously unresolved ones. |
+| **architect_node** | Synthesizes the final **PRD markdown** and a **Mermaid diagram** from the *audited* dataset only, honouring human-owned/locked PRD parts. Skips the LLM entirely when nothing changed. |
+| **delete_requirement_node** | Handles `DELETE_REQUIREMENT` intent to archive/remove a requirement, asking for disambiguation when the target is unclear. |
+
+Every agent output crosses a **typed boundary**: it is parsed into Pydantic schemas from [`backend/app/schemas.py`](backend/app/schemas.py) (with a markdown-fence-stripping fallback in `llm_utils.invoke_llm_structured`), so malformed JSON can never silently reach the database.
 
 > **Workflow state machine** — the endpoint tracks `current_workflow_state` per project:
 >
@@ -356,27 +416,49 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 >
 > The Gatherer only fires in `GATHERING`/`REVIEWING`; the **Auditor** fires when you run it (or when reassessing clarification answers) in `AUDITING`; the **Architect** fires on *Generate PRD* in `ARCHITECTING`. Locked artifacts are excluded from LLM evaluation and from the merge, so a locked requirement can never be silently rewritten by an agent.
 
-## 🖱️ Using the App
+### Semantic memory (cross-session context)
+
+`backend/app/semantic_memory.py` gives the workflow a long-term memory that survives context windows, restarts, and new chat sessions:
+
+1. **Distil** — after a chat turn, a small LLM pass extracts durable, project-scoped facts/decisions (capped at `MEMORY_MAX_FACTS_PER_TURN`).
+2. **Embed** — each fact is embedded through LM Studio (`LM_STUDIO_EMBEDDING_MODEL`) and stored in `semantic_memories` as a 768-dim JSON vector.
+3. **Recall** — before building the next prompt, the most recent `MEMORY_CANDIDATE_LIMIT` memories are scored in process as `MEMORY_RELEVANCE_WEIGHT · cosine + (1 − weight) · recency_decay`, and the top `MEMORY_TOP_K` are injected — capped at `MEMORY_CONTEXT_MAX_TOKENS` — so memory never crowds out the actual brief.
+4. **Dedupe** — a fact whose cosine similarity to an existing memory exceeds `MEMORY_DEDUPE_SIMILARITY` refreshes that row instead of inserting a near-duplicate.
+
+Every step is **fail-open**: if the embedding model is not loaded, extraction/recall is skipped and the turn proceeds normally.
+
+### PRD parts & the version ledger
+
+A PRD is stored twice, on purpose:
+
+- **`prd_documents` / `prd_versions`** — the stitched whole-document ledger. `POST /api/prd/export/{project_id}` persists a new immutable snapshot (integer `version` + human-readable `semver`), the version **always advances** even when content is byte-identical, `.../diff` renders a section-level line diff against any earlier version, and `.../restore` records a **new** version rather than rewriting history.
+- **`prd_sections` / `prd_section_versions`** — the nine canonical parts (Cover, Stakeholders, Version History, Reviews, Contents, Business Overview, Product Scope, Technical & Operational, Appendix). Each part can be edited on its own (`PATCH`), locked (`/lock`), versioned, and reverted (`/revert/{version_number}`, again append-only). Parts flagged `ai_generatable=false` are human-owned: the Architect leaves them untouched, and the generated markdown is re-stitched around them.
+
+`version_service.py` records, for every snapshot, which sections were `created / updated / unchanged / removed / locked_preserved`, so the ledger proves that the lock contract was honoured rather than merely asserting it.
+
+## Using the App
 
 1. Open **http://localhost:3000**.
-2. In the **Agent Workspace**, create a project (or pick the seeded one).
-3. Type a feature brief in the chat (e.g. *"Add a PromptPay real-time merchant settlement flow"*). The Router + Matcher classify it and the **Gatherer** produces user stories. Then run the **Auditor** to validate compliance and **Generate PRD** to have the Architect draft the document.
-4. Alternatively, upload an existing brief (DOCX / PDF / MD / TXT) in the **Document Library** and hit **Process** — the extraction runs through the Gatherer and lands as a single staged pending action to confirm.
-5. Review the result in the **ConfirmationPanel** — a compact *merge window* that shows only what matters: **What changes** (requirements / user stories / acceptance criteria deltas) and **What is affected** (PRD sections and diagrams referencing the affected `REQ-`/`US-` codes, with `DANGLING` and `locked` flags). Then accept (`confirm`) or reject (`cancel`).
-6. Use the **lock** buttons on any artifact to freeze it.
+2. **Sign in** (bottom-left rail → *Sign in*) with the seeded system account you configured via `SYSTEM_USER_PASSWORD`, or create your own account while `SIGNUP_ENABLED=true`.
+3. In the **Agent Workspace**, create a project (or pick an existing one from the dashboard — pin/flag the ones you use most).
+4. Type a feature brief in the chat (e.g. *"Add a PromptPay real-time merchant settlement flow"*). The Router + Matcher classify it and the **Gatherer** produces user stories. Then run the **Auditor** to validate compliance and **Generate PRD** to have the Architect draft the document.
+5. Alternatively, upload an existing brief (DOCX / PDF / MD / TXT) in the **Document Library** and hit **Process** — the extraction runs through the Gatherer and lands as a single staged pending action to confirm.
+6. Review the result in the **ConfirmationPanel** — a compact *merge window* that shows only what matters: **What changes** (requirements / user stories / acceptance criteria deltas) and **What is affected** (PRD sections and diagrams referencing the affected `REQ-`/`US-` codes, with `DANGLING` and `locked` flags). Then accept (`confirm`) or reject (`cancel`).
+7. Inspect the **Traceability** tab for the Requirements ↔ Stories ↔ Acceptance Criteria ↔ PRD ↔ diagrams matrix and its coverage/gap report, and the **Version History** tab for the immutable PRD ledger (semver, diff against an earlier version, restore).
+8. Use the **lock** buttons on any artifact — including individual PRD sections — to freeze it; locked and human-owned parts are never rewritten by the agents.
 
-## 🔒 Human-in-the-Loop & Locking
+## Human-in-the-Loop & Locking
 
 - **Pending actions:** every substantive AI change is persisted as a `pending_actions` row with `status = WAITING_CONFIRMATION`. Nothing is applied until you call the confirm endpoint.
 - **Confirm / cancel:** `POST /api/confirm-action/{action_id}` applies the staged `proposed_changes` to `requirement_states` and deletes the action; `POST /api/cancel-action/{action_id}` discards it.
-- **Generic locks:** any supported artifact can be locked/unlocked via the generic endpoints. The UI applies **optimistic** lock updates with automatic rollback if the API call fails.
+- **Generic locks:** any supported artifact (`project`, `epic`, `requirement`, `user_story`, `acceptance_criteria`, `clarification_question`, `prd_document`, `prd_section`) can be locked/unlocked via the generic endpoints. `LockedBy` is recorded and mutation attempts on a locked artifact fail with `409 Conflict`. The UI applies **optimistic** lock updates with automatic rollback if the API call fails.
 
-## ⚡ Real-Time Updates (SSE)
+## Real-Time Updates (SSE)
 
 Instead of polling, the dashboard opens an `EventSource` on `/api/project/{id}/sse`. The backend's in-memory `EventManager` publishes an event on every mutation and streams `{"event": ..., "data": {...}}` frames (with `: ping` heartbeats every 15 s) to connected clients. The frontend refreshes project state once per event.
 ---
 
-## 📡 API Reference
+## API Reference
 
 The backend is a FastAPI app; full interactive documentation (with request/response schemas) is auto-generated at **`http://localhost:8000/docs`** (Swagger UI) and **`/redoc`**. All endpoints are under `/api` and are proxied by Vite on port 3000.
 
@@ -386,6 +468,19 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 |--------|------|-------------|
 | `GET` | `/api/health` | Liveness + LM Studio readiness; returns app name, gateway, context budget, and a live `/models` probe (`lm_studio_online`, latency, loaded models, error) |
 | `POST` | `/api/chat` | General chat with optional `project_id`; persists messages and emits a `chat_reply` SSE event |
+
+### Authentication
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/auth/register` | Create an account (bcrypt-hashed password, canonical roles only); `403` when `SIGNUP_ENABLED=false` |
+| `POST` | `/api/auth/login` | OAuth2 password flow → `{access_token, token_type, user}` (JWT, `JWT_EXPIRATION_MINUTES`) |
+| `GET` | `/api/auth/me` | Current user resolved from the Bearer token (the **database is the source of truth**, not the token claims) |
+| `GET` | `/api/auth/config` | Public capability probe (`signup_enabled`, `token_expiration_minutes`) so the UI can hide the sign-up form |
+| `POST` | `/api/auth/logout` | Audit-logged logout (JWTs are stateless, so this is primarily client-side) |
+| `POST` | `/api/auth/change-password` | Rotate the caller's password (also how the seeded system account is rotated) |
+
+> Project endpoints are protected by the `get_current_user` dependency and **scoped to the signed-in owner** — a caller only ever sees their own projects. Auth is header-based (`Authorization: Bearer <token>`, never cookies), which is why the CORS setup must never use `"*"` with credentials.
 
 ### Projects
 
@@ -422,6 +517,13 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `POST` | `/api/requirement-matcher` | Match a message to an existing story and recommend `NEW / UPDATE / DELETE / CLARIFY` |
 | `POST` | `/api/audit/respond/{question_id}` | Submit a stakeholder answer to close a clarification question |
 | `POST` | `/api/clarification/submit` | Submit clarification answers (`{project_id, answers}`), re-run the Auditor, and update workflow state |
+
+### Traceability & Impact
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/project/{project_id}/traceability` | Derived Requirement Traceability Matrix — one row per requirement linking stories, acceptance criteria, PRD sections and diagrams, plus project-wide coverage/gap report |
+| `GET` | `/api/pending-actions/{action_id}/impact?project_id=...` | Predict what a staged change touches (stories, PRD sections, diagrams) before the reviewer clicks Save — includes change predictions and `DANGLING` references to non-existent `REQ-`/`US-` codes |
 
 ### PRD & Versioning
 
@@ -482,7 +584,7 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock` | Generic lock. `artifact_type ∈ {project, epic, requirement, user_story, acceptance_criteria, clarification_question, prd_document}`; body `{locked_by?}` |
+| `POST` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock` | Generic lock. `artifact_type ∈ {project, epic, requirement, user_story, acceptance_criteria, clarification_question, prd_document, prd_section}`; body `{locked_by?}` |
 | `POST` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/unlock` | Generic unlock (same body) |
 | `GET` | `/api/project/{project_id}/artifacts/{artifact_type}/{artifact_id}/lock-status` | Read lock metadata (`is_locked`, `locked_by`, `locked_at`) |
 | `GET` | `/api/pending-actions/{project_id}` | List pending actions awaiting confirmation |
@@ -519,7 +621,7 @@ curl -X POST "http://localhost:3000/api/confirm-action/<action-id>?project_id=00
 ```
 ---
 
-## 🗄️ Database Schema
+## Database Schema
 
 Tables are provisioned by **Alembic migrations that run automatically at backend startup** (see [`backend/app/migrations.py`](backend/app/migrations.py)). The full PostgreSQL reference DDL lives in [`backend/init.sql`](backend/init.sql).
 
@@ -546,16 +648,17 @@ are allowlisted.
 
 | Table | Purpose |
 |-------|---------|
-| `users` | Stakeholders, product owners, analysts, auditor; default system user is seeded on startup |
-| `projects` | Banking systems / products under review; carries lock metadata |
+| `users` | Stakeholders, product owners, analysts, auditor; bcrypt `password_hash`, seeded system user on startup |
+| `projects` | Banking systems / products under review; owner (`user_id`), status workflow, pin/flag + lock metadata |
 | `epics` | High-level functional domains per project |
 | `requirements` | Individual requirement records (lock metadata incl. `is_locked`) |
-| `user_stories` | Structured `As a … I want … so that …` stories + ticket codes (`US-001`) |
+| `user_stories` | Structured `As a … I want … so that …` stories + ticket codes (`US-001`, unique per project) |
 | `acceptance_criteria` | Gherkin-style criteria per story |
 | `audit_results` | Compliance audit snapshots (`is_valid`, `passed/failed_checks`) |
 | `clarification_questions` | Open compliance questions and resolution answers |
-| `prd_documents` / `prd_versions` | Generated PRD records; immutable versioned snapshots |
-| `version_history` | Requirement-state version history |
+| `prd_documents` / `prd_versions` | Generated PRD records; immutable versioned snapshots (integer `version` + display `semver`) |
+| `prd_sections` / `prd_section_versions` | The nine editable PRD parts (independently lockable, with `ai_generatable`) and their append-only per-part history |
+| `semantic_memories` | Long-term per-project memory facts + 768-dim JSON embeddings (recall-scored in process) |
 | `requirement_states` | Centralized per-project JSON state (created by migrations) |
 | `pending_actions` | Human-in-the-loop staged changes (created by migrations) |
 | `conversation_messages` | Persistent chat history per project |
@@ -566,14 +669,21 @@ are allowlisted.
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Frontend type-check (tsc --noEmit)
 npm run lint
 
-# Backend unit tests (pytest)
+# Frontend unit tests (node:test via tsx): locks · auth · DDL parsing
+npm test
+
+# Backend unit tests (pytest — 27 modules: agents, auth, documents, impact,
+# merge, PRD sections/versions/restore, semantic memory, traceability, …)
 cd backend && python -m pytest tests/
+
+# Schema drift harness (init.sql ↔ models.py must stay identical)
+npm run schema:drift
 
 # SSE end-to-end stream test (runs against the real StreamingResponse generator)
 cd backend && python test_sse.py
@@ -586,7 +696,7 @@ npm run build
 
 ---
 
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
@@ -597,13 +707,18 @@ npm run build
 | Slow first response | Local models warm up on first call and may need to load into VRAM/RAM; subsequent calls are faster. |
 | CORS errors in the browser | Make sure `CORS_ORIGINS` in `backend/.env` includes `http://localhost:3000`. |
 | SQLite table errors after switching DBs | Delete `backend/app.db` (and rerun) when toggling between SQLite and Postgres; migrations run on startup. |
+| `401 Unauthorized` on every project call | You are not signed in (or the token expired after `JWT_EXPIRATION_MINUTES`). Sign in again; the seeded system account needs `SYSTEM_USER_PASSWORD` set in `backend/.env`. |
+| `403` on `POST /api/auth/register` | `SIGNUP_ENABLED=false` — the UI hides the sign-up form for the same reason. Toggle it, or sign in with an existing account. |
+| No semantic-memory recall / memory logs are skipped | `LM_STUDIO_EMBEDDING_MODEL` is not loaded in LM Studio (or `MEMORY_ENABLED=false`). This is fail-open by design — chat keeps working; load the embedding model to enable recall. |
 | Port already in use | `8000` (backend) or `3000` (vite) may be occupied; stop the other process or change ports in `package.json`. |
 
 ---
 
-## 🔐 Security Notes
+## Security Notes
 
 - **Local-only inference:** prompts for both chat and multi-agent flow are sent to your local LM Studio instance — nothing leaves your machine to an LLM provider.
-- **No auth layer yet:** projects currently default to the seeded system user (`00000000-0000-0000-0000-000000000000`). Suitable for local/enterprise demo use; add authentication before any public deployment.
+- **JWT authentication & per-owner scoping:** accounts are created through `POST /api/auth/register` (gated by `SIGNUP_ENABLED`, canonical roles only) and passwords are stored as **bcrypt hashes** in `users.password_hash` — never in plaintext. Endpoints depend on `get_current_user`, which validates the Bearer token **and** re-resolves the `sub` against the database (so a deleted account or a token signed with another environment's secret is rejected with `401`). Project listings are scoped to the signed-in owner; projects created without an authenticated caller belong to the seeded system account (`00000000-0000-0000-0000-000000000000`) for local/demo use.
+- **Tokens travel in headers, not cookies:** the SPA stores the JWT and sends `Authorization: Bearer <token>`, which is why `CORS_ORIGINS` must never be `"*"` with credentials.
 - **Append-only audit log:** `artifact_event_logs` intentionally stores no foreign keys and is never updated/deleted — it exists purely for traceability.
-- **Lock enforcement** is server-side (`LockService`), not just UI-based: locked artifacts raise `409 Conflict` on mutation attempts.
+- **Lock enforcement** is server-side (`LockService`), not just UI-based: locked artifacts raise `409 Conflict` on mutation attempts, and locked/human-owned PRD parts are excluded from AI regeneration.
+- **Rate limiting & budget guards:** LLM-facing endpoints are rate-limited per client IP, and oversized payloads are rejected with `413` before any model work happens.
