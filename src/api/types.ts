@@ -147,6 +147,79 @@ export interface PendingActionPayload {
 }
 
 // ----------------------------------------------------------------------------
+// Requirement Impact Analysis (merge preview window)
+// ----------------------------------------------------------------------------
+
+/** One requirement-level change predicted by the pending merge. */
+export interface RequirementImpact {
+  requirement_code: string;
+  title: string;
+  /** 'created' | 'updated' | 'removed' | 'unchanged'. */
+  change_kind: string;
+  changed_fields: string[];
+}
+
+/** One user-story-level change predicted by the pending merge. */
+export interface StoryImpact {
+  ticket_code: string;
+  story_title: string;
+  requirement_code: string;
+  /** 'created' | 'updated' | 'removed' | 'unchanged'. */
+  change_kind: string;
+  changed_fields: string[];
+  criteria_added: number;
+  criteria_removed: number;
+}
+
+/** A PRD section whose content references an affected code. */
+export interface ImpactedSection {
+  section_key: string;
+  title: string;
+  referenced_codes: string[];
+  is_locked: boolean;
+  /** 'references_changed' | 'references_removed' (dangling after merge). */
+  impact_kind: string;
+}
+
+/** A stored PRD-version diagram referencing an affected code. */
+export interface ImpactedDiagram {
+  label: string;
+  version: number;
+  referenced_codes: string[];
+}
+
+/** Rollup counts for the impact window header chips. */
+export interface ImpactSummary {
+  requirements_created: number;
+  requirements_updated: number;
+  requirements_removed: number;
+  stories_created: number;
+  stories_updated: number;
+  stories_removed: number;
+  criteria_added: number;
+  criteria_removed: number;
+  sections_impacted: number;
+  sections_impacted_locked: number;
+  diagrams_impacted: number;
+}
+
+/** READ-ONLY impact analysis for one pending merge action. */
+export interface ImpactAnalysisPayload {
+  action_id: string;
+  project_id: string;
+  action_type: string;
+  original_user_message: string;
+  current_version: number;
+  proposed_version?: number | null;
+  has_changes: boolean;
+  summary: ImpactSummary;
+  requirements: RequirementImpact[];
+  user_stories: StoryImpact[];
+  impacted_prd_sections: ImpactedSection[];
+  impacted_diagrams: ImpactedDiagram[];
+}
+
+// ----------------------------------------------------------------------------
 // Flattened requirement-state payload (`GET/PUT /api/project/{id}`,
 // `POST /api/clarification/submit`)
 // ----------------------------------------------------------------------------
@@ -507,4 +580,66 @@ export interface TraceabilityPayload {
   diagrams: TraceabilityDiagram[];
   coverage: TraceabilityCoverage;
 }
+
+// ----------------------------------------------------------------------------
+// Authentication (backend/app/routes/auth.py)
+// ----------------------------------------------------------------------------
+
+/** Public user projection returned by login / register / me (`UserResponse`). */
+export interface AuthUserPayload {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  /** Users table has no is_active column yet — always true for now. */
+  is_active: boolean;
+  created_at?: string | null;
+}
+
+/** Response from POST /api/auth/login (`LoginResponse`). */
+export interface AuthSessionPayload {
+  access_token: string;
+  token_type: string;
+  user: AuthUserPayload;
+}
+
+/** Response from POST /api/auth/register (`RegisterResponse`). */
+export interface AuthRegisterResponse {
+  message: string;
+  user: AuthUserPayload;
+}
+
+/** Request body for POST /api/auth/register (`RegisterRequest`). */
+export interface AuthRegisterRequest {
+  email: string;
+  password: string;
+  full_name: string;
+  role?: string;
+}
+
+/**
+ * Response from GET /api/auth/config — an unauthenticated capabilities probe so
+ * the UI knows whether to offer a sign-up form before it holds a token.
+ */
+export interface AuthConfigPayload {
+  signup_enabled: boolean;
+  token_expiration_minutes: number;
+}
+
+/** Response from POST /api/auth/logout and /api/auth/change-password. */
+export interface AuthMessageResponse {
+  message: string;
+}
+
+/** Roles offered by the sign-up form (mirrors the roles documented in init.sql
+ *  and enforced server-side by POST /api/auth/register). */
+export const AUTH_ROLES = [
+  'Business Analyst',
+  'System Analyst',
+  'Product Owner',
+  'Technical Product Owner',
+  'Project Manager',
+  'Developer',
+  'QA',
+] as const;
 

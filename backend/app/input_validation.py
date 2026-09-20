@@ -80,6 +80,21 @@ def count_body_tokens(payload: Any) -> int:
     return count_tokens(encoded)
 
 
+def _oversize_detail(label: str, measured: int) -> str:
+    """Build the actionable 413 detail message shared by the budget guards.
+
+    Tells the operator exactly which knob to turn: the budget lives in
+    ``backend/.env`` (``MAX_CONTEXT_TOKENS``) and may only be raised when the
+    loaded LM Studio model actually supports a larger context window.
+    """
+    return (
+        f"{label} is too large: ~{measured} tokens exceeds the configured "
+        f"context budget of {settings.MAX_CONTEXT_TOKENS} tokens. Trim the "
+        "input/project content, or raise MAX_CONTEXT_TOKENS in backend/.env "
+        "(only if the loaded LM Studio model supports a larger context window)."
+    )
+
+
 def validate_text_budget(text: str, label: str = "input") -> int:
     """Raise HTTP 413 if ``text`` exceeds ``MAX_CONTEXT_TOKENS``; else return count."""
     token_count = count_tokens(text)
@@ -92,10 +107,7 @@ def validate_text_budget(text: str, label: str = "input") -> int:
         )
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=(
-                f"{label} is too large: ~{token_count} tokens exceeds the "
-                f"configured context budget of {settings.MAX_CONTEXT_TOKENS} tokens."
-            ),
+            detail=_oversize_detail(label, token_count),
         )
     return token_count
 
@@ -112,10 +124,7 @@ def validate_body_budget(payload: Any, label: str = "request") -> int:
         )
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=(
-                f"{label} is too large: ~{total} tokens exceeds the configured "
-                f"context budget of {settings.MAX_CONTEXT_TOKENS} tokens."
-            ),
+            detail=_oversize_detail(label, total),
         )
     return total
 

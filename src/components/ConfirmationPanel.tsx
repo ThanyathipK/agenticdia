@@ -1,58 +1,329 @@
-import React from 'react';
-import { Check, X, AlertTriangle } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, Check, GitCompare, Lock, X } from 'lucide-react';
 import { api } from '../api/client';
-import type { PendingActionPayload } from '../api/types';
+import type {
+  ConfirmActionResponse,
+  ImpactAnalysisPayload,
+  PendingActionPayload,
+} from '../api/types';
 import { handleError } from './Toast';
 
 interface ConfirmationPanelProps {
   action: PendingActionPayload;
-  onConfirm: () => void;
+  /** Receives the confirm response so the caller can report the saved version. */
+  onConfirm: (result?: ConfirmActionResponse) => void;
   onCancel: () => void;
 }
 
+// ----------------------------------------------------------------------------
+// The merge window shows ONLY what matters — what changes and what is affected.
+// `proposed_changes` shapes vary slightly between the chat MERGE flow and the
+// document-extraction INSERT flow, so the fallback counters read defensively.
+// ----------------------------------------------------------------------------
+
+/** Compact shape of the staged draft — the fallback when impact analysis fails. */
+interface DraftShape {
+  requirements: number;
+  stories: number;
+  versionNumber?: number;
+}
+
+function asArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+}
+
+/**
+ * Color-coded change-kind badge (created/updated/removed). `label` overrides the
+ * default wording so a dangling reference can be flagged explicitly.
+ */
+function ChangeBadge({ kind, label }: { kind: string; label?: string }) {
+  const styles: Record<string, string> = {
+    created: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    updated: 'bg-blue-50 text-blue-700 border-blue-200',
+    removed: 'bg-red-50 text-red-700 border-red-200',
+    unchanged: 'bg-slate-50 text-slate-500 border-slate-200',
+  };
+  const labels: Record<string, string> = {
+    created: 'NEW',
+    updated: 'UPDATED',
+    removed: 'REMOVED',
+    unchanged: 'UNCHANGED',
+  };
+  return (
+    <span
+      className={`text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded border shrink-0 ${
+        styles[kind] ?? styles.unchanged
+      }`}
+    >
+      {label ?? labels[kind] ?? kind.toUpperCase()}
+    </span>
+  );
+}
+
+/**
+ * Merge window body: the ONLY things worth judging before Save — what changes
+ * (requirements / user stories / acceptance criteria) and what is affected (PRD
+ * sections and diagrams that reference the affected `REQ-`/`US-` codes).
+ */
+function ImpactAnalysisSection({
+  impact,
+  state,
+  draft,
+}: {
+  impact: ImpactAnalysisPayload | null;
+  state: 'loading' | 'ready' | 'error';
+  draft: DraftShape;
+}) {
+  const summary = impact?.summary;
+  const changedRequirements = impact?.requirements.filter(r => r.change_kind !== 'unchanged') ?? [];
+  const changedStories = impact?.user_stories.filter(s => s.change_kind !== 'unchanged') ?? [];
+  const impactedSections = impact?.impacted_prd_sections ?? [];
+  const impactedDiagrams = impact?.impacted_diagrams ?? [];
+  const nothingAffected = impactedSections.length === 0 && impactedDiagrams.length === 0;
+
+  const chips: Array<{ label: string; tone: string }> = [];
+  if (summary) {
+    if (summary.requirements_created) chips.push({ label: `+${summary.requirements_created} requirement`, tone: 'bg-emerald-50 text-emerald-700 border-emerald-200' });
+    if (summary.requirements_updated) chips.push({ label: `~${summary.requirements_updated} requirements updated`, tone: 'bg-blue-50 text-blue-700 border-blue-200' });
+    if (summary.requirements_removed) chips.push({ label: `−${summary.requirements_removed} requirement removed`, tone: 'bg-red-50 text-red-700 border-red-200' });
+    if (summary.stories_created) chips.push({ label: `+${summary.stories_created} story`, tone: 'bg-emerald-50 text-emerald-700 border-emerald-200' });
+    if (summary.stories_updated) chips.push({ label: `~${summary.stories_updated} stories updated`, tone: 'bg-blue-50 text-blue-700 border-blue-200' });
+    if (summary.stories_removed) chips.push({ label: `−${summary.stories_removed} story removed`, tone: 'bg-red-50 text-red-700 border-red-200' });
+    if (summary.criteria_added) chips.push({ label: `+${summary.criteria_added} criteria`, tone: 'bg-emerald-50 text-emerald-700 border-emerald-200' });
+    if (summary.criteria_removed) chips.push({ label: `−${summary.criteria_removed} criteria`, tone: 'bg-red-50 text-red-700 border-red-200' });
+    if (summary.sections_impacted) chips.push({ label: `${summary.sections_impacted} PRD section${summary.sections_impacted > 1 ? 's' : ''} impacted`, tone: 'bg-amber-50 text-amber-700 border-amber-200' });
+    if (summary.diagrams_impacted) chips.push({ label: `${summary.diagrams_impacted} diagram${summary.diagrams_impacted > 1 ? 's' : ''} impacted`, tone: 'bg-amber-50 text-amber-700 border-amber-200' });
+  }
+
+  return (
+    <div className="px-4 pt-3">
+      {/* Header: what the merge does + the version it would create */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <GitCompare className="w-4 h-4 text-primary shrink-0" />
+        <span className="text-xs font-bold text-on-surface">What changes vs what is affected</span>
+        {state === 'ready' && impact && (
+          <span className="text-[10px] font-mono text-on-surface-variant ml-auto shrink-0">
+            v{impact.current_version} → v{impact.proposed_version ?? impact.current_version}
+          </span>
+        )}
+      </div>
+
+      {state === 'loading' && (
+        <p className="mt-2 text-[11px] text-on-surface-variant font-mono">
+          Analyzing changes and affected artifacts…
+        </p>
+      )}
+
+      {state === 'error' && (
+        <p className="mt-2 text-[11px] text-amber-700">
+          Impact analysis is unavailable — the draft holds {draft.requirements} requirement
+          {draft.requirements === 1 ? '' : 's'} · {draft.stories} stor{draft.stories === 1 ? 'y' : 'ies'}
+          {draft.versionNumber !== undefined ? ` (v${draft.versionNumber})` : ''}. Nothing is saved until you click Save.
+        </p>
+      )}
+
+      {state === 'ready' && impact && (
+        <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3 space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
+          {/* WHAT CHANGES */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-1">What changes</p>
+            {chips.length > 0 ? (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {chips.map((chip, i) => (
+                  <span key={i} className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${chip.tone}`}>
+                    {chip.label}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-500">
+                Nothing — the draft matches the stored state.
+              </p>
+            )}
+            {(changedRequirements.length > 0 || changedStories.length > 0) && (
+              <ul className="mt-1.5 space-y-1">
+                {changedRequirements.map((r, i) => (
+                  <li key={`req-${i}`} className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <ChangeBadge kind={r.change_kind} />
+                    <span className="font-mono font-bold text-slate-700">{r.requirement_code}</span>
+                    <span className="text-slate-600 break-words min-w-0">{r.title || '(untitled)'}</span>
+                  </li>
+                ))}
+                {changedStories.map((s, i) => (
+                  <li key={`story-${i}`} className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <ChangeBadge kind={s.change_kind} />
+                    <span className="font-mono font-bold text-primary">{s.ticket_code}</span>
+                    <span className="text-slate-600 break-words min-w-0">{s.story_title || '(untitled)'}</span>
+                    {s.criteria_added > 0 && (
+                      <span className="text-[10px] font-mono text-emerald-600 font-bold">+{s.criteria_added} criteria</span>
+                    )}
+                    {s.criteria_removed > 0 && (
+                      <span className="text-[10px] font-mono text-red-600 font-bold">−{s.criteria_removed} criteria</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* WHAT IS AFFECTED */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-1">What is affected</p>
+            {nothingAffected ? (
+              <p className="text-[11px] text-slate-500">
+                No PRD section or diagram references the changed codes.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {impactedSections.map((sec, i) => (
+                  <li key={`sec-${i}`} className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <ChangeBadge
+                      kind={sec.impact_kind === 'references_removed' ? 'removed' : 'updated'}
+                      label={sec.impact_kind === 'references_removed' ? 'DANGLING' : undefined}
+                    />
+                    <span className="text-slate-700 font-semibold break-words min-w-0">
+                      {sec.title || sec.section_key}
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {sec.referenced_codes.join(', ')}
+                    </span>
+                    {sec.is_locked && (
+                      <span className="flex items-center gap-0.5 text-[10px] text-amber-700 font-mono">
+                        <Lock className="w-3 h-3" /> locked
+                      </span>
+                    )}
+                  </li>
+                ))}
+                {impactedDiagrams.map((d, i) => (
+                  <li key={`diagram-${i}`} className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <ChangeBadge kind="updated" />
+                    <span className="text-slate-700 font-semibold break-words min-w-0">{d.label}</span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {d.referenced_codes.join(', ')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, onConfirm, onCancel }) => {
+  const [isWorking, setIsWorking] = useState<boolean>(false);
+
+  // Compact shape of the staged draft — parsed once per action and used as the
+  // fallback summary when the impact analysis endpoint is unavailable, so Save
+  // is never a blind click.
+  const draft = useMemo<DraftShape>(() => {
+    const proposed = (action.proposed_changes ?? {}) as Record<string, unknown>;
+    const requirements = asArray(proposed.requirements);
+    const stories = requirements.reduce((acc, r) => acc + asArray(r.user_stories).length, 0)
+      + asArray(proposed.user_stories).length;
+    const versionNumber = typeof proposed.version_number === 'number' ? proposed.version_number : undefined;
+    return { requirements: requirements.length, stories, versionNumber };
+  }, [action.proposed_changes]);
+
   const handleConfirm = async () => {
+    if (isWorking) return;
+    setIsWorking(true);
     try {
-      await api.confirmAction(action.id, action.project_id);
-      onConfirm();
+      const result = await api.confirmAction(action.id, action.project_id);
+      onConfirm(result);
     } catch (error) {
-      handleError("Failed to confirm the action.", error);
+      handleError('Failed to confirm the action.', error);
+    } finally {
+      setIsWorking(false);
     }
   };
 
   const handleCancel = async () => {
+    if (isWorking) return;
+    setIsWorking(true);
     try {
       await api.cancelAction(action.id, action.project_id);
       onCancel();
     } catch (error) {
-      handleError("Failed to cancel the action.", error);
+      handleError('Failed to cancel the action.', error);
+    } finally {
+      setIsWorking(false);
     }
   };
 
+  // ---- Requirement Impact Analysis (READ-ONLY) -------------------------------
+  // What this merge changes and which downstream artifacts are affected.
+  // Fetched once per action; a failure NEVER blocks Save/Cancel.
+  const [impact, setImpact] = useState<ImpactAnalysisPayload | null>(null);
+  const [impactState, setImpactState] = useState<'loading' | 'ready' | 'error'>('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+    setImpact(null);
+    setImpactState('loading');
+    api.getActionImpact(action.id, action.project_id)
+      .then(result => {
+        if (!cancelled) {
+          setImpact(result);
+          setImpactState('ready');
+        }
+      })
+      .catch(err => {
+        console.warn('Impact analysis unavailable.', err);
+        if (!cancelled) setImpactState('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [action.id, action.project_id]);
+
+  // True when the draft actually changes something (the impact result when
+  // known, otherwise the draft's own counts).
+  const hasChanges = impact ? impact.has_changes : draft.requirements > 0 || draft.stories > 0;
+
   return (
-    <div className="bg-white border border-amber-200 rounded-lg p-4 shadow-sm my-4">
-      <div className="flex items-start gap-3">
-        <AlertTriangle className="text-amber-500 mt-0.5" size={20} />
-        <div className="flex-1">
-          <h3 className="font-semibold text-amber-900">Pending {action.action_type}</h3>
-          <p className="text-sm text-amber-700 mt-1 break-words">
-            You have a pending change based on: "{action.original_user_message}"
-          </p>
-          <div className="mt-4 flex gap-2">
-            <button
-              onClick={handleConfirm}
-              className="flex items-center gap-1 bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded text-sm font-medium"
-            >
-              <Check size={16} /> Confirm
-            </button>
-            <button
-              onClick={handleCancel}
-              className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-sm font-medium"
-            >
-              <X size={16} /> Cancel
-            </button>
-          </div>
+    <div className="bg-white border-2 border-amber-300 rounded-2xl shadow-sm my-4 overflow-hidden">
+      {/* Header */}
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-3 flex items-start gap-3">
+        <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
+          <AlertTriangle className="text-amber-600 w-4 h-4" />
         </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-bold text-sm text-amber-900">
+            Pending {action.action_type} — Review Before Saving
+          </h3>
+          <p className="text-xs text-amber-800 mt-0.5 break-words">
+            {hasChanges
+              ? 'Nothing is saved yet — below is what changes and what is affected. Save applies this version; Cancel rolls back to the version before.'
+              : `You have a pending change based on: "${action.original_user_message}"`}
+          </p>
+        </div>
+      </div>
+
+      {/* Merge window: what changes + what is affected (READ-ONLY) */}
+      <ImpactAnalysisSection impact={impact} state={impactState} draft={draft} />
+
+      {/* Actions */}
+      <div className="flex items-center gap-2 px-4 py-3">
+        <button
+          onClick={handleConfirm}
+          disabled={isWorking}
+          className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Check size={16} /> Save
+        </button>
+        <button
+          onClick={handleCancel}
+          disabled={isWorking}
+          className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <X size={16} /> Cancel
+        </button>
+        <span className="text-[10px] text-on-surface-variant ml-auto font-mono">
+          {isWorking ? 'Working…' : 'Save applies this version · Cancel rolls back'}
+        </span>
       </div>
     </div>
   );

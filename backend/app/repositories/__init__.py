@@ -24,6 +24,7 @@ from app.repositories.project import ProjectRepository
 from app.repositories.requirement import RequirementRepository
 from app.repositories.requirement_state import RequirementStateRepository
 from app.repositories.semantic_memory import SemanticMemoryRepository
+from app.repositories.user import UserRepository
 from app.repositories.user_story import UserStoryRepository
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "DocumentRepository",
     "PendingActionRepository",
     "ArtifactEventLogRepository",
+    "UserRepository",
 ]

@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 from typing import TypedDict, Dict, Any, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
@@ -7,11 +8,17 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository
-from app.schemas import GatheredRequirements
+from app.schemas import GatheredRequirements, MermaidDiagramResult
 from app.prompt_loader import load_prompt
-from app.llm_factory import llm, parser
+from app.llm_factory import build_llm, llm, parser
 from app.llm_utils import invoke_llm_structured
-from app.merge_service import collect_acceptance_criteria, filter_active_stories, merge_user_stories, normalize_ticket_code
+from app.merge_service import (
+    collect_acceptance_criteria,
+    format_story_context_lines,
+    merge_user_stories_with_report,
+    normalize_ticket_code,
+    normalize_title,
+)
 from app.prd_section_service import prd_is_sectioned_markdown
 from app.semantic_service import (
     classify_workflow,
@@ -24,6 +31,12 @@ from app.semantic_service import (
 # Set up logging configuration for the multi-agent framework
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app.agents")
+
+# Dedicated client for the flow-diagram call. The shared ``llm`` runs with a
+# 3000-token structured-output budget sized for the gatherer/auditor JSON,
+# while an architecture flowchart for a larger project can easily need more
+# headroom (truncated Mermaid is unrenderable).
+diagram_llm = build_llm(max_tokens=4096)
 
 # ==========================================
 # STATE MANAGEMENT
@@ -65,6 +78,7 @@ class AgentState(TypedDict, total=False):
     target_agent: str # Supports on-demand agent execution flow
     requirement_state: RequirementState
     detected_intent: Optional[str]
+    intent_confidence: Optional[float]
     workflow_routing: Optional[dict]
     agent_message: Optional[str]
 
@@ -216,11 +230,19 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
     existing_stories = req_state.get("user_stories", [])
 
     detected_intent = state.get("detected_intent")
+    intent_confidence = state.get("intent_confidence")
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_stories)
-        detected_intent = intent_res.get("intent", "NEW_REQUIREMENT")
+        # Safe fallback: when the classifier cannot be reached we must NOT
+        # invent a new requirement - treating the message as an update keeps
+        # the existing backlog intact (creating bogus stories is worse).
+        detected_intent = intent_res.get("intent", "UPDATE_REQUIREMENT")
+        intent_confidence = intent_res.get("confidence", 1.0)
     elif not detected_intent:
         detected_intent = "GENERAL_CHAT"
+    if intent_confidence is None:
+        intent_confidence = 1.0
+    intent_confidence = float(intent_confidence)
 
     match_result = await match_requirement(raw_input, detected_intent, existing_stories)
     matcher_status = str(match_result.get("status", "MATCHED")).upper()
@@ -264,6 +286,7 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
         return {
             "requirement_state": req_state,
             "detected_intent": detected_intent,
+            "intent_confidence": intent_confidence,
             "requirement_match": match_result,
             "current_version": req_state.get("version_number", 1)
         }
@@ -271,6 +294,7 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
     return {
         "requirement_state": req_state,
         "detected_intent": detected_intent,
+        "intent_confidence": intent_confidence,
         "requirement_match": match_result
     }
 
@@ -314,32 +338,403 @@ def _prd_follows_krungsri_template(prd_markdown: Any) -> bool:
     return KRUNGSRI_TEMPLATE_MARKER in text or KRUNGSRI_TEMPLATE_MARKER_LATEX in text
 
 
+# Mermaid diagram families accepted for the Architecture Flows panel. The
+# frontend (ArchitectureFlows.tsx) only displays the stored diagram when it
+# matches this header pattern, so anything else would silently fall back to
+# the derived flowchart instead of the LLM's own diagram.
+_MERMAID_HEADER_RE = re.compile(r"^\s*(flowchart|graph)\s+(TD|TB|LR|RL)\b", re.IGNORECASE)
+
+
+def _sanitize_mermaid_diagram(text: Any) -> str:
+    """
+    Clean and validate an LLM-produced Mermaid diagram string.
+
+    Strips markdown code fences and surrounding whitespace, then requires the
+    classic flowchart header (``flowchart TD`` / ``graph TD`` ...) that the
+    Architecture Flows panel accepts. Returns "" for anything else so the
+    caller can keep the previously stored diagram instead of persisting an
+    unrenderable one.
+    """
+    clean = str(text or "").strip()
+    if clean.startswith("```"):
+        # Tolerate fenced payloads (```mermaid ... ``` / ``` ... ```).
+        clean = re.sub(r"^```[a-zA-Z]*\s*", "", clean)
+        clean = re.sub(r"\s*```$", "", clean).strip()
+    if not clean or not _MERMAID_HEADER_RE.match(clean):
+        return ""
+    return clean
+
+
+async def _generate_flow_diagram(
+    project_id: str,
+    req_state: Dict[str, Any],
+    project_data: Dict[str, Any],
+) -> str:
+    """
+    Ask the LLM for a Mermaid ``flowchart TD`` of the system described by the
+    project's own dataset - the same validated business goals / actors /
+    requirements / user stories / acceptance criteria the PRD body was just
+    filled from. Returns the sanitized Mermaid source, or "" when the LLM
+    fails or answers with something that is not a flowchart; callers keep the
+    previously stored diagram in that case, so a diagram hiccup can never
+    fail a PRD generation.
+    """
+    try:
+        dataset = {
+            "project_name": req_state.get("project_name", "") or "",
+            "version": req_state.get("version_number", 1),
+            **(project_data or {}),
+        }
+        prompt_template = PromptTemplate(
+            template=load_prompt("architect_diagram"),
+            input_variables=["project_name", "current_version", "project_dataset", "format_instructions"],
+        )
+        format_instructions = PydanticOutputParser(
+            pydantic_object=MermaidDiagramResult
+        ).get_format_instructions()
+
+        def _is_flowchart(result: Dict[str, Any]) -> bool:
+            return bool(_sanitize_mermaid_diagram(result.get("mermaid_diagram", "")))
+
+        result = await invoke_llm_structured(
+            diagram_llm,
+            prompt_template,
+            MermaidDiagramResult,
+            variables={
+                "project_name": dataset.get("project_name") or "Untitled Project",
+                "current_version": dataset.get("version", 1),
+                "project_dataset": json.dumps(dataset, ensure_ascii=False),
+                "format_instructions": "Output ONLY raw JSON. No markdown.",
+            },
+            description="architect flow diagram",
+            format_instructions=format_instructions,
+            validate=_is_flowchart,
+        )
+        diagram = _sanitize_mermaid_diagram(result.get("mermaid_diagram", ""))
+        if diagram:
+            logger.info(
+                f"[ARCHITECT] Generated flow diagram for project {project_id} ({len(diagram)} chars)."
+            )
+        else:
+            logger.warning(
+                f"[ARCHITECT] Flow diagram for project {project_id} was not a valid flowchart; "
+                "keeping the previously stored diagram."
+            )
+        return diagram
+    except Exception as diagram_err:
+        # FAIL-OPEN: a diagram hiccup must never fail the PRD generation that
+        # already succeeded. Callers keep the previously stored diagram.
+        logger.error(
+            f"[ARCHITECT] Flow diagram generation failed for project {project_id}: {str(diagram_err)}"
+        )
+        return ""
+
+
+# ==========================================
+# GATHERER HELPERS
+# ==========================================
+_REQUIREMENT_CODE_RE = re.compile(r"^(?:REQ[-_ ]?)(\d+)$", re.IGNORECASE)
+# Below this classifier confidence the Gatherer is told to prefer the safest
+# interpretation of an ambiguous message (preserve > invent).
+_LOW_INTENT_CONFIDENCE = 0.65
+_PLACEHOLDER_EPIC_NAMES = ("", "Untitled Epic", "Structured Requirements Draft", "Document Epic")
+_EPIC_RENAME_PATTERNS = (
+    r"\brenam\w*\s+(?:the\s+)?epic\b",
+    r"\bepic\b[^.;\n]{0,30}\brenam\w*\b",
+    r"\bchang\w*\s+(?:the\s+)?epic\b",
+    r"\bepic\b[^.;\n]{0,30}\bchang\w*\b",
+    r"\b(?:new|set|call(?:ed)?)\s+(?:the\s+)?epic\b",
+    r"\bupdate\s+(?:the\s+)?epic\b",
+    r"\bepic\s+name\b",
+    r"\bepic\b[^.;\n]{0,30}\bshould\s+be\b",
+)
+
+
+def _normalize_requirement_code(code: Any) -> str:
+    """Canonicalize an LLM/DB requirement code to ``REQ-NNN`` (``''`` if invalid)."""
+    match = _REQUIREMENT_CODE_RE.match(str(code or "").strip())
+    return f"REQ-{int(match.group(1)):03d}" if match else ""
+
+
+def _generate_next_requirement_code(used_codes: Any) -> str:
+    """Return the lowest free ``REQ-NNN`` code above every used code."""
+    max_num = 0
+    for code in used_codes or []:
+        match = _REQUIREMENT_CODE_RE.match(str(code or "").strip())
+        if match:
+            max_num = max(max_num, int(match.group(1)))
+    return f"REQ-{max_num + 1:03d}"
+
+
+def _renumber_fresh_project_codes(
+    existing_requirements: Any,
+    llm_group_meta: Dict[str, Dict[str, Any]],
+) -> Dict[str, str]:
+    """Fresh boards always start at ``REQ-001``: declared codes -> 1..N.
+
+    Small local models sometimes copy the gatherer prompt's "new requirement"
+    example verbatim and start a brand-new project at ``REQ-002``. Nothing can
+    reference requirement codes yet while the board is empty, so the LLM's
+    declared groups are deterministically renumbered 1..N in declaration
+    order. Returns an empty mapping when renumbering is not applicable — the
+    board already holds requirements (legacy codes must never be renumbered:
+    the PRD text and traceability references the old codes) or the declared
+    codes already run 1..N.
+    """
+    if existing_requirements or not llm_group_meta:
+        return {}
+    renumber = {
+        old: _default_requirement_code(idx)
+        for idx, old in enumerate(llm_group_meta)
+    }
+    if all(new == old for old, new in renumber.items()):
+        return {}
+    return renumber
+
+
+def _user_requests_epic_rename(raw_input: str) -> bool:
+    """Regex detection of an explicit epic rename request.
+
+    The previous substring check (``"rename epic"`` etc.) missed natural
+    phrasings such as "rename the epic to X" or "the epic should be called X",
+    which silently kept a stale epic name after the user renamed it.
+    """
+    if not raw_input:
+        return False
+    lowered = raw_input.lower()
+    return any(re.search(pattern, lowered) for pattern in _EPIC_RENAME_PATTERNS)
+
+
+def _resolve_epic_name(req_state: Dict[str, Any], llm_epic_name: str, raw_input: str) -> str:
+    """Keep the persisted epic name unless the user explicitly renames it.
+
+    Placeholder/stored-empty epic names always defer to the LLM's suggestion,
+    which is how a first extraction names the project epic.
+    """
+    requirements = req_state.get("requirements", []) or []
+    existing_epic_name = requirements[0].get("title", "") if requirements else ""
+    is_placeholder = existing_epic_name in _PLACEHOLDER_EPIC_NAMES
+    if existing_epic_name and not is_placeholder and not _user_requests_epic_rename(raw_input):
+        return existing_epic_name
+    return llm_epic_name or existing_epic_name or "Structured Requirements Draft"
+
+
+def _sanitize_incoming_story(raw: Any) -> Optional[Dict[str, Any]]:
+    """Normalize one LLM-drafted user story before it enters the merge.
+
+    Trims every field, coerces acceptance criteria into a de-duplicated list
+    of non-empty strings and rejects entries without any usable title/action
+    (merge identity matching relies on ticket codes and titles).
+    """
+    if not isinstance(raw, dict):
+        return None
+    acs = raw.get("acceptance_criteria") or []
+    if isinstance(acs, str):
+        acs = [acs]
+    cleaned_ac: List[str] = []
+    seen_ac = set()
+    for ac in acs:
+        text = str(ac or "").strip()
+        key = " ".join(text.lower().split())
+        if text and key not in seen_ac:
+            seen_ac.add(key)
+            cleaned_ac.append(text)
+    story = {
+        "ticket_code": normalize_ticket_code(raw.get("ticket_code")),
+        "story_title": str(raw.get("story_title") or "").strip(),
+        "as_a": str(raw.get("as_a") or "").strip(),
+        "i_want_to": str(raw.get("i_want_to") or "").strip(),
+        "so_that": str(raw.get("so_that") or "").strip(),
+        "acceptance_criteria": cleaned_ac,
+    }
+    if not story["story_title"] and not story["i_want_to"]:
+        return None
+    if not cleaned_ac:
+        logger.warning(
+            "[GATHERER] Story draft has no acceptance criteria; flagging it for audit follow-up: '%s'",
+            story["story_title"] or story["i_want_to"],
+        )
+    return story
+
+
+def _build_intent_guidance(
+    detected_intent: str,
+    intent_confidence: float,
+    requirement_match: Optional[Dict[str, Any]] = None,
+    has_existing_stories: bool = False,
+) -> str:
+    """Translate the detected intent + matcher result into explicit,
+    unambiguous extraction rules injected into the Gatherer prompt.
+
+    Without this the LLM only saw the raw intent label and regularly
+    re-emitted the whole backlog (with reworded duplicates) instead of
+    extracting just the requested change.
+    """
+    lines = [f"Detected user intent: {detected_intent} (classifier confidence {intent_confidence:.2f})."]
+    if intent_confidence < _LOW_INTENT_CONFIDENCE:
+        lines.append(
+            f"CAUTION: intent confidence is LOW ({intent_confidence:.2f}). When the raw input is "
+            "ambiguous, prefer the SAFEST interpretation: keep every existing user story and its "
+            "acceptance criteria untouched and only add a story when the input clearly describes "
+            "behaviour that does not exist yet."
+        )
+    if not has_existing_stories:
+        lines.append(
+            "This is the FIRST extraction for the project: create fresh requirements, "
+            "user stories and acceptance criteria from the raw input."
+        )
+        return "\n".join(lines)
+
+    if detected_intent == "CREATE_REQUIREMENT":
+        lines.append(
+            "The user wants to ADD something NEW. Extract ONLY the new feature(s) described in the "
+            "raw input as new user stories. PRESERVE every existing user story in "
+            "<current_project_context> exactly as-is (same ticket codes, same acceptance "
+            "criteria, same parent requirement) — do not re-emit them reworded."
+        )
+    elif detected_intent == "UPDATE_REQUIREMENT":
+        target = (requirement_match or {}).get("matched_requirement_id")
+        if target:
+            lines.append(
+                f"The user wants to MODIFY the existing story {target}. Return that story with the "
+                "requested change applied, keeping its exact ticket code and parent requirement. "
+                "PRESERVE every other existing story exactly as-is."
+            )
+        else:
+            lines.append(
+                "The user wants to MODIFY an existing story. Use <semantic_change_recommendations> "
+                "to find the target ticket code and return ONLY that story modified (same ticket "
+                "code, same parent requirement). PRESERVE every other existing story exactly as-is."
+            )
+    elif detected_intent == "DELETE_REQUIREMENT":
+        lines.append(
+            "The user wants to REMOVE something. Do NOT include the removed story in the output "
+            "(see <semantic_change_recommendations> for the target ticket code). PRESERVE every "
+            "other existing story exactly as-is."
+        )
+    elif detected_intent == "CLARIFY_REQUIREMENT":
+        lines.append(
+            "The user is asking for clarification or validation. Mirror the current requirements "
+            "as-is; do NOT invent or apply changes."
+        )
+    else:
+        lines.append(
+            "Classify each change using <semantic_change_recommendations> and preserve every "
+            "existing story that has no recommendation exactly as-is."
+        )
+    return "\n".join(lines)
+
+
+def _build_change_summary(merge_report: Dict[str, Any]) -> str:
+    """Compose the chat message describing exactly what the gather changed.
+
+    The old message was a static "Requirements Gathered & Updated!" line that
+    gave the Product Owner no idea what had been added, updated or removed.
+    """
+    buckets: Dict[str, List[str]] = {"created": [], "updated": [], "archived": [], "conflict": []}
+    for key, info in (merge_report or {}).items():
+        action = str((info or {}).get("action", ""))
+        if action in buckets:
+            buckets[action].append(str(key))
+
+    lines = ["📥 **Requirements Gathered & Updated!**"]
+    if buckets["created"]:
+        lines.append(
+            f"✅ **Added** {len(buckets['created'])} new user story(ies): {', '.join(sorted(buckets['created']))}"
+        )
+    if buckets["updated"]:
+        lines.append(
+            f"🔄 **Updated** {len(buckets['updated'])} user story(ies): {', '.join(sorted(buckets['updated']))}"
+        )
+    if buckets["archived"]:
+        lines.append(
+            f"🗑️ **Archived** {len(buckets['archived'])} user story(ies): {', '.join(sorted(buckets['archived']))}"
+        )
+    if buckets["conflict"]:
+        lines.append(
+            f"⚠️ {len(buckets['conflict'])} locked story(ies) matched a removal request but stayed active: "
+            f"{', '.join(sorted(buckets['conflict']))}"
+        )
+    if len(lines) == 1:
+        lines.append("No changes were needed — the existing requirements already cover your input.")
+    return "\n".join(lines)
+
+
 async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     """
     Standardizes messy Product Owner input into high-quality Agile structures.
     Reads/writes to the centralized RequirementState object via persistence service.
-    Respects artifact locks - skips locked requirements and user stories.
+
+    Pipeline:
+    1. Load the centralized RequirementState and split stories into locked
+       (protected) and unlocked (mergeable) sets.
+    2. Read/detect the user's intent and inject explicit intent guidance into
+       the prompt so extraction matches what the user actually asked for.
+    3. Guard against no-op invocations (empty input + empty draft) which
+       previously destroyed multi-requirement grouping.
+    4. Run the Requirement Matcher / semantic change detection and bail out
+       with user-visible clarification questions on low-confidence changes.
+    5. Extract structured requirements via the LLM, sanitize the draft and
+       run ONE merge over the flattened story list.
+    6. Reassemble requirement groups: matched/unchanged stories keep their
+       original parent requirement, created stories go to the requirement the
+       LLM assigned them to, emptied requirement groups are dropped.
+    7. Bump the version only when the merge actually changed something and
+       post a change-summary assistant message.
     """
     logger.info("Executing gatherer_node to structure requirements.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
     raw_input = state.get("raw_input", "")
-    
+
     # Use session from state if available, otherwise let function create one
     db_session = state.get("db_session")
     req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
-    
+
     # Store existing user stories before processing passed_structured or raw_input
     existing_user_stories = list(req_state.get("user_stories", []))
-    
-    # Filter out locked user stories
-    unlocked_user_stories = [
-        us for us in existing_user_stories
-        if not us.get("is_locked", False)
+
+    # Split stories into locked (protected from modification) and unlocked sets.
+    # Locked stories are still fed to the merge as PROTECTED entries so they stay
+    # in the merged output under their original requirement - previously they
+    # were excluded from the merge entirely and silently vanished from the board.
+    locked_user_stories = [us for us in existing_user_stories if us.get("is_locked", False)]
+    unlocked_user_stories = [us for us in existing_user_stories if not us.get("is_locked", False)]
+    if locked_user_stories:
+        logger.info(f"[GATHERER] {len(locked_user_stories)} locked user story(ies) are protected from modification.")
+    locked_protected_ids = [
+        pid for pid in (
+            [str(us.get("id")) for us in locked_user_stories if us.get("id")]
+            + [us.get("ticket_code") for us in locked_user_stories if us.get("ticket_code")]
+        ) if pid
     ]
-    if len(unlocked_user_stories) != len(existing_user_stories):
-        logger.info(f"[GATHERER] Filtered out {len(existing_user_stories) - len(unlocked_user_stories)} locked user stories.")
 
     passed_structured = state.get("structured_requirements") or {}
+
+    # ---- No-op guard -------------------------------------------------------
+    # With no raw input AND no structured draft there is nothing to extract.
+    # Previously this fell through to the legacy fallback which rebuilt
+    # ``requirements`` as a single flat REQ-001, destroying multi-requirement
+    # grouping on a no-op invocation.
+    if not (raw_input and str(raw_input).strip()) and not passed_structured:
+        logger.info("[GATHERER] No raw input and no structured draft - nothing to gather.")
+        noop_msg = (
+            "I didn't receive any requirement text or draft to process. "
+            "Tell me the feature or change you have in mind and I'll structure it for you."
+        )
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="assistant",
+            message=noop_msg,
+            workflow_state="gatherer_node",
+            intent="GENERAL_CHAT",
+        )
+        return {
+            "requirement_state": req_state,
+            "structured_requirements": {},
+            "detected_intent": "GENERAL_CHAT",
+            "current_version": req_state.get("version_number", 1),
+        }
+
     if passed_structured:
         incoming_reqs = passed_structured.get("requirements")
         if isinstance(incoming_reqs, list) and incoming_reqs:
@@ -374,15 +769,79 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
 
     # Detect user intent before running the Gatherer
     detected_intent = state.get("detected_intent")
-    intent_confidence = 1.0
+    intent_confidence = state.get("intent_confidence")
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_user_stories)
         detected_intent = intent_res.get("intent", "UPDATE_REQUIREMENT")
-        intent_confidence = float(intent_res.get("confidence", 1.0))
+        intent_confidence = intent_res.get("confidence", 1.0)
     elif not detected_intent:
         detected_intent = "GENERAL_CHAT"
+    # Reuse the confidence the Requirement Matcher node already classified with
+    # (previously hardcoded to 1.0 here, which made the prompt claim a perfect
+    # confidence even for a genuinely uncertain classification).
+    if intent_confidence is None:
+        intent_confidence = 1.0
+    intent_confidence = float(intent_confidence)
 
     logger.info(f"Gatherer received raw_input: '{raw_input[:100]}' with detected_intent: {detected_intent}, confidence: {intent_confidence}")
+
+    if not raw_input:
+        # ---- Structured-draft short-circuit --------------------------------
+        # A draft payload without new raw input (e.g. the frontend re-syncing
+        # the board) must NEVER re-run extraction. Keep the requirement
+        # grouping applied above and re-derive the flattened story/AC views
+        # from it. The old code fell through to the legacy fallback and
+        # flattened every requirement into a single REQ-001 here.
+        active_flat = [
+            s
+            for r in (req_state.get("requirements") or [])
+            if isinstance(r, dict)
+            for s in (r.get("user_stories") or [])
+            if isinstance(s, dict) and s.get("status", "active") == "active"
+        ]
+        req_state["user_stories"] = active_flat
+        req_state["acceptance_criteria"] = collect_acceptance_criteria(active_flat)
+        req_state["current_workflow_state"] = "gatherer_node"
+        req_state["detected_intent"] = detected_intent
+        version_number = req_state.get("version_number", 1)
+        epic_name = _resolve_epic_name(req_state, str(passed_structured.get("epic_name") or ""), "")
+        structured_out = {
+            "epic_name": epic_name,
+            "version": version_number,
+            "user_stories": active_flat,
+            "requirements": req_state.get("requirements", []),
+        }
+        return {
+            "requirement_state": req_state,
+            "structured_requirements": structured_out,
+            "detected_intent": detected_intent,
+            "current_version": version_number,
+        }
+
+    if detected_intent == "GENERAL_CHAT":
+        # Defensive guard: conversational input must never be extracted into
+        # requirements. The router/route normally short-circuits earlier, but
+        # a misrouted GENERAL_CHAT previously created bogus user stories.
+        logger.info("[GATHERER] GENERAL_CHAT input reached the gatherer; skipping extraction.")
+        chat_msg = (
+            "That looks like a conversational question rather than a requirement change, "
+            "so I did not modify any requirements. Ask me anything, or describe the "
+            "feature you would like to add or change."
+        )
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="assistant",
+            message=chat_msg,
+            workflow_state="gatherer_node",
+            intent="GENERAL_CHAT",
+        )
+        return {
+            "requirement_state": req_state,
+            "structured_requirements": passed_structured,
+            "detected_intent": "GENERAL_CHAT",
+            "current_version": req_state.get("version_number", 1),
+        }
+
 
     # Use requirement_match from Requirement Matcher Agent if available
     requirement_match = state.get("requirement_match") or {}
@@ -390,120 +849,145 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     match_action = requirement_match.get("action")
 
     semantic_recs = []
-    if raw_input:
-        if matched_req_id and match_action in ["UPDATE", "DELETE"]:
-            rec_action = "UPDATE" if match_action == "UPDATE" else "ARCHIVE"
-            semantic_recs = [{
-                "change_type": "MODIFY_REQUIREMENT" if rec_action == "UPDATE" else "REMOVE_REQUIREMENT",
-                "target_requirement_id": matched_req_id,
-                "confidence": requirement_match.get("confidence", 0.95),
-                "reason": requirement_match.get("reason", "Matched via Requirement Matcher Agent."),
-                "recommended_action": rec_action
-            }]
-            logger.info(f"Gatherer using Requirement Matcher result: target_id={matched_req_id}, action={rec_action}")
-        else:
-            # Only detect semantic changes on unlocked user stories
-            semantic_recs = await detect_semantic_changes(raw_input, unlocked_user_stories)
-
-        
-        # Check for low confidence changes
-        low_confidence_changes = [c for c in semantic_recs if c.get("confidence", 1.0) < 0.70]
-        if low_confidence_changes:
-            logger.warning(f"Detected {len(low_confidence_changes)} low confidence semantic changes. Triggering clarification questions.")
-            
-            # Generate clarification questions
-            cqs = []
-            for c in low_confidence_changes:
-                q_text = f"I detected a possible change with low confidence: '{c.get('reason', '')}'. Which requirement or user story would you like to update, or is this a new requirement?"
-                cqs.append({
-                    "checklist_category": "Semantic Ambiguity",
-                    "target_user_story_id": None,
-                    "question_text": q_text,
-                    "user_answer": None,
-                    "is_resolved": False
-                })
-            
-            # Append to existing questions
-            existing_cqs = req_state.get("clarification_questions", []) or []
-            preserved_cqs = [q for q in existing_cqs if not q.get("is_resolved", False)]
-            combined_cqs = preserved_cqs + cqs
-            
-            req_state["clarification_questions"] = combined_cqs
-            req_state["validation_status"] = "invalid"
-            req_state["current_workflow_state"] = "gatherer_node"
-            req_state["detected_intent"] = detected_intent
-            
-            return {
-                "requirement_state": req_state,
-                "structured_requirements": passed_structured,
-                "detected_intent": detected_intent,
-                "current_version": req_state.get("version_number", 1)
-            }
-
-        # Format current stories context
-        requirements = req_state.get("requirements", [])
-        existing_epic = requirements[0].get("title", "") if requirements else ""
-        context_lines = []
-        if existing_epic:
-            context_lines.append(f"CURRENT ACTIVE EPIC: {existing_epic}\n(Note: DO NOT change this Epic Name unless the user explicitly requests to change or rename the epic)\n")
-        for story in unlocked_user_stories:
-            context_lines.append(
-                f"- Story {story.get('ticket_code', 'UNKNOWN')}: '{story.get('story_title', '')}'\n"
-                f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')}, So that {story.get('so_that', '')}\n"
-                f"  Acceptance Criteria: {json.dumps(story.get('acceptance_criteria', []))}"
-            )
-        current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
-        
-        # Format semantic recommendations
-        recs_str = json.dumps(semantic_recs, indent=2)
-
-        prompt_template = PromptTemplate(
-            template=load_prompt("gatherer"),
-            input_variables=["raw_input", "detected_intent", "current_context", "recommendations", "format_instructions"]
-        )
-        
-        # Prepare components for logging
-        pydantic_parser = PydanticOutputParser(pydantic_object=GatheredRequirements)
-        format_instructions = pydantic_parser.get_format_instructions()
-        prompt_value = prompt_template.format(
-            raw_input=raw_input,
-            detected_intent=detected_intent,
-            current_context=current_context,
-            recommendations=recs_str,
-            format_instructions=format_instructions
-        )
-        logger.info(f"Gatherer prompt length: {len(prompt_value)} tokens/chars.")
-        
-        # Strategy: Prefer with_structured_output, fallback to raw LLM invocation + JSON parsing
-        result = None
-        parsing_error = None
-
-        try:
-            result = await invoke_llm_structured(
-                llm,
-                prompt_template,
-                GatheredRequirements,
-                variables={
-                    "raw_input": raw_input,
-                    "detected_intent": detected_intent,
-                    "current_context": current_context,
-                    "recommendations": recs_str,
-                    "format_instructions": "Output ONLY raw JSON. No markdown.",
-                },
-                description="gatherer",
-                format_instructions=format_instructions,
-            )
-            logger.info("Successfully obtained structured output.")
-        except Exception as e2:
-            parsing_error = f"All parsing attempts failed: {str(e2)}"
-            logger.error(parsing_error)
-
+    if matched_req_id and match_action in ["UPDATE", "DELETE"]:
+        rec_action = "UPDATE" if match_action == "UPDATE" else "ARCHIVE"
+        semantic_recs = [{
+            "change_type": "MODIFY_REQUIREMENT" if rec_action == "UPDATE" else "REMOVE_REQUIREMENT",
+            "target_requirement_id": matched_req_id,
+            "confidence": requirement_match.get("confidence", 0.95),
+            "reason": requirement_match.get("reason", "Matched via Requirement Matcher Agent."),
+            "recommended_action": rec_action
+        }]
+        logger.info(f"Gatherer using Requirement Matcher result: target_id={matched_req_id}, action={rec_action}")
     else:
-        result = passed_structured or {
-            "epic_name": "Structured Requirements Draft",
-            "version": req_state["version_number"],
-            "user_stories": []
+        # Only detect semantic changes on unlocked user stories
+        semantic_recs = await detect_semantic_changes(raw_input, unlocked_user_stories)
+
+    # Check for low confidence changes
+    low_confidence_changes = [c for c in semantic_recs if c.get("confidence", 1.0) < 0.70]
+    if low_confidence_changes:
+        logger.warning(f"Detected {len(low_confidence_changes)} low confidence semantic changes. Triggering clarification questions.")
+
+        # Generate clarification questions
+        cqs = []
+        for c in low_confidence_changes:
+            q_text = f"I detected a possible change with low confidence: '{c.get('reason', '')}'. Which requirement or user story would you like to update, or is this a new requirement?"
+            cqs.append({
+                "checklist_category": "Semantic Ambiguity",
+                "target_user_story_id": None,
+                "question_text": q_text,
+                "user_answer": None,
+                "is_resolved": False
+            })
+
+        # Append to existing questions
+        existing_cqs = req_state.get("clarification_questions", []) or []
+        preserved_cqs = [q for q in existing_cqs if not q.get("is_resolved", False)]
+        combined_cqs = preserved_cqs + cqs
+
+        req_state["clarification_questions"] = combined_cqs
+        req_state["validation_status"] = "invalid"
+        req_state["current_workflow_state"] = "gatherer_node"
+        req_state["detected_intent"] = detected_intent
+
+        # Surface the clarification to the user: previously this branch saved
+        # questions to state only, so the chat showed NOTHING and the gather
+        # looked like a silent failure.
+        clarify_msg = "⚠️ **Clarification Needed (Requirements):**\n" + "\n".join(f"- {q['question_text']}" for q in cqs)
+        await ConversationMessageRepository.save_message(
+            project_id=project_id,
+            role="assistant",
+            message=clarify_msg,
+            workflow_state="gatherer_node",
+            intent=detected_intent,
+        )
+
+        return {
+            "requirement_state": req_state,
+            "structured_requirements": passed_structured,
+            "detected_intent": detected_intent,
+            "current_version": req_state.get("version_number", 1)
         }
+
+
+    # Format current stories context via the shared helper (also used by the
+    # semantic/intent/matcher prompts so every agent describes the backlog
+    # identically).
+    requirements = req_state.get("requirements", [])
+    existing_epic = requirements[0].get("title", "") if requirements else ""
+    context_lines = []
+    if existing_epic:
+        context_lines.append(f"CURRENT ACTIVE EPIC: {existing_epic}\n(Note: DO NOT change this Epic Name unless the user explicitly requests to change or rename the epic)\n")
+    context_lines.extend(format_story_context_lines(unlocked_user_stories))
+    if locked_user_stories:
+        # Locked stories ARE rendered (with an explicit marker) so the model can
+        # see them and avoid re-creating them as duplicates. They are protected
+        # by ``locked_protected_ids`` in the merge, so even a misbehaving draft
+        # can never mutate them.
+        context_lines.append(
+            "\nLOCKED STORIES (human-verified - reproduce EXACTLY as-is, never modify, "
+            "renumber, reword or drop them):"
+        )
+        context_lines.extend(
+            f"{line}\n  Flags: LOCKED" for line in format_story_context_lines(locked_user_stories)
+        )
+    current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
+
+    # Explicit intent rules for the LLM: with only the raw intent label the
+    # model regularly re-emitted the whole backlog as reworded duplicates
+    # instead of extracting just the requested change.
+    intent_guidance = _build_intent_guidance(
+        detected_intent=detected_intent,
+        intent_confidence=intent_confidence,
+        requirement_match=requirement_match,
+        has_existing_stories=bool(existing_user_stories),
+    )
+
+    # Format semantic recommendations
+    recs_str = json.dumps(semantic_recs, indent=2)
+
+    prompt_template = PromptTemplate(
+        template=load_prompt("gatherer"),
+        input_variables=["raw_input", "detected_intent", "intent_guidance", "current_context", "recommendations", "format_instructions"]
+    )
+
+    # Prepare components for logging
+    pydantic_parser = PydanticOutputParser(pydantic_object=GatheredRequirements)
+    format_instructions = pydantic_parser.get_format_instructions()
+    prompt_value = prompt_template.format(
+        raw_input=raw_input,
+        detected_intent=detected_intent,
+        intent_guidance=intent_guidance,
+        current_context=current_context,
+        recommendations=recs_str,
+        format_instructions=format_instructions
+    )
+    logger.info(f"Gatherer prompt length: {len(prompt_value)} tokens/chars.")
+
+    # Strategy: Prefer with_structured_output, fallback to raw LLM invocation + JSON parsing
+    result = None
+    parsing_error = None
+
+    try:
+        result = await invoke_llm_structured(
+            llm,
+            prompt_template,
+            GatheredRequirements,
+            variables={
+                "raw_input": raw_input,
+                "detected_intent": detected_intent,
+                "intent_guidance": intent_guidance,
+                "current_context": current_context,
+                "recommendations": recs_str,
+                "format_instructions": "Output ONLY raw JSON. No markdown.",
+            },
+            description="gatherer",
+            format_instructions=format_instructions,
+        )
+        logger.info("Successfully obtained structured output.")
+    except Exception as e2:
+        parsing_error = f"All parsing attempts failed: {str(e2)}"
+        logger.error(parsing_error)
 
     # Stop execution if parsing fails entirely
     if parsing_error:
@@ -512,122 +996,240 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             f"Details: {parsing_error}. Please revise your input description or schema constraints."
         )
 
-    # Modify only its own fields in RequirementState
-    requirements = req_state.get("requirements", [])
-    existing_epic_name = requirements[0].get("title", "") if requirements else ""
-    llm_epic_name = result.get("epic_name", "")
-    
-    raw_input_lower = raw_input.lower() if raw_input else ""
-    user_explicitly_changed_epic = any(k in raw_input_lower for k in ["rename epic", "change epic", "new epic", "update epic", "epic name"])
-    
-    is_placeholder = existing_epic_name in ["", "Untitled Epic", "Structured Requirements Draft"]
-    if existing_epic_name and not is_placeholder and not user_explicitly_changed_epic:
-        epic_name = existing_epic_name
-    else:
-        epic_name = llm_epic_name or existing_epic_name or "Structured Requirements Draft"
+    # Keep the persisted epic name unless the user explicitly asked to rename
+    # it (regex detection now understands "rename the epic to X", "the epic
+    # should be called X", etc. - the old substring check missed those).
+    epic_name = _resolve_epic_name(req_state, str(result.get("epic_name") or ""), raw_input)
+
 
     # ===============================================
-    # Handle multi-requirement output from LLM
-    # The LLM now returns: {"epic_name": "...", "version": N, "requirements": [...]}
+    # Normalize the LLM output into requirement groups
     # ===============================================
-    llm_requirements = result.get("requirements", [])
-    
-    if llm_requirements and isinstance(llm_requirements, list):
-        # New format: multiple requirements with their user stories
-        # Build merged stories per requirement, then flatten for backward compat
-        req_items_output = []
-        all_merged_stories = []
-        all_active_stories = []
-        all_ac = []
-        
-        for req_item in llm_requirements:
-            req_code = req_item.get("requirement_code", "REQ-000")
-            req_title = req_item.get("title", "Untitled Requirement")
-            req_desc = req_item.get("description", "")
-            newly_generated_stories = req_item.get("user_stories", [])
-            
-            # Merge stories for this requirement (only unlocked stories)
-            merged_stories = merge_user_stories(
-                existing_stories=unlocked_user_stories,
-                new_incoming_stories=newly_generated_stories,
-                semantic_recs=semantic_recs
-            )
-            
-            active_stories = filter_active_stories(merged_stories)
-            
-            req_items_output.append({
-                "requirement_code": req_code,
-                "title": req_title,
-                "description": req_desc,
-                "user_stories": active_stories
-            })
-            
-            all_merged_stories.extend(merged_stories)
-            all_active_stories.extend(active_stories)
-            all_ac.extend(collect_acceptance_criteria(active_stories))
-        
-        # Also include any existing stories that were NOT matched by any requirement
-        # by checking the merge result - stories from existing requirements not in LLM output
-        existing_codes_in_output = set()
-        for req_item in llm_requirements:
-            for us in req_item.get("user_stories", []):
-                tc = us.get("ticket_code", "")
-                if tc:
-                    existing_codes_in_output.add(tc)
-        
-        for ex_story in existing_user_stories:
-            tc = ex_story.get("ticket_code", "")
-            if tc and tc not in existing_codes_in_output and ex_story.get("status", "active") == "active":
-                # This existing story was not mentioned in LLM output - keep it unchanged
-                # Find which requirement it belongs to by looking at existing req_state
-                pass  # handled by merge_user_stories
-        
-        # Set the requirements list into req_state
-        req_state["requirements"] = req_items_output
-        req_state["user_stories"] = all_active_stories
-        req_state["all_merged_stories"] = all_merged_stories
-        req_state["acceptance_criteria"] = all_ac
-        
-    else:
-        # Legacy fallback: flat user_stories in result
-        newly_generated_stories = result.get("user_stories", [])
-        
-        merged_stories = merge_user_stories(
-            existing_stories=unlocked_user_stories,
-            new_incoming_stories=newly_generated_stories,
-            semantic_recs=semantic_recs
-        )
-        
-        active_stories = filter_active_stories(merged_stories)
-        ac_list = collect_acceptance_criteria(active_stories)
-        
-        # Wrap into a single default requirement
-        req_state["requirements"] = [{
-            "requirement_code": "REQ-001",
-            "title": epic_name or "Structured Requirements",
-            "description": "",
-            "user_stories": active_stories
+    llm_requirements = result.get("requirements")
+    if not isinstance(llm_requirements, list):
+        llm_requirements = []
+    if not llm_requirements and isinstance(result.get("user_stories"), list) and result["user_stories"]:
+        # Legacy flat schema -> wrap into one requirement group so the same
+        # merge/reassembly pipeline handles both output shapes.
+        prev_identity = _previous_requirement_identity(req_state)
+        llm_requirements = [{
+            "requirement_code": prev_identity.get("requirement_code") or "REQ-001",
+            "title": epic_name or prev_identity.get("title") or "Structured Requirements",
+            "description": prev_identity.get("description", ""),
+            "user_stories": result.get("user_stories", []),
         }]
-        req_state["user_stories"] = active_stories
-        req_state["all_merged_stories"] = merged_stories
-        req_state["acceptance_criteria"] = ac_list
 
-    version_number = result.get("version", req_state["version_number"])
-    
+    existing_requirements = [r for r in (req_state.get("requirements") or []) if isinstance(r, dict)]
+    existing_req_by_code: Dict[str, Dict[str, Any]] = {}
+    existing_membership: Dict[str, str] = {}
+    for req in existing_requirements:
+        req_code = _normalize_requirement_code(req.get("requirement_code"))
+        if not req_code:
+            continue
+        existing_req_by_code[req_code] = req
+        for us in req.get("user_stories", []) or []:
+            if isinstance(us, dict):
+                us_code = normalize_ticket_code(us.get("ticket_code"))
+                if us_code:
+                    existing_membership.setdefault(us_code, req_code)
+
+    # Flatten + sanitize the LLM draft, mapping every incoming story to the
+    # requirement group the LLM assigned it to.
+    used_req_codes = set(existing_req_by_code.keys())
+    incoming_entries: List[Dict[str, Any]] = []
+    target_by_key: Dict[str, str] = {}
+    llm_group_meta: Dict[str, Dict[str, Any]] = {}
+
+    for req_item in llm_requirements:
+        if not isinstance(req_item, dict):
+            continue
+        raw_code = _normalize_requirement_code(req_item.get("requirement_code"))
+        group_title = str(req_item.get("title") or "").strip()
+        group_desc = str(req_item.get("description") or "").strip()
+        raw_stories = [s for s in (req_item.get("user_stories") or []) if isinstance(s, dict)]
+
+        target_code = raw_code
+        if target_code and target_code in existing_req_by_code:
+            # The LLM reused an existing requirement code. Treat it as an
+            # update to that requirement ONLY when the title is unchanged or
+            # at least one story matches the existing group's stories; a
+            # recycled code with entirely new content is minted a fresh code
+            # so genuinely new features never pollute an existing group.
+            incoming_codes = {normalize_ticket_code(s.get("ticket_code")) for s in raw_stories}
+            existing_group_codes = {
+                normalize_ticket_code(us.get("ticket_code"))
+                for us in (existing_req_by_code[target_code].get("user_stories") or [])
+                if isinstance(us, dict)
+            }
+            title_same = normalize_title(group_title) == normalize_title(existing_req_by_code[target_code].get("title"))
+            if not title_same and not (incoming_codes & existing_group_codes):
+                fresh = _generate_next_requirement_code(used_req_codes)
+                logger.warning(
+                    f"[GATHERER] LLM recycled {target_code} for a different feature ('{group_title}'); "
+                    f"minting {fresh} for the new group."
+                )
+                target_code = fresh
+        if not target_code:
+            target_code = _generate_next_requirement_code(used_req_codes)
+        used_req_codes.add(target_code)
+
+        if target_code not in llm_group_meta:
+            llm_group_meta[target_code] = {
+                "title": group_title or f"Requirement {target_code}",
+                "description": group_desc,
+            }
+
+        for s in raw_stories:
+            clean = _sanitize_incoming_story(s)
+            if not clean:
+                continue
+            entry = dict(clean)
+            entry["_target_req_code"] = target_code
+            incoming_entries.append(entry)
+            code_key = normalize_ticket_code(entry.get("ticket_code"))
+            title_key = normalize_title(entry.get("story_title"))
+            if code_key:
+                target_by_key.setdefault(code_key, target_code)
+            if title_key:
+                target_by_key.setdefault(title_key, target_code)
+
+    # FRESH-PROJECT CODE RENUMBERING: the LLM sometimes copies the gatherer
+    # prompt's "new requirement" example verbatim and starts a brand-new
+    # project at REQ-002. Nothing references requirement codes yet on an empty
+    # board, so remap every declared group to 1..N in declaration order — the
+    # first requirement is always REQ-001.
+    renumber = _renumber_fresh_project_codes(existing_requirements, llm_group_meta)
+    if renumber:
+        logger.info(f"[GATHERER] Fresh project: renumbering LLM requirement codes: {renumber}")
+        llm_group_meta = {renumber[old]: meta for old, meta in llm_group_meta.items()}
+        target_by_key = {key: renumber.get(code, code) for key, code in target_by_key.items()}
+        for entry in incoming_entries:
+            entry["_target_req_code"] = renumber.get(entry.get("_target_req_code"), entry.get("_target_req_code"))
+
+
+    # ===============================================
+    # ONE merge pass over the FULL flattened story list.
+    # Previously merge_user_stories ran once PER LLM requirement with the
+    # whole existing backlog, duplicating every existing story into EVERY
+    # requirement group. Locked stories are protected (never mutated) but
+    # stay in the merge input so they never vanish from the board.
+    # ===============================================
+    merged_stories, merge_report = merge_user_stories_with_report(
+        existing_stories=unlocked_user_stories + locked_user_stories,
+        new_incoming_stories=incoming_entries,
+        semantic_recs=semantic_recs,
+        protected_ids=locked_protected_ids,
+    )
+
+    # ===============================================
+    # Reassemble requirement groups from the merged story set
+    # ===============================================
+    req_groups: Dict[str, Dict[str, Any]] = {}
+    # Seed with existing requirements to preserve identity & ordering
+    for req in existing_requirements:
+        req_code = _normalize_requirement_code(req.get("requirement_code"))
+        if not req_code or req_code in req_groups:
+            continue
+        req_groups[req_code] = {
+            "requirement_code": req_code,
+            "title": req.get("title") or f"Requirement {req_code}",
+            "description": req.get("description") or "",
+            "user_stories": [],
+            "_is_existing": True,
+        }
+    # Register the LLM-declared groups that are genuinely new
+    for code, meta in llm_group_meta.items():
+        if code not in req_groups:
+            req_groups[code] = {
+                "requirement_code": code,
+                "title": meta["title"],
+                "description": meta["description"],
+                "user_stories": [],
+                "_is_existing": False,
+            }
+
+    first_existing_code = next(
+        (c for c, g in req_groups.items() if g.get("_is_existing")),
+        "",
+    )
+
+    all_active_stories: List[Dict[str, Any]] = []
+    for story in merged_stories:
+        if story.get("status", "active") != "active":
+            continue  # archived stories leave the board (recorded in merge_report)
+        clean_story = {k: v for k, v in story.items() if not str(k).startswith("_")}
+        code_key = normalize_ticket_code(story.get("ticket_code"))
+        title_key = normalize_title(story.get("story_title"))
+        change_type = story.get("change_type", "unchanged")
+        if change_type == "created":
+            # New stories go to the requirement group the LLM assigned them to.
+            parent_code = target_by_key.get(code_key) or target_by_key.get(title_key)
+        else:
+            # Matched/unchanged/conflict stories RETAIN their original parent
+            # requirement (mirrors the gatherer prompt contract), falling back
+            # to the LLM grouping when the story has no recorded membership.
+            parent_code = (
+                existing_membership.get(code_key)
+                or target_by_key.get(code_key)
+                or target_by_key.get(title_key)
+            )
+        if not parent_code:
+            parent_code = first_existing_code or _generate_next_requirement_code(set(req_groups))
+        group = req_groups.get(parent_code)
+        if group is None:
+            meta = llm_group_meta.get(parent_code) or {}
+            group = req_groups.setdefault(parent_code, {
+                "requirement_code": parent_code,
+                "title": meta.get("title") or f"Requirement {parent_code}",
+                "description": meta.get("description") or "",
+                "user_stories": [],
+                "_is_existing": False,
+            })
+        group["user_stories"].append(clean_story)
+        all_active_stories.append(clean_story)
+
+    final_requirements = []
+    for code, group in req_groups.items():
+        if group["user_stories"]:
+            final_requirements.append({k: v for k, v in group.items() if not str(k).startswith("_")})
+        else:
+            logger.info(
+                f"[GATHERER] Requirement group {code} has no remaining stories after the merge; dropping it."
+            )
+
+    req_state["requirements"] = final_requirements
+    req_state["user_stories"] = all_active_stories
+    req_state["acceptance_criteria"] = collect_acceptance_criteria(all_active_stories)
+
+
+    # ===============================================
+    # Versioning: NEVER trust the LLM's ``version`` echo (the model does not
+    # know the current version and its schema default of 1 used to RESET the
+    # project version on every gather). Bump by exactly one when the merge
+    # actually changed something; otherwise keep the current version.
+    # ===============================================
+    report_actions = {str((info or {}).get("action", "")) for info in merge_report.values()}
+    has_changes = bool(report_actions & {"created", "updated", "archived"})
+    current_version = req_state.get("version_number") or 1
+    version_number = current_version + 1 if has_changes else current_version
+
     req_state["version_number"] = version_number
     req_state["current_workflow_state"] = "gatherer_node"
     req_state["semantic_recommendations"] = semantic_recs
     req_state["detected_intent"] = detected_intent
 
-    gatherer_msg = "📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board."
+    # A change-summary chat message (added/updated/archived ticket codes)
+    # persisted as a regular assistant message - the old static message told
+    # the Product Owner nothing about what actually changed.
+    gatherer_msg = _build_change_summary(merge_report)
     await ConversationMessageRepository.save_message(
         project_id=project_id,
-        role="gatherer",
+        role="assistant",
         message=gatherer_msg,
         workflow_state="gatherer_node",
-        intent="REQUIREMENT_REQUEST"
+        intent=detected_intent,
     )
-    
+
     # Sync to outer structure for backend/frontend backward compatibility
     structured_out = {
         "epic_name": epic_name,
@@ -635,7 +1237,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         "user_stories": req_state.get("user_stories", []),
         "requirements": req_state.get("requirements", [])
     }
-    
+
     return {
         "requirement_state": req_state,
         "structured_requirements": structured_out,
@@ -1130,8 +1732,15 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     )
 
     req_state["generated_prd"] = generated_prd
-    # Keep any previously generated diagram; the template fill owns the document.
-    req_state["generated_diagrams"] = req_state.get("generated_diagrams", "")
+
+    # FLOW DIAGRAM SYNC: every PRD generation also refreshes the Architecture
+    # Flows diagram - the LLM is asked with the project's own (just-validated)
+    # dataset and answers with raw Mermaid flowchart code, so the flow always
+    # mirrors the freshly generated document. When the model fails or returns
+    # unusable output the previously stored diagram is kept instead, so the
+    # PRD result is never lost over a diagram hiccup.
+    fresh_diagram = await _generate_flow_diagram(project_id, req_state, data)
+    req_state["generated_diagrams"] = fresh_diagram or req_state.get("generated_diagrams", "")
     req_state["current_workflow_state"] = "architect_node"
 
     # PART-LEVEL PRD SYNC: merge the freshly generated document into the

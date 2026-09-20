@@ -33,20 +33,28 @@ import {
 // Initial demo state (preserved from the former Dashboard monolith)
 // ----------------------------------------------------------------------------
 
+// The two boot messages are rendered with the actual wall-clock time instead of
+// the previously hard-coded fake "10:24 AM" (display-only; no logic depends on
+// this value — see scripts/unit.test.ts, which never asserts on a timestamp).
+const BOOT_TIME = new Date().toLocaleTimeString([], {
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
 const INITIAL_MESSAGES: ChatMessage[] = [
   {
     id: 'init-1',
     role: 'system',
     content:
       'Requirements Engine Initialized. Multi-Agent workflow is ready to ingest raw Product Owner specifications.',
-    timestamp: '10:24 AM',
+    timestamp: BOOT_TIME,
   },
   {
     id: 'init-2',
     role: 'assistant',
     content:
       'Hello! I am your Senior Business Analyst AI Agent. Share your raw, conversational, or messy requirement text and I will structure it, run a compliance audit, and compile a formal PRD for you.',
-    timestamp: '10:24 AM',
+    timestamp: BOOT_TIME,
   },
 ];
 

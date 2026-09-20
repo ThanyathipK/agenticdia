@@ -1,0 +1,318 @@
+"""
+Regression tests for the merge confirm/cancel contract:
+
+1. Confirming (Save) a pending MERGE must LOG the merge as its own immutable
+   version-ledger row (``prd_versions``, ``generated_by='ai_merge'``) so the
+   Version History records merges too — not only manual part edits — while
+   bumping the version EXACTLY once (no double-bump, no ledger reset).
+2. Cancelling (not Save) must roll back: nothing is ever written to the
+   requirement tables or the version ledger.
+
+Run from the ``backend`` directory::
+
+    ../venv/bin/python -m pytest tests/test_merge_version_log.py -v
+"""
+from datetime import datetime, timedelta, timezone
+
+import pytest
+import pytest_asyncio
+from fastapi import status
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.database import get_db as app_get_db
+from app.main import app as fastapi_app
+from app.models import (
+    PendingActionModel,
+    PRDVersionModel,
+    ProjectModel,
+    RequirementStateModel,
+    UserModel,
+)
+
+
+# =====================================================================
+# Isolated SQLite database + ASGI client fixtures (same pattern as
+# tests/test_documents.py)
+# =====================================================================
+@pytest_asyncio.fixture
+async def db_session(tmp_path):
+    """Fresh SQLite database per test with all app tables created."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test_merge_log.db")
+    async with engine.begin() as conn:
+        from app.database import Base
+        from app import models  # noqa: F401 - register all models
+
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with SessionLocal() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def seeded_project(db_session):
+    """Seed the default system user + one project; returns the project id."""
+    user = UserModel(
+        email="merge-log-test@banking.com",
+        full_name="Merge Log Tester",
+        role="Developer",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    project = ProjectModel(
+        user_id=user.id,
+        name="Merge Log Test Project",
+        industry_standard="Krungsri Nimble Baseline",
+    )
+    db_session.add(project)
+    await db_session.commit()
+    return str(project.id)
+
+
+@pytest_asyncio.fixture
+async def client(db_session):
+    """ASGI client wired to the isolated SQLite session (no lifespan run)."""
+    async def override_get_db():
+        try:
+            yield db_session
+            await db_session.commit()
+        except Exception:
+            await db_session.rollback()
+            raise
+
+    fastapi_app.dependency_overrides[app_get_db] = override_get_db
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    fastapi_app.dependency_overrides.pop(app_get_db, None)
+
+
+# =====================================================================
+# Helpers
+# =====================================================================
+async def _count(session: AsyncSession, model) -> int:
+    result = await session.execute(select(func.count()).select_from(model))
+    return int(result.scalar() or 0)
+
+
+def _merged_state(version_number: int):
+    """A Gatherer-shaped merged requirement state like the workflow stores."""
+    return {
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Secure Login Epic",
+                "description": "Customers must log in securely.",
+                "user_stories": [
+                    {
+                        "ticket_code": "US-001",
+                        "story_title": "Password login",
+                        "as_a": "customer",
+                        "i_want_to": "log in with a password",
+                        "so_that": "my account stays safe",
+                        "acceptance_criteria": ["Given X when Y then Z"],
+                    }
+                ],
+            }
+        ],
+        "user_stories": [
+            {
+                "ticket_code": "US-001",
+                "story_title": "Password login",
+                "as_a": "customer",
+                "i_want_to": "log in with a password",
+                "so_that": "my account stays safe",
+                "acceptance_criteria": ["Given X when Y then Z"],
+            }
+        ],
+        "generated_prd": "",
+        "generated_diagrams": "",
+        "version_number": version_number,
+    }
+
+
+async def _create_merge_action(session: AsyncSession, project_id: str, message: str, version_number: int):
+    action = PendingActionModel(
+        project_id=project_id,
+        action_type="MERGE",
+        original_user_message=message,
+        proposed_changes=_merged_state(version_number),
+        workflow_stage="REVIEWING",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    session.add(action)
+    await session.commit()
+    return action
+
+
+# =====================================================================
+# Tests
+# =====================================================================
+class TestMergeVersionLog:
+    @pytest.mark.asyncio
+    async def test_confirm_logs_merge_as_version_row_once(
+        self, seeded_project, client, db_session
+    ):
+        """Save on a pending merge: one ledger row, exactly one version bump."""
+        action = await _create_merge_action(
+            db_session, seeded_project, "Add secure login requirement", version_number=2
+        )
+
+        confirm = await client.post(
+            f"/api/confirm-action/{action.id}", params={"project_id": seeded_project}
+        )
+        assert confirm.status_code == status.HTTP_200_OK
+
+        # The merge is logged in the PRD version ledger — merges are versions
+        # too, not only manual edits / Generate PRD.
+        rows = (
+            (await db_session.execute(select(PRDVersionModel))).scalars().all()
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.version_number == 2, "ledger row must adopt the merge's own version (no double bump)"
+        assert row.generated_by == "ai_merge"
+        assert row.change_type == "ai"
+        assert "secure login" in (row.change_summary or "").lower()
+
+        # The requirement state's version is in lock-step with the ledger.
+        states = (
+            (await db_session.execute(select(RequirementStateModel))).scalars().all()
+        )
+        assert len(states) == 1
+        assert states[0].version_number == 2
+
+        # The pending action is consumed.
+        assert await _count(db_session, PendingActionModel) == 0
+
+    @pytest.mark.asyncio
+    async def test_confirm_never_resets_version_below_state(
+        self, seeded_project, client, db_session
+    ):
+        """A pre-existing ledger must never be shadowed by a lower pinned row."""
+        # Existing ledger at v5 (e.g. earlier PRD generations).
+        db_session.add(
+            PRDVersionModel(
+                project_id=seeded_project,
+                version_number=5,
+                generated_prd="# Existing PRD",
+                generated_by="automated_agent",
+                change_type="ai",
+                semver="1.2.0",
+            )
+        )
+        await db_session.commit()
+
+        # The in-memory merge did NOT bump the state version (still 5).
+        action = await _create_merge_action(
+            db_session, seeded_project, "Tweak stories", version_number=5
+        )
+        confirm = await client.post(
+            f"/api/confirm-action/{action.id}", params={"project_id": seeded_project}
+        )
+        assert confirm.status_code == status.HTTP_200_OK
+
+        rows = (
+            (await db_session.execute(select(PRDVersionModel))).scalars().all()
+        )
+        assert len(rows) == 2
+        merge_row = next(r for r in rows if r.generated_by == "ai_merge")
+        assert merge_row.version_number == 6, "ledger takes the next free number when the state did not bump"
+
+        states = (
+            (await db_session.execute(select(RequirementStateModel))).scalars().all()
+        )
+        assert states[0].version_number == 6
+
+    @pytest.mark.asyncio
+    async def test_cancel_rolls_back_writes_nothing(
+        self, seeded_project, client, db_session
+    ):
+        """Cancel (not Save) = rollback: NOTHING is written anywhere."""
+        action = await _create_merge_action(
+            db_session, seeded_project, "Add secure login requirement", version_number=2
+        )
+
+        cancel = await client.post(
+            f"/api/cancel-action/{action.id}", params={"project_id": seeded_project}
+        )
+        assert cancel.status_code == status.HTTP_200_OK
+        assert cancel.json()["status"] == "cancelled"
+
+        # Draft discarded — nothing was EVER written, incl. the version ledger.
+        assert await _count(db_session, PendingActionModel) == 0
+        assert await _count(db_session, PRDVersionModel) == 0
+        assert await _count(db_session, RequirementStateModel) == 0
+
+
+class TestVersionOnlySaveGuard:
+    @pytest.mark.asyncio
+    async def test_confirm_preserves_requirement_titles_and_siblings(
+        self, seeded_project, client, db_session
+    ):
+        """The version ledger's version_number-only save_or_update sync must
+        NEVER re-derive the requirement tables.
+
+        Regression: the old default-requirement fallback renamed REQ-001 to
+        'Default Requirement' and ARCHIVED every other requirement whenever
+        ``record_prd_version`` synced the version number (Generate PRD, manual
+        part edits, confirmed merges)."""
+        from app.repositories.requirement_state import RequirementStateRepository
+
+        action = PendingActionModel(
+            project_id=seeded_project,
+            action_type="MERGE",
+            original_user_message="two requirements",
+            proposed_changes={
+                "requirements": [
+                    {
+                        "requirement_code": "REQ-001",
+                        "title": "Secure Login Epic",
+                        "description": "",
+                        "user_stories": [
+                            {"ticket_code": "US-001", "story_title": "Password login",
+                             "as_a": "customer", "i_want_to": "log in", "so_that": "safe",
+                             "acceptance_criteria": ["Given X when Y then Z"]}
+                        ],
+                    },
+                    {
+                        "requirement_code": "REQ-002",
+                        "title": "Fraud Alerts",
+                        "description": "Real-time fraud alerts.",
+                        "user_stories": [
+                            {"ticket_code": "US-002", "story_title": "Alert me",
+                             "as_a": "customer", "i_want_to": "get alerts", "so_that": "fast",
+                             "acceptance_criteria": ["Given A when B then C"]}
+                        ],
+                    },
+                ],
+                "user_stories": [],
+                "version_number": 2,
+            },
+            workflow_stage="REVIEWING",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add(action)
+        await db_session.commit()
+
+        confirm = await client.post(
+            f"/api/confirm-action/{action.id}", params={"project_id": seeded_project}
+        )
+        assert confirm.status_code == status.HTTP_200_OK
+
+        state = await RequirementStateRepository.get_by_project_id(seeded_project, db_session)
+        by_code = {r["requirement_code"]: r for r in state["requirements"]}
+
+        # BOTH requirements survive with their ORIGINAL titles — the
+        # version-only sync did not rename or archive anything.
+        assert by_code["REQ-001"]["title"] == "Secure Login Epic"
+        assert by_code["REQ-002"]["title"] == "Fraud Alerts"
+        assert by_code["REQ-002"]["description"] == "Real-time fraud alerts."
+
+        codes = {s["ticket_code"] for r in state["requirements"] for s in r["user_stories"]}
+        assert codes == {"US-001", "US-002"}
+
+

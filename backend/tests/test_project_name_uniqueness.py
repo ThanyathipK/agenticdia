@@ -19,9 +19,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.auth import create_access_token, get_password_hash
 from app.database import get_db as app_get_db
 from app.main import app as fastapi_app
 from app.repositories.project import ProjectRepository
+from app.repositories.user import UserRepository
 
 
 # =====================================================================
@@ -45,8 +47,32 @@ async def db_session(tmp_path):
 
 
 @pytest_asyncio.fixture
-async def client(db_session):
-    """ASGI client wired to the isolated SQLite session (no lifespan run)."""
+async def auth_headers(db_session):
+    """A loginable account in the isolated DB plus its Bearer header.
+
+    Project routes now require authentication (GET /api/projects scopes the
+    listing to the JWT subject), so every API-level test in this module acts
+    as this signed-in user by default.
+    """
+    user = await UserRepository.create_user(
+        session=db_session,
+        email="ba@bank.com",
+        full_name="Banking BA",
+        role="Business Analyst",
+        password_hash=get_password_hash("Correct-Horse-1"),
+    )
+    await db_session.commit()
+    token = create_access_token(user_id=str(user.id), email=user.email, role=user.role)
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture
+async def client(db_session, auth_headers):
+    """ASGI client wired to the isolated SQLite session (no lifespan run).
+
+    Every request carries the signed-in user's Bearer token by default; tests
+    that need anonymous access can drop the header per-call.
+    """
 
     async def override_get_db():
         try:
@@ -58,7 +84,7 @@ async def client(db_session):
 
     fastapi_app.dependency_overrides[app_get_db] = override_get_db
     transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as ac:
         yield ac
     fastapi_app.dependency_overrides.pop(app_get_db, None)
 

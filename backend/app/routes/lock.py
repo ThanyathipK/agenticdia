@@ -14,6 +14,7 @@ from app.schemas import (
     PendingActionResponse,
     ConfirmActionResponse,
     ActionStatusResponse,
+    ImpactAnalysisResponse,
 )
 from app.event_manager import event_manager
 
@@ -231,6 +232,45 @@ async def get_pending_actions(project_id: str, session: AsyncSession = Depends(g
     return actions
 
 
+@router.get("/api/pending-actions/{action_id}/impact", response_model=ImpactAnalysisResponse, status_code=status.HTTP_200_OK)
+async def get_action_impact(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ImpactAnalysisResponse:
+    """
+    Requirement Impact Analysis for a pending merge action (READ-ONLY).
+
+    Diffs the draft's proposed requirement state against the stored state and
+    derives every downstream artifact impacted by the change — user stories,
+    acceptance criteria, PRD sections and diagrams that reference the affected
+    ``REQ-``/``US-`` codes — so the merge window can show the user what
+    changes and what is impacted BEFORE they decide to Save or Cancel.
+
+    Args:
+        action_id: Pending-action UUID string.
+        project_id: Project UUID string.
+        session: Active asynchronous database session.
+
+    Returns:
+        ImpactAnalysisResponse: Change predictions + impacted artifacts.
+
+    Raises:
+        HTTPException: 400 on invalid IDs; 404 if the action does not exist.
+    """
+    from app.impact_service import ImpactService
+
+    try:
+        UUID(project_id)
+        UUID(action_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id or action_id format")
+
+    actions = await PendingActionRepository.get_by_project(project_id, session)
+    action = next((a for a in actions if a["id"] == action_id), None)
+    if not action:
+        raise HTTPException(status_code=404, detail="Pending action not found")
+
+    analysis = await ImpactService.analyze_pending_action(action, project_id, session)
+    return analysis
+
+
 @router.post("/api/confirm-action/{action_id}", response_model=ConfirmActionResponse, status_code=status.HTTP_200_OK)
 async def confirm_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ConfirmActionResponse:
     """
@@ -307,6 +347,49 @@ async def confirm_action(action_id: str, project_id: str, session: AsyncSession 
             )
         except Exception as log_err:  # never block a confirmed merge on logging
             logger.warning(f"[MERGE CONFIRM] Failed to log document merge event: {log_err}")
+
+    # 3c. VERSION LEDGER — log EVERY confirmed merge as its own immutable
+    # version row so the Version History records AI/chat merges too, not only
+    # manual part edits / Generate PRD. A requirement merge does not change the
+    # PRD document content itself; the row exists to log the merge event and
+    # keep the version ledger in lock-step with the requirement version.
+    try:
+        from app.repositories.prd import PRDVersionRepository
+        from app.version_service import record_prd_version
+
+        latest_ledger = await PRDVersionRepository.get_latest(project_id, session)
+        # Pin the ledger row to the requirement state's OWN version when it
+        # already advanced exactly once (e.g. document-extraction drafts store
+        # version_number + 1) — otherwise take the next free ledger number.
+        # Never collides, never double-bumps.
+        pinned_version = max(
+            int(persisted_state.get("version_number") or 1),
+            int((latest_ledger or {}).get("version_number") or 0) + 1,
+        )
+        merge_note = (action.get("original_user_message") or "").strip()
+        story_count = len(proposed_changes.get("user_stories") or []) if isinstance(proposed_changes, dict) else 0
+        quoted = (merge_note[:180] + "…") if len(merge_note) > 180 else merge_note
+        merge_summary = (
+            f"Requirements merge confirmed (Save): \"{quoted or 'no message'}\""
+            + (f" — {story_count} user stories" if story_count else "")
+        )
+        await record_prd_version(
+            project_id, session,
+            generated_prd=persisted_state.get("generated_prd") or "",
+            generated_by="ai_merge",
+            change_type="ai",
+            change_summary=merge_summary,
+            version_number=pinned_version,
+        )
+        # record_prd_version re-synced requirement_states.version_number to the
+        # pinned ledger row; re-read so the response carries the final version.
+        persisted_state = await RequirementStateRepository.get_by_project_id(project_id, session) or persisted_state
+        logger.info(
+            "[MERGE CONFIRM] Merge logged as version %d for project %s",
+            pinned_version, project_id,
+        )
+    except Exception as ledger_err:  # NEVER block a confirmed merge on ledger logging
+        logger.warning(f"[MERGE CONFIRM] Failed to log merge into the version ledger: {ledger_err}")
 
     # 4. Delete the pending action
     await PendingActionRepository.delete(action_id, project_id, session)

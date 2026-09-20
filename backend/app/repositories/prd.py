@@ -54,6 +54,41 @@ class PRDDocumentRepository:
         return [serialize_prd_document(prd) for prd in records]
 
     @staticmethod
+    async def get_latest_for_project(
+        project_id: str,
+        session: AsyncSession,
+        *,
+        max_version: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """The NEWEST stored document row — optionally capped at ``max_version``.
+
+        The project-state endpoint resolves the preview document through this
+        helper instead of exact-matching the current version number: version
+        counters advance independently of document writes (requirement merges,
+        confirmed AI generations pin the ledger ahead of the document rows), so
+        an exact match can find no row at all and the UI would fall back to the
+        empty template skeleton instead of the real document. Ordering by
+        ``version DESC`` with a ``<=`` cap returns the newest snapshot at or
+        before the current version; when every stored row is newer than the cap
+        the absolute newest snapshot is returned so the preview never goes
+        blank.
+        """
+        pid = as_uuid(project_id)
+        stmt = select(PRDDocumentModel).where(PRDDocumentModel.project_id == pid)
+        if max_version is not None:
+            stmt = stmt.where(PRDDocumentModel.version <= max_version)
+        stmt = stmt.order_by(PRDDocumentModel.version.desc()).limit(1)
+        result = await session.execute(stmt)
+        prd = result.scalar_one_or_none()
+        if prd:
+            return serialize_prd_document(prd)
+        if max_version is None:
+            return None
+        # Every stored row is newer than the cap — still surface the newest
+        # document rather than nothing.
+        return await PRDDocumentRepository.get_latest_for_project(project_id, session)
+
+    @staticmethod
     async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
         prdid = as_uuid(id_val)
         pid = as_uuid(project_id)
@@ -107,16 +142,29 @@ class PRDVersionRepository:
     """
 
     @staticmethod
-    async def create(project_id: str, data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
+    async def create(
+        project_id: str,
+        data: Dict[str, Any],
+        session: AsyncSession,
+        version_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
         pid = as_uuid(project_id)
 
         # Determine the next version number for this project. The version ALWAYS
         # advances on every snapshot (AI generation, manual edit, revert) —
         # there is intentionally no "same content" short-circuit.
-        stmt = select(func.max(PRDVersionModel.version_number)).where(PRDVersionModel.project_id == pid)
-        result = await session.execute(stmt)
-        max_version = result.scalar() or 0
-        next_version = max_version + 1
+        #
+        # ``version_number`` may be pinned by the caller (e.g. a confirmed
+        # merge whose requirement-state version was already advanced exactly
+        # once): the ledger row then adopts THAT number so the requirement
+        # version and the ledger stay in lock-step instead of double-bumping.
+        if version_number is not None:
+            next_version = int(version_number)
+        else:
+            stmt = select(func.max(PRDVersionModel.version_number)).where(PRDVersionModel.project_id == pid)
+            result = await session.execute(stmt)
+            max_version = result.scalar() or 0
+            next_version = max_version + 1
 
         version = PRDVersionModel(
             project_id=pid,

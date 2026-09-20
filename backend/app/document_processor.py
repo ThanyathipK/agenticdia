@@ -46,6 +46,7 @@ logger = logging.getLogger("app.document_processor")
 _GATHERER_INPUT_VARIABLES = [
     "raw_input",
     "detected_intent",
+    "intent_guidance",
     "current_context",
     "recommendations",
     "format_instructions",
@@ -417,6 +418,11 @@ async def extract_requirements_from_text(
         variables={
             "raw_input": chunk_text,
             "detected_intent": "REQUIREMENT_REQUEST",
+            "intent_guidance": (
+                "Document upload mode: extract ALL requirements present in the "
+                "document text as fresh user stories; there are no existing "
+                "stories to preserve."
+            ),
             # Document processing starts from the document alone; the current
             # requirement snapshot is merged afterwards, not fed into the LLM.
             "current_context": "No existing user stories in this project.",

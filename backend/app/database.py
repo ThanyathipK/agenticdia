@@ -1,6 +1,9 @@
 import logging
 import re
 from typing import AsyncGenerator
+from urllib.parse import parse_qsl, urlsplit
+
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
 
@@ -36,7 +39,21 @@ try:
             "echo": settings.DEBUG
         }
     else:
-        # For transaction pooler (Supabase pooler on port 6543), use NullPool or minimal pool
+        # Supabase Postgres REQUIRES TLS; asyncpg does not enable SSL by
+        # default, so force it unless the DSN already carries an explicit
+        # ssl/sslmode option (e.g. ?sslmode=require or ?sslmode=disable for a
+        # local dev Postgres, which then wins).
+        _query_keys = {k for k, _ in parse_qsl(urlsplit(db_url).query)}
+        _connect_args = {
+            "server_settings": {
+                "application_name": "agenticdia-backend"
+            },
+            "statement_cache_size": 0  # Required for PgBouncer compatibility
+        }
+        if not (_query_keys & {"ssl", "sslmode"}):
+            _connect_args["ssl"] = "require"
+
+        # For transaction pooler (Supabase pooler on port 6543), use minimal pool
         # The pooler itself manages connections, so SQLAlchemy should not maintain a large pool
         engine_kwargs = {
             "pool_size": 5,  # Reduced for transaction pooler
@@ -45,12 +62,7 @@ try:
             "pool_recycle": 300,  # 5 minutes - shorter recycle for pooler
             "pool_pre_ping": True,  # Verify connections before use
             "echo": settings.DEBUG,
-            "connect_args": {
-                "server_settings": {
-                    "application_name": "agenticdia-backend"
-                },
-                "statement_cache_size": 0  # Required for PgBouncer compatibility
-            }
+            "connect_args": _connect_args
         }
         
     engine = create_async_engine(
@@ -84,6 +96,15 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
+        except HTTPException as http_exc:
+            # HTTP 4xx/5xx raised by route logic (e.g. the 413 payload-budget
+            # guard firing BEFORE any DB work) is NOT a database failure.
+            # Logging it as a "Database transaction error" misled operators:
+            # the session was never dirty. Roll back defensively (a
+            # mid-transaction HTTPException may still hold uncommitted writes)
+            # and re-raise so FastAPI returns the intended status code.
+            await session.rollback()
+            raise http_exc
         except Exception as e:
             await session.rollback()
             logger.error(f"Database transaction error encountered. Session rolled back: {str(e)}")

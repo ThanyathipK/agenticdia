@@ -22,6 +22,7 @@ import type {
   ChatMessage,
   PRDSection,
   PrdSectionLockState,
+  RequirementItem,
   RequirementLockState,
   StructuredRequirements,
   VersionHistory,
@@ -139,6 +140,11 @@ export interface ProjectState {
   lockedRequirements: Record<string, RequirementLockState>;
   handleLockRequirement: (requirementCode: string) => Promise<void>;
   handleUnlockRequirement: (requirementCode: string) => Promise<void>;
+  /** Authoritative lockable requirement rows for the project (real DB ids +
+   *  lock metadata) — the Requirements tab's "Requirement Lock Status" list. */
+  lockableRequirements: RequirementItem[];
+  /** Re-read that list from the backend (e.g. after saving a pending merge). */
+  refreshLockableRequirements: () => Promise<void>;
   /** Per-part PRD section lock/ownership metadata (the 9 preview parts). */
   sectionLocks: Record<string, PrdSectionLockState>;
   /** Lock/unlock ONE PRD part — blocks edits + AI regeneration when locked. */
@@ -171,8 +177,11 @@ export interface ProjectState {
 // Hook — composes the focused sub-hooks back into one `ProjectState`.
 // ----------------------------------------------------------------------------
 
-export function useProjectState(): ProjectState {
-  const projectsApi = useProjects();
+export function useProjectState(
+  isAuthenticated: boolean = false,
+  authUserId: string | null = null,
+): ProjectState {
+  const projectsApi = useProjects(isAuthenticated, authUserId);
   const ui = useWorkspaceUi();
   const store = useRequirementStore(projectsApi.projectId);
   const locks = useArtifactLocks(store, projectsApi.projectId);
@@ -371,6 +380,8 @@ export function useProjectState(): ProjectState {
     lockedRequirements: locks.lockedRequirements,
     handleLockRequirement: locks.handleLockRequirement,
     handleUnlockRequirement: locks.handleUnlockRequirement,
+    lockableRequirements: locks.requirementList,
+    refreshLockableRequirements: locks.refreshRequirementList,
     sectionLocks: store.sectionLocks,
     handleToggleSectionLock: store.handleToggleSectionLock,
     handleRestoreVersion: store.handleRestoreVersion,

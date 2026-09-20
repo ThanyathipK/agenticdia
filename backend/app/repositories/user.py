@@ -1,0 +1,134 @@
+"""
+User account repository operations.
+
+Owns every ``users``-table read/write used by the authentication layer
+(:mod:`app.auth` and :mod:`app.routes.auth`). Centralizing them here keeps the
+UUID coercion (``as_uuid``) and the email canonicalization in one place, so the
+login, token-verification, registration and password-change paths can never
+drift apart — a drift that previously made an account registerable but not
+loginable.
+
+Email handling
+--------------
+Emails are stored lowercase/trimmed via :func:`normalize_email`, and lookups
+match case-insensitively (``func.lower(email)``) so rows written before this
+canonicalization — e.g. the seeded ``system@banking.com`` account — still
+resolve for a user who types ``System@Banking.com``.
+"""
+import logging
+import uuid
+from typing import Any, Dict, Optional, Union
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import UserModel
+from app.repositories.base import as_uuid, dt_iso_or_none
+
+logger = logging.getLogger(__name__)
+
+
+def normalize_email(email: Optional[str]) -> str:
+    """Return the canonical form of an email address.
+
+    Surrounding whitespace is stripped and the value lower-cased so that
+    ``" User@Bank.com "``, ``"user@bank.com"`` and ``"USER@BANK.COM"`` all
+    address the same account. The ``users.email`` column is ``UNIQUE`` but the
+    index itself is case-sensitive on both SQLite and Postgres, so the
+    canonicalization has to happen in the application layer.
+    """
+    return (email or "").strip().lower()
+
+
+def serialize_user(user: UserModel) -> Dict[str, Any]:
+    """Serialize a :class:`UserModel` into its public dict representation."""
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        # The users table has no ``is_active`` column yet; the flag stays for
+        # schema stability until account suspension is actually introduced.
+        "is_active": True,
+        "created_at": dt_iso_or_none(user.created_at),
+    }
+
+
+class UserRepository:
+    """Database access for user accounts (authentication surface)."""
+
+    @staticmethod
+    async def get_by_id(
+        user_id: Union[str, uuid.UUID], session: AsyncSession
+    ) -> Optional[UserModel]:
+        """Fetch a user by primary key.
+
+        Returns ``None`` — instead of raising — when ``user_id`` is not a
+        parseable UUID (a JWT ``sub`` is attacker-influenced even though it is
+        signature-checked), so the caller can surface a clean 401 instead of a
+        500 from the GUID bind processor.
+        """
+        try:
+            key = as_uuid(user_id)
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("Rejected non-UUID user id lookup: %r", user_id)
+            return None
+
+        result = await session.execute(
+            select(UserModel).where(UserModel.id == key)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_email(
+        email: Optional[str], session: AsyncSession
+    ) -> Optional[UserModel]:
+        """Fetch a user by email, matching case-insensitively."""
+        normalized = normalize_email(email)
+        if not normalized:
+            return None
+
+        result = await session.execute(
+            select(UserModel).where(func.lower(UserModel.email) == normalized)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def email_exists(email: Optional[str], session: AsyncSession) -> bool:
+        """Return True when an account already owns *email* (case-insensitive)."""
+        return await UserRepository.get_by_email(email, session) is not None
+
+    @staticmethod
+    async def create_user(
+        *,
+        email: str,
+        password_hash: str,
+        full_name: str,
+        role: str,
+        session: AsyncSession,
+        user_id: Optional[Union[str, uuid.UUID]] = None,
+    ) -> UserModel:
+        """Insert a user row and return the refreshed model.
+
+        A caller-supplied ``user_id`` is honored so the bootstrap account can
+        keep its fixed ``00000000-0000-0000-0000-000000000000`` id that
+        ``ProjectRepository.DEFAULT_SYSTEM_USER_ID`` depends on.
+        """
+        user = UserModel(
+            id=as_uuid(user_id) if user_id is not None else uuid.uuid4(),
+            email=normalize_email(email),
+            full_name=full_name,
+            role=role,
+            password_hash=password_hash,
+        )
+        session.add(user)
+        await session.flush()
+        return user
+
+    @staticmethod
+    async def set_password_hash(
+        user: UserModel, password_hash: str, session: AsyncSession
+    ) -> None:
+        """Store a new bcrypt hash on *user* and flush the change."""
+        user.password_hash = password_hash
+        await session.flush()

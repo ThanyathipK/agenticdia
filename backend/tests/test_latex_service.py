@@ -817,6 +817,92 @@ class TestExportEndpoints:
         assert resp.content == b"%PDF-tectonic-fallback"
 
     @pytest.mark.asyncio
+    async def test_pdf_export_compiles_the_latest_stored_version(
+        self, client, seeded_project, db_session, monkeypatch
+    ):
+        """REGRESSION (user report): the Export PDF button produced an OLDER
+        document than the Export DOCX button when the frontend-posted copy
+        lagged a live sync (a generation/confirm/section-edit that had just
+        landed). The PDF endpoint must resolve the LATEST stored document
+        server-side — the same resolution the on-screen preview uses — and
+        keep the posted source only as a pre-first-generation fallback."""
+        from uuid import UUID
+
+        from app.models import PRDDocumentModel
+
+        newer = MARKDOWN_PRD.replace(
+            "Secure transfer API for retail customers.",
+            "LATEST v2 instant transfer API.",
+        )
+        db_session.add(
+            PRDDocumentModel(
+                project_id=UUID(seeded_project),
+                version=7,
+                prd_markdown=newer,
+                mermaid_diagram="",
+            )
+        )
+        await db_session.commit()
+
+        import app.routes.projects as projects_route
+
+        captured: dict = {}
+
+        def fake_docx_to_pdf(docx_bytes: bytes) -> bytes:
+            captured["docx"] = docx_bytes
+            return b"%PDF-from-docx"
+
+        monkeypatch.setattr(projects_route, "soffice_available", lambda: True)
+        monkeypatch.setattr(projects_route, "docx_to_pdf", fake_docx_to_pdf)
+
+        # The (stale) frontend posts the OLD copy — the stored LATEST must win.
+        resp = await client.post(
+            f"/api/project/{seeded_project}/export/pdf",
+            json={"latex_source": MARKDOWN_PRD},
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"%PDF-from-docx"
+        with zipfile.ZipFile(io.BytesIO(captured["docx"])) as z:
+            xml = z.read("word/document.xml").decode("utf-8")
+        assert "LATEST v2 instant transfer API" in xml
+        assert "Secure transfer API for retail customers." not in xml
+
+    @pytest.mark.asyncio
+    async def test_docx_export_compiles_the_latest_stored_version(
+        self, client, seeded_project, db_session
+    ):
+        """Same latest-version contract for the DOCX export: a stored document
+        always wins over the (possibly stale) frontend-posted copy, so both
+        downloads can never carry different versions."""
+        from uuid import UUID
+
+        from app.models import PRDDocumentModel
+
+        newer = MARKDOWN_PRD.replace(
+            "Secure transfer API for retail customers.",
+            "LATEST v2 instant transfer API.",
+        )
+        db_session.add(
+            PRDDocumentModel(
+                project_id=UUID(seeded_project),
+                version=7,
+                prd_markdown=newer,
+                mermaid_diagram="",
+            )
+        )
+        await db_session.commit()
+
+        resp = await client.post(
+            f"/api/project/{seeded_project}/export/docx",
+            json={"latex_source": MARKDOWN_PRD},
+        )
+        assert resp.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+            xml = z.read("word/document.xml").decode("utf-8")
+        assert "LATEST v2 instant transfer API" in xml
+        assert "Secure transfer API for retail customers." not in xml
+
+    @pytest.mark.asyncio
     async def test_krungsri_latex_docx_export_succeeds(self, client, seeded_project):
         """Endpoint-level guard: the merged-cell constructs of the template body
         still yield REAL native Word tables after the full HTTP round-trip."""

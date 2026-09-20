@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import AuthenticatedUser, get_current_user
 from app.database import get_db
 from app.latex_service import (
     compile_latex_to_pdf,
@@ -27,6 +28,7 @@ from app.repositories import (
     ProjectRepository,
     RequirementStateRepository,
     ConversationMessageRepository,
+    PRDDocumentRepository,
     PRDVersionRepository,
 )
 from app.schemas import (
@@ -60,30 +62,44 @@ def _duplicate_project_name_detail(name: str) -> str:
 
 
 @router.get("/api/projects", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
-async def get_projects(db: AsyncSession = Depends(get_db)) -> List[ProjectSummary]:
+async def get_projects(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> List[ProjectSummary]:
     """
-    List all projects.
+    List the signed-in user's projects.
+
+    Per-user data boundary: only projects whose ``user_id`` matches the JWT's
+    subject are returned. An anonymous caller is rejected with 401 by
+    ``get_current_user`` before any query runs, so nothing is exposed before
+    login.
 
     Args:
+        current_user: Authenticated caller resolved from the Bearer token.
         db: Active asynchronous database session.
 
     Returns:
-        List[ProjectSummary]: All project summary records.
+        List[ProjectSummary]: That user's project summary records (pinned first).
     """
-    return await ProjectRepository.list_all(db)
+    return await ProjectRepository.list_all(db, user_id=UUID(current_user.id))
 
 
 @router.get("/api/projects/search", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
 async def search_projects(
     q: str = Query(..., min_length=1, description="Text matched case-insensitively against project names and conversation message content."),
+    current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> List[ProjectSummary]:
     """
-    Search projects by name or by their conversation message content.
+    Search the signed-in user's projects by name or conversation content.
+
+    Same per-user boundary as GET /api/projects: results can only ever include
+    projects owned by the authenticated caller.
 
     Args:
         q: Search text; matched case-insensitively against project names and
            any persisted conversation message belonging to the project.
+        current_user: Authenticated caller resolved from the Bearer token.
         db: Active asynchronous database session.
 
     Returns:
@@ -95,16 +111,23 @@ async def search_projects(
     query = q.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Search query must not be empty")
-    return await ProjectRepository.search(db, query)
+    return await ProjectRepository.search(db, query, user_id=UUID(current_user.id))
 
 
 @router.post("/api/projects", response_model=ProjectCreated, status_code=status.HTTP_201_CREATED)
-async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_db)) -> ProjectCreated:
+async def create_project(
+    payload: ProjectCreate,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectCreated:
     """
-    Create a new project and initialize its requirement state.
+    Create a new project owned by the signed-in user and initialize its
+    requirement state.
 
     Args:
         payload: Project creation payload.
+        current_user: Authenticated caller resolved from the Bearer token —
+            becomes the project's owner (``projects.user_id``).
         db: Active asynchronous database session.
 
     Returns:
@@ -126,15 +149,21 @@ async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_
         )
     project_data = payload.model_dump()
     project_data["id"] = str(uuid.uuid4())
-    # Use system user UUID as default until proper auth is implemented
-    project_data["user_id"] = "00000000-0000-0000-0000-000000000000"
+    # OWNERSHIP: the JWT subject is the owner. New projects are visible only to
+    # their creator (GET /api/projects scopes to this same id).
+    project_data["user_id"] = current_user.id
     created_project = await ProjectRepository.create_project(project_data, db)
     await event_manager.publish(str(project_data["id"]), "project_created", {"project_id": project_data["id"]})
     return created_project
 
 
 @router.put("/api/projects/{project_id}", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
-async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+async def update_project(
+    project_id: str,
+    payload: ProjectCreate,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectSummary:
     """
     Update an existing project (rename).
 
@@ -165,8 +194,9 @@ async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSessi
             status_code=status.HTTP_409_CONFLICT,
             detail=_duplicate_project_name_detail(updates["name"]),
         )
-    updated = await ProjectRepository.update(project_id, updates, db)
+    updated = await ProjectRepository.update(project_id, updates, db, user_id=UUID(current_user.id))
     if not updated:
+        # Same answer for "missing" and "owned by someone else" — no existence leak.
         raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_updated", {
         "project_id": project_id,
@@ -176,7 +206,11 @@ async def update_project(project_id: str, payload: ProjectCreate, db: AsyncSessi
 
 
 @router.delete("/api/projects/{project_id}", response_model=ProjectDeleteResponse, status_code=status.HTTP_200_OK)
-async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)) -> ProjectDeleteResponse:
+async def delete_project(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectDeleteResponse:
     """
     Delete an existing project.
 
@@ -195,7 +229,7 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)) ->
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
-    deleted = await ProjectRepository.delete(project_id, db)
+    deleted = await ProjectRepository.delete(project_id, db, user_id=UUID(current_user.id))
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_deleted", {"project_id": project_id})
@@ -203,7 +237,12 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)) ->
 
 
 @router.put("/api/projects/{project_id}/pin", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
-async def pin_project(project_id: str, payload: ProjectPinRequest, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+async def pin_project(
+    project_id: str,
+    payload: ProjectPinRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectSummary:
     """Pin or unpin a project (chat) so it floats to the top of the sidebar.
 
     Args:
@@ -222,7 +261,7 @@ async def pin_project(project_id: str, payload: ProjectPinRequest, db: AsyncSess
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
-    updated = await ProjectRepository.toggle_pinned(project_id, payload.is_pinned, db)
+    updated = await ProjectRepository.toggle_pinned(project_id, payload.is_pinned, db, user_id=UUID(current_user.id))
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_updated", {
@@ -233,7 +272,12 @@ async def pin_project(project_id: str, payload: ProjectPinRequest, db: AsyncSess
 
 
 @router.put("/api/projects/{project_id}/flag", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
-async def flag_project(project_id: str, payload: ProjectFlagRequest, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+async def flag_project(
+    project_id: str,
+    payload: ProjectFlagRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectSummary:
     """Flag or unflag a project (dashboard ★ marker).
 
     Independent of pinning: flagging only marks the project for attention in
@@ -255,7 +299,7 @@ async def flag_project(project_id: str, payload: ProjectFlagRequest, db: AsyncSe
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
-    updated = await ProjectRepository.toggle_flagged(project_id, payload.is_flagged, db)
+    updated = await ProjectRepository.toggle_flagged(project_id, payload.is_flagged, db, user_id=UUID(current_user.id))
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_updated", {
@@ -266,7 +310,12 @@ async def flag_project(project_id: str, payload: ProjectFlagRequest, db: AsyncSe
 
 
 @router.put("/api/projects/{project_id}/status", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
-async def set_project_status(project_id: str, payload: ProjectStatusRequest, db: AsyncSession = Depends(get_db)) -> ProjectSummary:
+async def set_project_status(
+    project_id: str,
+    payload: ProjectStatusRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectSummary:
     """Set a project's user-editable workflow status (dashboard table).
 
     Args:
@@ -293,7 +342,7 @@ async def set_project_status(project_id: str, payload: ProjectStatusRequest, db:
             detail=f"Invalid status '{payload.status}'. Allowed: {', '.join(sorted(allowed))}",
         )
 
-    updated = await ProjectRepository.update_status(project_id, payload.status, db)
+    updated = await ProjectRepository.update_status(project_id, payload.status, db, user_id=UUID(current_user.id))
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_updated", {
@@ -617,9 +666,12 @@ async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depend
 class LatexExportPayload(BaseModel):
     """Body for the compiled-file export endpoints.
 
-    ``latex_source`` is the current PRD document as held by the frontend store
-    (a standalone LaTeX document). ``version``/``project_name`` only shape the
-    suggested download filename.
+    ``latex_source`` is the PRD document as held by the frontend store (a
+    standalone LaTeX document). It is only a FALLBACK: the export endpoints
+    resolve the LATEST stored document server-side (see
+    ``_latest_stored_prd_source``) so both PDF and DOCX always carry the
+    newest version. ``version``/``project_name`` only shape the suggested
+    download filename.
     """
 
     latex_source: str = Field(..., description="Full LaTeX PRD document source.")
@@ -650,6 +702,27 @@ def _safe_filename_stem(
     return f"PRD_{stem}{version_part}_{_timestamp_stamp(now)}"
 
 
+async def _latest_stored_prd_source(project_id: str, db: AsyncSession) -> str:
+    """The latest stored PRD document text — prd_documents first, ledger fallback.
+
+    Mirrors the project-state read path (``RequirementStateRepository``): the
+    on-screen preview and BOTH file exports must resolve to the SAME latest
+    version, so the export endpoints resolve the document server-side instead
+    of trusting the frontend-posted copy — which can briefly lag a live sync
+    (a generation/confirm/section-edit that just landed) and would otherwise
+    compile an OLDER version than the preview shows. Empty string when the
+    project has no stored document yet.
+    """
+    doc = await PRDDocumentRepository.get_latest_for_project(project_id, db)
+    source = ((doc or {}).get("prd_markdown") or "").strip()
+    if source:
+        return source
+    # No document rows at all — the newest immutable version-ledger snapshot
+    # is still a valid exportable document (it does not store diagrams).
+    ledger = await PRDVersionRepository.get_latest(project_id, db)
+    return ((ledger or {}).get("generated_prd") or "").strip()
+
+
 async def _export_prd_bytes(
     project_id: str,
     payload: LatexExportPayload,
@@ -666,6 +739,18 @@ async def _export_prd_bytes(
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
 
     source = (payload.latex_source or "").strip()
+
+    # EXPORTS ALWAYS CARRY THE LATEST VERSION: resolve the newest stored
+    # document server-side (the same resolution the project-state/preview
+    # read path uses) and keep the frontend-posted copy only as a fallback
+    # for exports BEFORE the first generation, where the store holds the
+    # blank template skeleton and nothing is stored yet. Without this, an
+    # export issued while the frontend store briefly lagged a live sync
+    # compiled an OLDER version than the one on screen.
+    stored_source = await _latest_stored_prd_source(project_id, db)
+    if stored_source:
+        source = stored_source
+
     if not source:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

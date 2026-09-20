@@ -18,6 +18,8 @@ export interface RequirementItem {
   title: string;
   description?: string;
   user_stories: UserStory[];
+  /** 'active' | 'archived' | 'deleted' — mirrors the stored record status. */
+  status?: string;
   is_locked?: boolean;
   locked_by?: string | null;
   locked_at?: string | null;

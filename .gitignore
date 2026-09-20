@@ -12,8 +12,9 @@ coverage/
 # Logs
 *.log
 
-# Env files
-.env*
+# Env files - never commit sensitive configuration
+.env
+.env.*
 !.env.example
 
 # Python
@@ -26,6 +27,7 @@ venv/
 
 # Databases
 *.db
+*.db.*
 *.sqlite
 *.sqlite3
 
@@ -34,3 +36,25 @@ server.js
 
 # Vendored LaTeX toolchain (Tectonic + Pandoc binaries)
 .tools/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+tmp/
+temp/
+
+# Test artifacts
+*.pyc
+*.pyo
+
+# Distribution / packaging
+*.egg
+*.whl
+dist/
+build/
+
+# Local settings
+local_settings.py
+settings_local.py

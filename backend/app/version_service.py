@@ -155,6 +155,7 @@ async def record_prd_version(
     generated_by: str = "automated_agent",
     change_type: str = "ai",
     change_summary: Optional[str] = None,
+    version_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Persist a NEW immutable PRD snapshot for the project and advance the
@@ -168,6 +169,12 @@ async def record_prd_version(
       - ``change_type`` ('ai' | 'manual'),
       - a change summary (auto-derived when omitted),
       - per-section change records incl. ``locked_preserved`` markers.
+
+    ``version_number`` optionally PINS the ledger row's number (e.g. a
+    confirmed merge whose requirement-state version was already advanced
+    exactly once) so the ledger and the requirement version stay in
+    lock-step instead of bumping twice. When omitted the row simply takes
+    ``max(existing ledger) + 1``.
 
     Returns the serialized version row.
     """
@@ -201,7 +208,7 @@ async def record_prd_version(
             or _default_change_summary(change_type, changed),
         "changed_sections": changed,
         "semver": semver,
-    }, session)
+    }, session, version_number=version_number)
 
     # Keep the project's current version number in lock-step with the ledger so
     # the document cover (V{n}.0) and the UI's currentVersion always agree.

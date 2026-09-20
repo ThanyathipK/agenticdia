@@ -8,11 +8,18 @@ import axios from 'axios';
 import type {
   ActionStatusResponse,
   ArtifactLockResponse,
+  AuthConfigPayload,
+  AuthMessageResponse,
+  AuthRegisterRequest,
+  AuthRegisterResponse,
+  AuthSessionPayload,
+  AuthUserPayload,
   ConfirmActionResponse,
   ConvertedPrdMarkdownPayload,
   DocumentDeleteResponse,
   DocumentMarkdownPayload,
   HealthPayload,
+  ImpactAnalysisPayload,
   PendingActionPayload,
   PrdSectionListPayload,
   PrdSectionUpdateResponse,
@@ -26,13 +33,38 @@ import type {
   ProjectDeleteResponse,
   ProjectStatus,
   ProjectSummary,
+  RequirementPayload,
   RequirementStatePayload,
   UploadedDocumentPayload,
   TraceabilityPayload,
 } from './types';
 
-async function get<T>(url: string, params?: Record<string, unknown>): Promise<T> {
-  const { data } = await axios.get<T>(url, { params });
+// ============================================================================
+// Auth plumbing
+// ============================================================================
+// The session token is mirrored into axios defaults by setAuthToken() so that
+// any endpoint the backend later protects is authenticated automatically; the
+// auth helpers below also accept an explicit token because they must work
+// before (login) or independently of that global default.
+export function setAuthToken(token: string | null): void {
+  if (token) {
+    axios.defaults.headers.common.Authorization = `Bearer ${token}`;
+  } else {
+    delete axios.defaults.headers.common.Authorization;
+  }
+}
+
+/** Bearer header map for a single authenticated request. */
+function bearerHeaders(token?: string | null): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function get<T>(
+  url: string,
+  params?: Record<string, unknown>,
+  token?: string | null
+): Promise<T> {
+  const { data } = await axios.get<T>(url, { params, headers: bearerHeaders(token) });
   return data;
 }
 
@@ -45,9 +77,14 @@ async function post<T>(
   url: string,
   body?: unknown,
   params?: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  token?: string | null
 ): Promise<T> {
-  const { data } = await axios.post<T>(url, body ?? null, { params, signal });
+  const { data } = await axios.post<T>(url, body ?? null, {
+    params,
+    signal,
+    headers: bearerHeaders(token),
+  });
   return data;
 }
 
@@ -186,6 +223,10 @@ export const api = {
     post<ConfirmActionResponse>(`/api/confirm-action/${actionId}`, null, { project_id: projectId }),
   cancelAction: (actionId: string, projectId: string) =>
     post<ActionStatusResponse>(`/api/cancel-action/${actionId}`, null, { project_id: projectId }),
+  // READ-ONLY Requirement Impact Analysis for one pending merge action:
+  // what the merge changes + which downstream artifacts are impacted.
+  getActionImpact: (actionId: string, projectId: string) =>
+    get<ImpactAnalysisPayload>(`/api/pending-actions/${actionId}/impact`, { project_id: projectId }),
 
   // ---- Artifact locks -----------------------------------------------------
   lockArtifact: (projectId: string, artifactType: string, artifactId: string, lockedBy = 'user') =>
@@ -198,6 +239,13 @@ export const api = {
       `/api/project/${projectId}/artifacts/${artifactType}/${artifactId}/unlock`,
       { locked_by: lockedBy }
     ),
+
+  // ---- Requirement records (authoritative list, incl. lock metadata) ------
+  // Backed by GET /api/project/{id}/requirements — the only endpoint that
+  // returns each requirement's real database UUID (needed by the lock API,
+  // which rejects anything that is not a UUID) together with its lock state.
+  listRequirements: (projectId: string) =>
+    get<RequirementPayload[]>(`/api/project/${projectId}/requirements`),
 
   // ---- Multi-agent requirements workflow ----------------------------------
   // `signal` lets callers abort an in-flight generation (the Stop button) —
@@ -266,9 +314,12 @@ export const api = {
 
   // ---- PRD file export (LaTeX -> PDF / DOCX) --------------------------------
   // The generated PRD is LaTeX following template-krungsrinimble.tex, so both
-  // exports are COMPILED server-side (PDF via Tectonic, DOCX via Pandoc) from
-  // the current PRD document held in the store. The returned Blob is the
-  // finished file — no client-side markdown parsing is involved.
+  // exports are COMPILED server-side (PDF via the same Word build, DOCX via
+  // the native renderer). The posted source is only a fallback: the backend
+  // resolves the LATEST stored document itself (same resolution the preview
+  // uses), so both downloads always carry the newest version even if this
+  // store copy briefly lagged a live sync. The returned Blob is the finished
+  // file — no client-side markdown parsing is involved.
   exportPrdPdf: (projectId: string, latexSource: string, version?: number, projectName?: string) =>
     postBlob(`/api/project/${projectId}/export/pdf`, {
       latex_source: latexSource,
@@ -290,4 +341,25 @@ export const api = {
 
   // ---- Health --------------------------------------------------------------
   fetchHealth: () => get<HealthPayload>('/api/health'),
+
+  // ---- Authentication (backend/app/routes/auth.py) -------------------------
+  // Login uses the OAuth2 password flow, so the body is form-encoded
+  // (username = email) rather than JSON — `post` alone cannot express that.
+  // `withCredentials` is deliberately NOT set anywhere: auth travels in the
+  // Authorization header, not cookies (see the CORS notes in backend/app/main.py).
+  authLogin: async (email: string, password: string) => {
+    const body = new URLSearchParams({ username: email, password });
+    const { data } = await axios.post<AuthSessionPayload>('/api/auth/login', body);
+    return data;
+  },
+  authRegister: (payload: AuthRegisterRequest) =>
+    post<AuthRegisterResponse>('/api/auth/register', payload),
+  /** Unauthenticated capabilities probe (signup_enabled, token TTL). */
+  authConfig: () => get<AuthConfigPayload>('/api/auth/config'),
+  /** Server-side logout (audit log). JWT is stateless, so also clear client state. */
+  authLogout: (token: string) =>
+    post<AuthMessageResponse>('/api/auth/logout', undefined, undefined, undefined, token),
+  /** Resolves the token's owner straight from the database — also a validity probe. */
+  authMe: (token: string) =>
+    get<AuthUserPayload>('/api/auth/me', undefined, token),
 };

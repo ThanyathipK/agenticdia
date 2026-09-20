@@ -52,15 +52,23 @@ export interface UseProjectsResult {
   setProjectSearchQuery: Dispatch<SetStateAction<string>>;
 }
 
-export function useProjects(): UseProjectsResult {
+export function useProjects(isAuthenticated: boolean, authUserId: string | null): UseProjectsResult {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [pendingActions, setPendingActions] = useState<PendingActionPayload[]>([]);
 
-  // Load the project list once on mount. The backend may still be booting, so
-  // retry a few times before giving up (mirrors the original hook behavior).
+  // Load the project list ONLY while signed in. The backend enforces the same
+  // boundary (GET /api/projects requires a Bearer token and scopes to the JWT
+  // subject), so before login the sidebar is empty by construction and after
+  // login it shows exactly the signed-in user's projects. Signing out clears
+  // the list so the previous user's data never lingers on screen.
   useEffect(() => {
     let isMounted = true;
+    if (!isAuthenticated || !authUserId) {
+      setProjects([]);
+      setProjectId(null);
+      return () => { isMounted = false; };
+    }
     const fetchProjects = async (retries = 8, delay = 1000) => {
       try {
         const projs = await api.listProjects();
@@ -80,7 +88,7 @@ export function useProjects(): UseProjectsResult {
     };
     fetchProjects();
     return () => { isMounted = false; };
-  }, []);
+  }, [isAuthenticated, authUserId]);
 
   // "New Project" modal visibility (the styled replacement for prompt()).
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
@@ -106,6 +114,10 @@ export function useProjects(): UseProjectsResult {
 
   useEffect(() => {
     const query = projectSearchQuery.trim();
+
+    // Per-user boundary: searching (and the unfiltered restore) only run for a
+    // signed-in user; the server scopes results to the JWT subject anyway.
+    if (!isAuthenticated) return;
 
     // Query emptied -> restore the unfiltered list, but only after a search
     // actually replaced it (keeps the mount-time load untouched).
@@ -135,7 +147,7 @@ export function useProjects(): UseProjectsResult {
         });
     }, 250);
     return () => clearTimeout(timer);
-  }, [projectSearchQuery]);
+  }, [projectSearchQuery, isAuthenticated]);
 
   // Close context menu on outside click
   useEffect(() => {

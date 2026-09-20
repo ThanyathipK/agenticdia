@@ -451,11 +451,13 @@ async def _process_requirements_pipeline(
     """
     from datetime import datetime, timedelta, timezone
 
-    logger.info(f"Triggering on-demand {request.target_agent} agent for project {request.project_id}")
-
     # Finding #39: enforce MAX_CONTEXT_TOKENS on the incoming processing payload
     # (raw_input + structured_requirements) before spending any LLM budget.
+    # Runs BEFORE the "Triggering on-demand agent" log so a rejected request
+    # never claims an agent run was started.
     validate_body_budget(request.model_dump(), "Process-requirements request")
+
+    logger.info(f"Triggering on-demand {request.target_agent} agent for project {request.project_id}")
 
     # ==========================================
     # STEP 1: Persist every user message before any intent detection or agent routing
@@ -485,6 +487,10 @@ async def _process_requirements_pipeline(
         req_state.get("user_stories", []) if req_state else []
     )
     detected_intent = detected_intent_result.get("intent", "GENERAL_CHAT")
+    # Propagated into the workflow so the Gatherer prompt can quote the real
+    # classifier confidence (and hedge when the classification was uncertain)
+    # instead of assuming a perfect 1.0 confidence.
+    intent_confidence = float(detected_intent_result.get("confidence", 1.0) or 1.0)
     logger.info(f"[INTENT DETECTION] Detected intent: {detected_intent} (confidence: {detected_intent_result.get('confidence', 0.0)})")
 
     # ==========================================
@@ -715,6 +721,7 @@ async def _process_requirements_pipeline(
         "target_agent": request.target_agent or "gatherer",
         "requirement_state": req_state,
         "detected_intent": detected_intent,
+        "intent_confidence": intent_confidence,
         "db_session": session  # Pass the active session to workflow nodes
     }
 

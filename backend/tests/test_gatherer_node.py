@@ -1,0 +1,757 @@
+"""Offline unit tests for app.agents.gatherer_node.
+
+Locks in the extraction-quality fixes:
+- ONE merge over the flattened LLM output -> no story duplication across
+  requirement groups (the old code merged the whole backlog once PER group).
+- Unmentioned existing stories are preserved under their ORIGINAL requirement.
+- The LLM ``version`` echo is ignored; the version bumps exactly once on real
+  changes and never regresses.
+- No-op / GENERAL_CHAT invocations never touch the requirement state.
+- Low-confidence semantic changes produce a user-visible clarification message.
+- Locked stories survive a gather run and are never mutated.
+- A recycled requirement code for a different feature is minted a fresh code.
+- The persisted epic name is kept unless the user explicitly renames it.
+- Intent classification reaches the prompt truthfully: the real classifier
+  confidence (propagated from the route/matcher node) is quoted and a low
+  confidence makes the gatherer prefer preserving over inventing.
+- Locked stories are rendered into the prompt with an explicit LOCKED marker so
+  the model cannot mistake them for deletable/duplicable stories.
+"""
+import sys
+
+import pytest
+
+sys.path.insert(0, "/Users/thanyathip/Desktop/agenticdia/backend")
+
+import copy
+
+import app.agents as agents
+
+US_001 = {
+    "ticket_code": "US-001",
+    "story_title": "Submit refund request online",
+    "as_a": "Retail Customer",
+    "i_want_to": "submit a refund request",
+    "so_that": "I get my money back",
+    "acceptance_criteria": [
+        "Given a valid transaction ID, when the form is submitted, then the refund status is PENDING"
+    ],
+}
+US_002 = {
+    "ticket_code": "US-002",
+    "story_title": "Track refund status",
+    "as_a": "Retail Customer",
+    "i_want_to": "track my refund status",
+    "so_that": "I know when the money arrives",
+    "acceptance_criteria": [
+        "Given a submitted refund, when I open the tracking page, then I see the current status"
+    ],
+}
+US_003 = {
+    "ticket_code": "US-003",
+    "story_title": "Email refund updates",
+    "as_a": "Retail Customer",
+    "i_want_to": "receive email updates",
+    "so_that": "I stay informed without checking",
+    "acceptance_criteria": [
+        "Given a refund status change, when it happens, then an email notification is sent"
+    ],
+}
+
+REQ_STATE = {
+    "project_id": "p1",
+    "project_name": "PromptPay Refund Portal",
+    "requirements": [
+        {
+            "requirement_code": "REQ-001",
+            "title": "Refund Request Submission",
+            "description": "Submit and track refund requests",
+            "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002)],
+        },
+        {
+            "requirement_code": "REQ-002",
+            "title": "Refund Notifications",
+            "description": "",
+            "user_stories": [copy.deepcopy(US_003)],
+        },
+    ],
+    "business_goals": [],
+    "actors": [],
+    "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002), copy.deepcopy(US_003)],
+    "acceptance_criteria": [
+        US_001["acceptance_criteria"][0],
+        US_002["acceptance_criteria"][0],
+        US_003["acceptance_criteria"][0],
+    ],
+    "clarification_questions": [],
+    "validation_status": "pending",
+    "generated_prd": "",
+    "generated_diagrams": "",
+    "current_workflow_state": "gatherer_node",
+    "version_number": 5,
+    "updated_at": None,
+}
+
+
+def _patch(monkeypatch, req_state, llm_result=None, semantic_recs=None):
+    """Patch DB/LLM collaborators; returns (saved_messages, llm_calls)."""
+    saved = []
+    llm_calls = []
+
+    async def fake_state(project_id, session=None, current_version=1):
+        return copy.deepcopy(req_state)
+
+    async def fake_save(**kwargs):
+        saved.append(kwargs)
+        return None
+
+    async def fake_semantic(raw_input, current_stories):
+        return copy.deepcopy(semantic_recs or [])
+
+    async def fake_intent(raw_input, current_stories):
+        return {"intent": "UPDATE_REQUIREMENT", "confidence": 0.95, "reason": "test"}
+
+    async def fake_llm(*args, **kwargs):
+        llm_calls.append(kwargs)
+        return copy.deepcopy(llm_result)
+
+    monkeypatch.setattr(agents, "get_or_init_requirement_state", fake_state)
+    monkeypatch.setattr(agents.ConversationMessageRepository, "save_message", fake_save)
+    monkeypatch.setattr(agents, "detect_semantic_changes", fake_semantic)
+    monkeypatch.setattr(agents, "detect_requirement_intent", fake_intent)
+    monkeypatch.setattr(agents, "invoke_llm_structured", fake_llm)
+    return saved, llm_calls
+
+
+def _story_codes_by_requirement(requirements):
+    return {
+        r["requirement_code"]: sorted(s["ticket_code"] for s in r["user_stories"])
+        for r in requirements
+    }
+
+
+@pytest.mark.asyncio
+async def test_multi_requirement_output_does_not_duplicate_existing_stories(monkeypatch):
+    """The old node ran one merge PER LLM requirement over the whole backlog,
+    duplicating every existing story into every requirement group."""
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [
+                    {**copy.deepcopy(US_001), "i_want_to": "submit a refund request with receipts"},
+                    copy.deepcopy(US_002),
+                ],
+            },
+            {
+                "requirement_code": "REQ-002",
+                "title": "Refund Notifications",
+                "user_stories": [
+                    copy.deepcopy(US_003),
+                    {
+                        "ticket_code": "US-006",
+                        "story_title": "SMS refund alerts",
+                        "as_a": "Retail Customer",
+                        "i_want_to": "receive SMS refund alerts",
+                        "so_that": "I react instantly",
+                        "acceptance_criteria": [
+                            "Given a refund status change, when it happens, then an SMS is sent"
+                        ],
+                    },
+                ],
+            },
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Add SMS refund alerts and make receipts mandatory on refund submission",
+        "detected_intent": "CREATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    reqs = result["requirement_state"]["requirements"]
+    assert _story_codes_by_requirement(reqs) == {
+        "REQ-001": ["US-001", "US-002"],
+        "REQ-002": ["US-003", "US-006"],
+    }
+
+    # Flat list has each story exactly once
+    flat_codes = [s["ticket_code"] for s in result["requirement_state"]["user_stories"]]
+    assert sorted(flat_codes) == ["US-001", "US-002", "US-003", "US-006"]
+    assert len(flat_codes) == len(set(flat_codes))
+
+    # The targeted story was updated in place
+    us001 = next(s for s in result["requirement_state"]["user_stories"] if s["ticket_code"] == "US-001")
+    assert us001["i_want_to"] == "submit a refund request with receipts"
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_existing_stories_preserved_under_original_requirement(monkeypatch):
+    """Stories the LLM does not re-emit must survive, still grouped under the
+    requirement they belonged to (the old dead-code loop never did this)."""
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-002",
+                "title": "Refund Notifications",
+                "user_stories": [
+                    {
+                        "ticket_code": "US-006",
+                        "story_title": "Push refund alerts",
+                        "as_a": "Retail Customer",
+                        "i_want_to": "receive push notifications",
+                        "so_that": "I react instantly",
+                        "acceptance_criteria": [
+                            "Given a refund status change, when it happens, then a push notification is sent"
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Add push notifications for refunds",
+        "detected_intent": "CREATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    reqs = result["requirement_state"]["requirements"]
+    assert _story_codes_by_requirement(reqs) == {
+        "REQ-001": ["US-001", "US-002"],
+        "REQ-002": ["US-003", "US-006"],
+    }
+    # Content preserved verbatim for unmentioned stories
+    us002 = next(s for s in result["requirement_state"]["user_stories"] if s["ticket_code"] == "US-002")
+    assert us002["story_title"] == US_002["story_title"]
+    assert us002["acceptance_criteria"] == US_002["acceptance_criteria"]
+
+
+
+@pytest.mark.asyncio
+async def test_version_bumps_once_on_change_and_ignores_llm_version_echo(monkeypatch):
+    """The LLM schema defaults ``version`` to 1 and never knows the real one -
+    trusting it reset the project version on every gather."""
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "version": 1,  # what the LLM echoes
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [
+                    {**copy.deepcopy(US_001), "i_want_to": "submit a refund with receipt attached"}
+                ],
+            }
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Refunds must attach a receipt",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    assert result["current_version"] == 6
+    assert result["requirement_state"]["version_number"] == 6
+    assert result["structured_requirements"]["version"] == 6
+
+
+@pytest.mark.asyncio
+async def test_version_stays_when_nothing_changed(monkeypatch):
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "version": 1,
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002)],
+            },
+            {
+                "requirement_code": "REQ-002",
+                "title": "Refund Notifications",
+                "user_stories": [copy.deepcopy(US_003)],
+            },
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "ok",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    assert result["current_version"] == 5
+
+
+@pytest.mark.asyncio
+async def test_noop_guard_returns_state_unchanged(monkeypatch):
+    """Empty input + empty draft used to flatten all requirements into one
+    REQ-001 via the legacy fallback."""
+    saved, llm_calls = _patch(monkeypatch, REQ_STATE)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "",
+        "structured_requirements": {},
+        "current_version": 5,
+    })
+
+    assert llm_calls == []
+    assert result["detected_intent"] == "GENERAL_CHAT"
+    assert result["requirement_state"]["requirements"] == REQ_STATE["requirements"]
+    assert result["requirement_state"]["version_number"] == 5
+    # The user is told why nothing happened
+    assert saved and "didn't receive" in saved[0]["message"]
+    assert saved[0]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_general_chat_input_is_never_extracted(monkeypatch):
+    saved, llm_calls = _patch(monkeypatch, REQ_STATE)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "What is a refund window?",
+        "detected_intent": "GENERAL_CHAT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    assert llm_calls == []
+    assert result["requirement_state"]["requirements"] == REQ_STATE["requirements"]
+    assert result["detected_intent"] == "GENERAL_CHAT"
+    assert saved and "did not modify" in saved[0]["message"]
+
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_change_asks_user_instead_of_guessing(monkeypatch):
+    """The clarification branch used to save questions to state with no chat
+    message, so the gather looked like a silent failure."""
+    semantic_recs = [{
+        "change_type": "NEW_REQUIREMENT",
+        "target_requirement_id": None,
+        "confidence": 0.4,
+        "reason": "It is unclear whether this is a new story or an update to US-002",
+        "recommended_action": "INSERT",
+    }]
+    saved, llm_calls = _patch(monkeypatch, REQ_STATE, semantic_recs=semantic_recs)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "maybe change that refund thing",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    assert llm_calls == []  # no extraction on ambiguity
+    cqs = result["requirement_state"]["clarification_questions"]
+    assert len(cqs) == 1 and cqs[0]["is_resolved"] is False
+    assert result["requirement_state"]["validation_status"] == "invalid"
+    assert saved and "Clarification Needed" in saved[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_locked_stories_survive_and_are_never_mutated(monkeypatch):
+    locked_state = copy.deepcopy(REQ_STATE)
+    locked_state["user_stories"][1]["is_locked"] = True
+
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [
+                    {**copy.deepcopy(US_002), "i_want_to": "HACKED VALUE"},
+                ],
+            }
+        ],
+    }
+    _patch(monkeypatch, locked_state, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "change the tracking story",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    us002 = next(
+        s for s in result["requirement_state"]["user_stories"]
+        if s["ticket_code"] == "US-002"
+    )
+    # Still present, still locked, content untouched
+    assert us002["is_locked"] is True
+    assert us002["i_want_to"] == US_002["i_want_to"]
+    # And still grouped under its original requirement
+    grouping = _story_codes_by_requirement(result["requirement_state"]["requirements"])
+    assert "US-002" in grouping["REQ-001"]
+
+
+
+@pytest.mark.asyncio
+async def test_recycled_requirement_code_gets_a_fresh_code(monkeypatch):
+    """An LLM reusing REQ-001 for a totally different feature must not pollute
+    the existing group - a fresh code is minted."""
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",  # recycled!
+                "title": "Fraud Detection",
+                "user_stories": [
+                    {
+                        "ticket_code": "",
+                        "story_title": "Flag suspicious refunds",
+                        "as_a": "Fraud Analyst",
+                        "i_want_to": "flag suspicious refunds",
+                        "so_that": "fraud is caught early",
+                        "acceptance_criteria": [
+                            "Given a refund above threshold, when scored, then it is flagged"
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "We need fraud detection for refunds",
+        "detected_intent": "CREATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    grouping = _story_codes_by_requirement(result["requirement_state"]["requirements"])
+    # Existing groups untouched + a NEW group minted after REQ-002
+    assert grouping["REQ-001"] == ["US-001", "US-002"]
+    assert grouping["REQ-002"] == ["US-003"]
+    assert grouping.get("REQ-003") == ["US-004"]
+    new_group = next(r for r in result["requirement_state"]["requirements"] if r["requirement_code"] == "REQ-003")
+    assert new_group["title"] == "Fraud Detection"
+
+
+@pytest.mark.asyncio
+async def test_epic_name_kept_unless_explicit_rename(monkeypatch):
+    no_change_result = {
+        "epic_name": "Totally Different Epic",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001)],
+            }
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=no_change_result)
+
+    # No rename request -> persisted epic stays even though the LLM suggested one
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "small wording tweak on US-001",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+    assert result["structured_requirements"]["epic_name"] == "Refund Request Submission"
+
+    # Explicit rename phrasing (missed by the old substring check) -> LLM epic applied
+    rename_result = {
+        "epic_name": "Payments Hub",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001)],
+            }
+        ],
+    }
+    _patch(monkeypatch, REQ_STATE, llm_result=rename_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Please rename the epic to Payments Hub",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+    assert result["structured_requirements"]["epic_name"] == "Payments Hub"
+
+
+@pytest.mark.asyncio
+async def test_removed_story_archives_and_empties_its_requirement_group(monkeypatch):
+    semantic_recs = [{
+        "change_type": "REMOVE_REQUIREMENT",
+        "target_requirement_id": "US-003",
+        "confidence": 0.95,
+        "reason": "User asked to remove email notifications",
+        "recommended_action": "ARCHIVE",
+    }]
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002)],
+            }
+        ],
+    }
+    saved, _llm_calls = _patch(monkeypatch, REQ_STATE, llm_result=llm_result, semantic_recs=semantic_recs)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Remove the email notification feature",
+        "detected_intent": "DELETE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    grouping = _story_codes_by_requirement(result["requirement_state"]["requirements"])
+    assert grouping == {"REQ-001": ["US-001", "US-002"]}  # REQ-002 dropped (empty)
+    flat_codes = [s["ticket_code"] for s in result["requirement_state"]["user_stories"]]
+    assert "US-003" not in flat_codes
+    # Archiving is a change -> version bumps
+    assert result["current_version"] == 6
+    # Summary message mentions the removal
+    assert saved and "Archived" in saved[0]["message"] and "US-003" in saved[0]["message"]
+
+
+
+# ==========================================
+# PURE HELPER TESTS
+# ==========================================
+def test_sanitize_incoming_story_normalizes_drafts():
+    dirty = {
+        "ticket_code": " us-007 ",
+        "story_title": "  Export statements  ",
+        "as_a": "Back Office User",
+        "i_want_to": "export statements",
+        "so_that": "",
+        "acceptance_criteria": [
+            "Given a period, when export runs, then a CSV downloads",
+            "given a period, when export runs, then a csv downloads",  # dupe (case/space)
+            "   ",
+            None,
+        ],
+    }
+    clean = agents._sanitize_incoming_story(dirty)
+    assert clean["ticket_code"] == "US-007"
+    assert clean["story_title"] == "Export statements"
+    assert clean["acceptance_criteria"] == [
+        "Given a period, when export runs, then a CSV downloads"
+    ]
+
+
+def test_sanitize_incoming_story_rejects_unusable_entries():
+    assert agents._sanitize_incoming_story(None) is None
+    assert agents._sanitize_incoming_story("not a dict") is None
+    assert agents._sanitize_incoming_story({"story_title": "", "i_want_to": ""}) is None
+
+
+def test_sanitize_incoming_story_coerces_string_criteria():
+    story = agents._sanitize_incoming_story({
+        "story_title": "T",
+        "i_want_to": "W",
+        "acceptance_criteria": "Given x, when y, then z",
+    })
+    assert story["acceptance_criteria"] == ["Given x, when y, then z"]
+
+
+def test_normalize_and_generate_requirement_codes():
+    assert agents._normalize_requirement_code("req-2") == "REQ-002"
+    assert agents._normalize_requirement_code("REQ-012") == "REQ-012"
+    assert agents._normalize_requirement_code("junk") == ""
+    assert agents._normalize_requirement_code(None) == ""
+    assert agents._generate_next_requirement_code({"REQ-001", "REQ-004"}) == "REQ-005"
+
+
+def test_renumber_fresh_project_codes_starts_at_req_001():
+    """A fresh board whose LLM draft starts at REQ-002 (copied verbatim from
+    the old gatherer prompt example) is renumbered 1..N in declaration order —
+    the user-visible bug 'requirements start at REQ-002'."""
+    meta = {
+        "REQ-002": {"title": "Refunds", "description": ""},
+        "REQ-003": {"title": "Payments", "description": ""},
+    }
+    renumber = agents._renumber_fresh_project_codes([], meta)
+    assert renumber == {"REQ-002": "REQ-001", "REQ-003": "REQ-002"}
+
+
+def test_renumber_fresh_project_codes_noops_when_already_sequential():
+    meta = {
+        "REQ-001": {"title": "Refunds", "description": ""},
+        "REQ-002": {"title": "Payments", "description": ""},
+    }
+    assert agents._renumber_fresh_project_codes([], meta) == {}
+
+
+def test_renumber_fresh_project_codes_never_touches_an_existing_board():
+    """Legacy codes must never be renumbered: the PRD text and traceability
+    references match the codes already stored."""
+    meta = {"REQ-005": {"title": "New group", "description": ""}}
+    existing = [{"requirement_code": "REQ-001", "title": "Existing"}]
+    assert agents._renumber_fresh_project_codes(existing, meta) == {}
+    assert agents._renumber_fresh_project_codes(existing, {}) == {}
+    assert agents._renumber_fresh_project_codes([], {}) == {}
+
+
+def test_epic_rename_regex_understands_natural_phrasing():
+    assert agents._user_requests_epic_rename("rename the epic to Payments Hub")
+    assert agents._user_requests_epic_rename("The epic should be called Payments")
+    assert agents._user_requests_epic_rename("Let's change the epic name please")
+    assert not agents._user_requests_epic_rename("Add a refund epic story")
+    assert not agents._user_requests_epic_rename("Update US-001 please")
+    assert not agents._user_requests_epic_rename("")
+
+
+def test_build_change_summary_lists_ticket_codes():
+    report = {
+        "US-006": {"action": "created"},
+        "US-001": {"action": "updated"},
+        "US-003": {"action": "archived"},
+        "US-002": {"action": "unchanged"},
+    }
+    msg = agents._build_change_summary(report)
+    assert "US-006" in msg and "Added" in msg
+    assert "US-001" in msg and "Updated" in msg
+    assert "US-003" in msg and "Archived" in msg
+    assert "US-002" not in msg  # unchanged stories are not noise
+
+
+def test_build_change_summary_reports_no_changes():
+    msg = agents._build_change_summary({"US-001": {"action": "unchanged"}})
+    assert "No changes were needed" in msg
+
+
+def test_build_intent_guidance_covers_all_intents():
+    guidance_by_intent = {
+        "CREATE_REQUIREMENT": "ADD something NEW",
+        "UPDATE_REQUIREMENT": "MODIFY",
+        "DELETE_REQUIREMENT": "REMOVE",
+        "CLARIFY_REQUIREMENT": "clarification",
+    }
+    for intent, marker in guidance_by_intent.items():
+        guidance = agents._build_intent_guidance(intent, 0.9, has_existing_stories=True)
+        assert marker in guidance, f"guidance for {intent} misses '{marker}': {guidance}"
+
+    first = agents._build_intent_guidance("CREATE_REQUIREMENT", 0.9, has_existing_stories=False)
+    assert "FIRST extraction" in first
+
+    targeted = agents._build_intent_guidance(
+        "UPDATE_REQUIREMENT", 0.9,
+        requirement_match={"matched_requirement_id": "US-002"},
+        has_existing_stories=True,
+    )
+    assert "US-002" in targeted
+
+
+def test_format_story_context_lines_shared_helper():
+    lines = agents.format_story_context_lines([US_001])
+    assert len(lines) == 1
+    assert "US-001" in lines[0]
+    assert "Submit refund request online" in lines[0]
+    assert "Given a valid transaction ID" in lines[0]
+
+
+# ==========================================
+# INTENT CONFIDENCE + LOCKED CONTEXT
+# ==========================================
+def test_build_intent_guidance_hedges_on_low_confidence():
+    low = agents._build_intent_guidance("UPDATE_REQUIREMENT", 0.30, has_existing_stories=True)
+    assert "CAUTION" in low and "0.30" in low
+    # The hedge must also be present on a first extraction (nothing to preserve,
+    # but the model still must not over-extract).
+    low_first = agents._build_intent_guidance("UPDATE_REQUIREMENT", 0.30, has_existing_stories=False)
+    assert "CAUTION" in low_first
+
+    high = agents._build_intent_guidance("UPDATE_REQUIREMENT", 0.95, has_existing_stories=True)
+    assert "CAUTION" not in high
+
+
+@pytest.mark.asyncio
+async def test_intent_confidence_from_state_reaches_the_prompt(monkeypatch):
+    """The gatherer used to hardcode confidence 1.0, so the prompt always claimed
+    a perfect classification even when the matcher node was genuinely unsure."""
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001)],
+            }
+        ],
+    }
+    _saved, llm_calls = _patch(monkeypatch, REQ_STATE, llm_result=llm_result)
+
+    await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "maybe tweak the refund form",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "intent_confidence": 0.42,
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    variables = llm_calls[0]["variables"]
+    assert "0.42" in variables["intent_guidance"]
+    assert "CAUTION" in variables["intent_guidance"]
+
+
+@pytest.mark.asyncio
+async def test_locked_stories_are_flagged_in_the_prompt_context(monkeypatch):
+    """The prompt tells the model to preserve locked stories - so they must
+    actually appear in <current_project_context> with a LOCKED marker."""
+    locked_state = copy.deepcopy(REQ_STATE)
+    locked_state["user_stories"][1]["is_locked"] = True
+
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001)],
+            }
+        ],
+    }
+    _saved, llm_calls = _patch(monkeypatch, locked_state, llm_result=llm_result)
+
+    await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "add a refund export",
+        "detected_intent": "CREATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    })
+
+    context = llm_calls[0]["variables"]["current_context"]
+    assert "LOCKED STORIES" in context
+    assert "Flags: LOCKED" in context
+    assert "US-002" in context            # the locked story is visible
+    assert context.count("US-002") == 1   # ...and rendered exactly once
+
+

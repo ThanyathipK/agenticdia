@@ -42,6 +42,7 @@ class UserModel(Base):
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False)
     full_name = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=False, server_default="")
     role = Column(String(50), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

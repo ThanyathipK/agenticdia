@@ -61,11 +61,37 @@ class RequirementRepository:
 
     @staticmethod
     async def get_by_project(project_id: str, session: AsyncSession) -> List[Dict[str, Any]]:
+        """Load every requirement of a project with its ACTIVE user stories nested.
+
+        Deliberately applies NO status filter: the Requirements tab's traceability
+        matrix lists archived requirements as well, and the lock list must mirror
+        it so a Product Owner can see (and lock) every requirement record that
+        exists. Nesting the active stories lets the UI show a per-requirement
+        story count without a second round-trip.
+        """
+        # Imported lazily: user_story.py imports this module at import time, so a
+        # module-level import here would close a circular dependency.
+        from app.repositories.user_story import UserStoryRepository
+
         pid = as_uuid(project_id)
         stmt = select(RequirementModel).where(RequirementModel.project_id == pid)
         result = await session.execute(stmt)
         reqs = result.scalars().all()
-        return [RequirementRepository._serialize(r) for r in reqs]
+
+        stories_by_req = await UserStoryRepository.get_by_requirement_ids(
+            [r.id for r in reqs], session
+        )
+
+        serialized: List[Dict[str, Any]] = []
+        for req in reqs:
+            data = RequirementRepository._serialize(req)
+            data["user_stories"] = [
+                story
+                for story in stories_by_req.get(req.id, [])
+                if (story.get("status") or "active") == "active"
+            ]
+            serialized.append(data)
+        return serialized
 
     @staticmethod
     async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:

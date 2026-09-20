@@ -71,6 +71,7 @@ export function toRequirementItem(r: RequirementPayload): RequirementItem {
     title: r.title,
     description: r.description || '',
     user_stories: toUserStories(r.user_stories),
+    status: r.status || 'active',
     is_locked: r.is_locked || false,
     locked_by: r.locked_by,
     locked_at: r.locked_at,
@@ -189,7 +190,7 @@ export function toChatMessages(payload: RequirementStatePayload): ChatMessage[] 
       const timeStr =
         dateObj && !isNaN(dateObj.getTime())
           ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          : m.timestamp || '10:24 AM';
+          : m.timestamp || '';
 
       const isAuditor = m.role === 'auditor';
       const isPending = isAuditor && payload.validation_status === 'invalid';

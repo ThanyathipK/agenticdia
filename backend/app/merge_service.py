@@ -29,6 +29,7 @@ keeps it unit-testable without bootstrapping an LLM client or the LangGraph
 workflow.
 """
 import difflib
+import json
 from typing import Dict, Any, List, Optional, Set, Tuple
 
 
@@ -530,17 +531,35 @@ def merge_user_stories(
     return merged_stories
 
 
-# ==========================================
-# POST-MERGE HELPERS (shared by gatherer_node)
-# ==========================================
-def filter_active_stories(stories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Returns only the stories whose status is ``"active"`` (default if unset)."""
-    return [s for s in stories if s.get("status", "active") == "active"]
-
-
 def collect_acceptance_criteria(stories: List[Dict[str, Any]]) -> List[Any]:
     """Flattens the ``acceptance_criteria`` of every story into a single list."""
     all_ac: List[Any] = []
     for story in stories:
         all_ac.extend(story.get("acceptance_criteria", []))
     return all_ac
+
+
+def format_story_context_lines(stories: List[Dict[str, Any]]) -> List[str]:
+    """Render user stories as the canonical multi-line context block.
+
+    Shared by the Gatherer prompt, semantic change detection, intent
+    classification and requirement matching so every agent describes the
+    backlog to the LLM in exactly the same shape (previously this formatting
+    was copy-pasted in four places and could drift apart).
+    """
+    lines: List[str] = []
+    for story in stories:
+        lines.append(
+            f"- Story {story.get('ticket_code', 'UNKNOWN')}: '{story.get('story_title', '')}'\n"
+            f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')}, So that {story.get('so_that', '')}\n"
+            f"  Acceptance Criteria: {json.dumps(story.get('acceptance_criteria', []))}"
+        )
+    return lines
+
+
+# ==========================================
+# POST-MERGE HELPERS (shared by gatherer_node)
+# ==========================================
+def filter_active_stories(stories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Returns only the stories whose status is ``"active"`` (default if unset)."""
+    return [s for s in stories if s.get("status", "active") == "active"]

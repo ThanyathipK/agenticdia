@@ -9,6 +9,7 @@ from app.llm_factory import llm
 from app.schemas import RequirementIntentDetectionResult, WorkflowRoutingResult, RequirementMatcherResult
 from app.prompt_loader import load_prompt
 from app.llm_utils import invoke_llm_structured
+from app.merge_service import format_story_context_lines
 
 logger = logging.getLogger("app.semantic_service")
 
@@ -31,13 +32,8 @@ async def detect_semantic_changes(raw_input: str, current_stories: List[Dict[str
     logger.info(f"Running semantic change detection on new message: '{raw_input[:100]}'")
     
     # Format current stories into a clean visual summary for the prompt
-    context_lines = []
-    for story in current_stories:
-        context_lines.append(
-            f"- Story {story.get('ticket_code', 'UNKNOWN')}: '{story.get('story_title', '')}'\n"
-            f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')}, So that {story.get('so_that', '')}\n"
-            f"  Acceptance Criteria: {json.dumps(story.get('acceptance_criteria', []))}"
-        )
+    # (shared with the Gatherer/intent prompts via merge_service).
+    context_lines = format_story_context_lines(current_stories)
     current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
 
     prompt_template = PromptTemplate(
@@ -94,14 +90,7 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
         
     logger.info(f"Detecting requirement intent for message: '{raw_input[:100]}'")
     
-    context_lines = []
-    if current_stories:
-        for story in current_stories:
-            context_lines.append(
-                f"- Story {story.get('ticket_code', 'UNKNOWN')}: '{story.get('story_title', '')}'\n"
-                f"  As a {story.get('as_a', '')}, I want to {story.get('i_want_to', '')}, So that {story.get('so_that', '')}\n"
-                f"  Acceptance Criteria: {json.dumps(story.get('acceptance_criteria', []))}"
-            )
+    context_lines = format_story_context_lines(current_stories)
     current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
 
     prompt_template = PromptTemplate(

@@ -54,7 +54,33 @@ export function useProjectSync(
     editingSectionIdRef.current = store.editingSectionId;
   });
 
+  // Preview catch-up bookkeeping — the PRD preview must ALWAYS end up on the
+  // latest stored version. A document that arrives while the preview is on
+  // hold (the user is editing a section, or a freshly generated draft is
+  // staged for confirmation) is never dropped: the flag records "a newer
+  // server document arrived during the hold" and the catch-up effect below
+  // re-fetches and applies it as soon as the hold clears.
+  const prdSyncPendingRef = useRef(false);
+  const prdSyncHoldRef = useRef(false);
+  // Points at the SSE effect's full-state refresh so non-SSE code paths (an
+  // edit finished, the hold cleared) can pull the latest document on demand.
+  const refreshFromServerRef = useRef<((force?: boolean) => Promise<void>) | null>(null);
+
+  // Apply queued PRD updates the moment the hold clears. The hold flags only
+  // change through renders, so without this the latest version would sit until
+  // an unrelated SSE event happened to arrive.
+  useEffect(() => {
+    if (editingSectionIdRef.current !== null || prdSyncHoldRef.current) return;
+    if (!prdSyncPendingRef.current) return;
+    prdSyncPendingRef.current = false;
+    void refreshFromServerRef.current?.(true);
+  });
+
   const loadProjectState = async (projId: string, retries = 5, delay = 1000) => {
+    // Fresh load — drop any queued PRD update / hold left over from a previous
+    // project so the catch-up logic can never leak across projects.
+    prdSyncPendingRef.current = false;
+    prdSyncHoldRef.current = false;
     store.setIsLoading(true);
     store.setSyncStatus('Loading project state from Supabase...');
 
@@ -139,9 +165,12 @@ export function useProjectSync(
 
     let isSubscribed = true;
     let refreshInFlight = false;
+    // Fresh subscription — no queued PRD update or hold from a previous project.
+    prdSyncPendingRef.current = false;
+    prdSyncHoldRef.current = false;
 
-    const refreshFromServer = async () => {
-      if (refreshInFlight) return;
+    const refreshFromServer = async (force = false) => {
+      if (refreshInFlight && !force) return;
       refreshInFlight = true;
       try {
         const payload: RequirementStatePayload = await api.getProjectState(projectId);
@@ -209,32 +238,58 @@ export function useProjectSync(
             });
           }
 
-          // 4. Sync generated PRD markdown if changed AND the user is not actively editing any section
+          // 4. Sync pending actions FIRST — the PRD sync below must know
+          // whether a freshly generated document is still staged for
+          // confirmation (see the hold computation).
+          let pendingActionsList: PendingActionPayload[] = [];
+          try {
+            pendingActionsList = (await api.listPendingActions(projectId)) || [];
+            if (isSubscribed) setPendingActions(pendingActionsList);
+          } catch (err) {
+            handleWarning('Could not load pending actions.', err);
+          }
+
+          // A staged MERGE whose PRD draft differs from the persisted document
+          // means a freshly generated version is awaiting confirmation: the
+          // persisted copy is the PREVIOUS document, so hold the preview on the
+          // newer staged draft instead of reverting it. The hold clears when
+          // the action is confirmed or discarded (the pending action then
+          // disappears from the list).
+          prdSyncHoldRef.current = pendingActionsList.some((action) => {
+            if (action.action_type !== 'MERGE') return false;
+            const staged = (action.proposed_changes ?? {})['generated_prd'];
+            return typeof staged === 'string' && staged !== '' && staged !== payload.generated_prd;
+          });
+
+          // 5. Sync generated PRD markdown — the preview must always end up on
+          // the latest stored version. While the user is editing a section (or
+          // the staged-draft hold above is active) the incoming document is
+          // QUEUED, never dropped: the catch-up effect re-fetches and applies
+          // it as soon as the hold clears.
           if (payload.generated_prd) {
             const safeGeneratedPRD = getSafeSectionContent(payload.generated_prd);
-            if (safeGeneratedPRD && safeGeneratedPRD !== prdMarkdownRef.current && editingSectionIdRef.current === null) {
-              store.setPrdMarkdown(safeGeneratedPRD);
+            if (safeGeneratedPRD) {
+              if (safeGeneratedPRD === prdMarkdownRef.current) {
+                prdSyncPendingRef.current = false;
+              } else if (editingSectionIdRef.current === null && !prdSyncHoldRef.current) {
+                prdSyncPendingRef.current = false;
+                store.setPrdMarkdown(safeGeneratedPRD);
+              } else {
+                prdSyncPendingRef.current = true;
+              }
             }
           }
 
-          // 5. Sync diagrams
+          // 6. Sync diagrams
           const diagram = payload.generated_diagrams;
           if (diagram) {
             store.setMermaidDiagram(prev => (prev !== diagram ? diagram : prev));
           }
 
-          // 6. Sync active agent node
+          // 7. Sync active agent node
           const workflowState = payload.current_workflow_state;
           if (workflowState) {
             store.setCurrentAgentNode(prev => (prev !== workflowState ? workflowState : prev));
-          }
-
-          // 7. Sync pending actions
-          try {
-            const actions = await api.listPendingActions(projectId);
-            if (isSubscribed) setPendingActions(actions || []);
-          } catch (err) {
-            handleWarning('Could not load pending actions.', err);
           }
 
           // 8. Sync per-part PRD section lock/ownership metadata (non-blocking)
@@ -250,6 +305,10 @@ export function useProjectSync(
         refreshInFlight = false;
       }
     };
+
+    // Expose the refresh to the preview catch-up effect, which runs outside
+    // this subscription (an edit finishing, the staged-draft hold clearing).
+    refreshFromServerRef.current = refreshFromServer;
 
     // Open the Server-Sent Events stream. The backend publishes a change event
     // whenever the project state is mutated, so no periodic polling is needed.
@@ -312,6 +371,7 @@ export function useProjectSync(
 
     return () => {
       isSubscribed = false;
+      refreshFromServerRef.current = null;
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
       source.close();
     };

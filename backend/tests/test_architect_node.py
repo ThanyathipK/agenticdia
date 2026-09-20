@@ -50,8 +50,14 @@ def _patch(monkeypatch, req_state):
     async def fake_save(**kwargs):
         return None
 
+    async def fake_diagram(project_id, req_state, project_data):
+        # Stands in for the LLM round-trip in agents._generate_flow_diagram so
+        # these template-fill tests stay offline and deterministic.
+        return "flowchart TD\n  A([Start]) --> B[Generated from PRD dataset]"
+
     monkeypatch.setattr(agents, "get_or_init_requirement_state", fake_state)
     monkeypatch.setattr(agents.ConversationMessageRepository, "save_message", fake_save)
+    monkeypatch.setattr(agents, "_generate_flow_diagram", fake_diagram)
 
 
 @pytest.mark.asyncio
@@ -80,6 +86,9 @@ async def test_architect_fills_template_from_full_project_dataset(monkeypatch):
     assert "Submit refund request online" in prd          # scope in
     # persisted into the requirement state
     assert result["requirement_state"]["generated_prd"] == prd
+    # the flow diagram is refreshed together with the document
+    assert result["mermaid_diagram"].startswith("flowchart TD")
+    assert result["requirement_state"]["generated_diagrams"] == result["mermaid_diagram"]
 
 
 @pytest.mark.asyncio

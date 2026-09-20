@@ -82,6 +82,18 @@ class GatheredRequirements(BaseModel):
     requirements: List[RequirementItem] = Field(..., description="Multiple requirements with their user stories")
 
 
+class MermaidDiagramResult(BaseModel):
+    """Structured LLM output for the Architect's flow-diagram generation.
+
+    The value must be raw Mermaid.js Flowchart source starting with
+    ``flowchart TD`` - the Architecture Flows tab renders it as-is.
+    """
+    mermaid_diagram: str = Field(
+        default="",
+        description="Raw Mermaid.js flowchart source (must start with 'flowchart TD').",
+    )
+
+
 # ==========================================
 # 4. REQUIREMENT INTENT DETECTION SCHEMA
 # ==========================================
@@ -483,6 +495,81 @@ class ConfirmActionResponse(BaseModel):
 class ActionStatusResponse(BaseModel):
     """Generic single-status payload (e.g. cancel-action response)."""
     status: str = Field(..., description="Result status string.")
+
+
+# ==========================================
+# REQUIREMENT IMPACT ANALYSIS (merge preview)
+# ==========================================
+
+class RequirementImpact(BaseModel):
+    """One requirement-level change predicted by the pending merge."""
+    requirement_code: str = Field(..., description="Requirement code (REQ-###).")
+    title: str = Field("", description="Requirement title (proposed when available).")
+    change_kind: str = Field(..., description="created | updated | removed | unchanged.")
+    changed_fields: List[str] = Field(default_factory=list, description="Fields that differ from the stored requirement.")
+
+
+class StoryImpact(BaseModel):
+    """One user-story-level change predicted by the pending merge."""
+    ticket_code: str = Field(..., description="Story ticket code (US-###).")
+    story_title: str = Field("", description="Story title (proposed when available).")
+    requirement_code: str = Field("", description="Owning requirement code.")
+    change_kind: str = Field(..., description="created | updated | removed | unchanged.")
+    changed_fields: List[str] = Field(default_factory=list, description="Narrative fields that differ.")
+    criteria_added: int = Field(0, description="Acceptance-criteria lines the merge ADDS.")
+    criteria_removed: int = Field(0, description="Acceptance-criteria lines the merge REMOVES.")
+
+
+class ImpactedSection(BaseModel):
+    """A PRD section whose content references an affected code."""
+    section_key: str = Field(..., description="PRD section key.")
+    title: str = Field("", description="PRD section title.")
+    referenced_codes: List[str] = Field(default_factory=list, description="Affected REQ-/US- codes the section references.")
+    is_locked: bool = Field(False, description="Whether the section is locked (AI cannot update it).")
+    impact_kind: str = Field(..., description="references_changed | references_removed (dangling after merge).")
+
+
+class ImpactedDiagram(BaseModel):
+    """A stored PRD-version diagram referencing an affected code."""
+    label: str = Field(..., description="Diagram label (e.g. 'PRD v2').")
+    version: int = Field(..., description="PRD document version the diagram belongs to.")
+    referenced_codes: List[str] = Field(default_factory=list, description="Affected codes found in the mermaid source.")
+
+
+class ImpactSummary(BaseModel):
+    """Rollup counts for the impact window header chips."""
+    requirements_created: int = 0
+    requirements_updated: int = 0
+    requirements_removed: int = 0
+    stories_created: int = 0
+    stories_updated: int = 0
+    stories_removed: int = 0
+    criteria_added: int = 0
+    criteria_removed: int = 0
+    sections_impacted: int = 0
+    sections_impacted_locked: int = 0
+    diagrams_impacted: int = 0
+
+
+class ImpactAnalysisResponse(BaseModel):
+    """READ-ONLY Requirement Impact Analysis for one pending merge action.
+
+    Shows what the merge would change (requirements / user stories /
+    acceptance criteria) and which downstream artifacts (PRD sections /
+    diagrams) reference the affected codes, so the user can decide to Save
+    or Cancel with full knowledge of the blast radius."""
+    action_id: str = Field(..., description="Pending-action UUID string.")
+    project_id: str = Field(..., description="Project UUID string.")
+    action_type: str = Field(..., description="Action type (e.g. MERGE).")
+    original_user_message: str = Field("", description="Message that triggered the merge.")
+    current_version: int = Field(..., description="Version the project is on BEFORE the merge.")
+    proposed_version: Optional[int] = Field(None, description="Version the draft proposes, when known.")
+    has_changes: bool = Field(..., description="False when the draft equals the stored state.")
+    summary: ImpactSummary = Field(..., description="Rollup counts for header chips.")
+    requirements: List[RequirementImpact] = Field(default_factory=list)
+    user_stories: List[StoryImpact] = Field(default_factory=list)
+    impacted_prd_sections: List[ImpactedSection] = Field(default_factory=list)
+    impacted_diagrams: List[ImpactedDiagram] = Field(default_factory=list)
 
 
 class AuditRespondResponse(BaseModel):

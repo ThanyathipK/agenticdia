@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,6 +10,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app.config")
 
+# Local SQLite file used when DATABASE_URL is unset/empty or still holds an
+# unfilled template placeholder (see Settings.async_database_url). Path is
+# relative to the process CWD, which is backend/ when launched via `npm run dev`.
+SQLITE_FALLBACK_URL = "sqlite+aiosqlite:///app.db"
+
+# Detects unfilled .env.example template values: bracketed ones such as
+# "[YOUR_PROJECT_REF]" / "[YOUR_PASSWORD]" and angle-bracket DSNs from the
+# documented example ("postgresql://<user>:<password>@<host>:5432/<db>").
+_PLACEHOLDER_RE = re.compile(
+    r"\[your_[^\]]*\]|<(?:your|user|password|host|db|project)[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def contains_placeholder(url: str) -> bool:
+    """Return True when *url* still contains an unfilled template placeholder.
+
+    Such a value is a configuration mistake, never a usable DSN. Handing it to
+    the driver produces the cryptic asyncpg error
+    ``(ENOTFOUND) tenant/user postgres.[YOUR_PROJECT_REF] not found`` from the
+    Supabase pooler, which hides the actual cause (an unedited .env).
+    """
+    return bool(_PLACEHOLDER_RE.search(url or ""))
+
 class Settings(BaseSettings):
     """
     Enterprise Banking System Configuration.
@@ -16,12 +41,69 @@ class Settings(BaseSettings):
     """
     # Database Settings
     DATABASE_URL: str = "sqlite+aiosqlite:///app.db"
+    # When DATABASE_URL is empty OR still holds an unfilled placeholder (e.g.
+    # "[YOUR_PASSWORD]" copied from .env.example), degrade to the local SQLite
+    # file with a loud warning instead of refusing to boot — this is the
+    # behaviour the README documents ("works without a Supabase project via the
+    # SQLite fallback"). Set false in production/deployments so a leftover
+    # placeholder becomes a hard startup error rather than silently pointing the
+    # app at an empty local database.
+    ALLOW_SQLITE_FALLBACK: bool = True
+
+    # JWT auth (loaded from backend/.env; consumed by app/auth.py). An empty
+    # value — or an unfilled template placeholder such as
+    # "[YOUR_SECRET_KEY_CHANGE_IN_PRODUCTION]" — falls back to the development
+    # secret with a loud startup warning (see app/auth.py).
+    JWT_SECRET_KEY: str = ""
+    JWT_EXPIRATION_MINUTES: int = 60
+
+    # Gate for ``POST /api/auth/register`` (documented in .env.example, and
+    # previously dead config: the endpoint was callable no matter what this
+    # said). Set false in shared/production deployments where accounts are
+    # provisioned out-of-band, so the public surface cannot create users.
+    SIGNUP_ENABLED: bool = True
+
+    # --- Bootstrap system account -----------------------------------------
+    # Consumed by ``app.migrations.seed_default_user``. The id must stay
+    # ``00000000-...`` because ``ProjectRepository.DEFAULT_SYSTEM_USER_ID``
+    # (and every project created without an authenticated owner) references it.
+    SYSTEM_USER_ID: str = "00000000-0000-0000-0000-000000000000"
+    SYSTEM_USER_EMAIL: str = "system@banking.com"
+    SYSTEM_USER_NAME: str = "System User"
+    SYSTEM_USER_ROLE: str = "Developer"
+    # Plaintext bootstrap password, bcrypt-hashed on insert / back-filled onto
+    # an existing row whose ``password_hash`` is still empty. Empty means "do
+    # not touch the stored credential" (and the account stays un-loginable
+    # until a password is provisioned by other means).
+    SYSTEM_USER_PASSWORD: str = ""
 
     @property
     def async_database_url(self) -> str:
-        url = self.DATABASE_URL
+        url = (self.DATABASE_URL or "").strip()
         if not url:
-            return "sqlite+aiosqlite:///app.db"
+            return SQLITE_FALLBACK_URL
+        # Unfilled template placeholder (copied verbatim from .env.example).
+        # Never hand this to the driver: asyncpg only reports it as the cryptic
+        # "(ENOTFOUND) tenant/user postgres.[YOUR_PROJECT_REF] not found".
+        if contains_placeholder(url):
+            hint = (
+                "DATABASE_URL still contains an unfilled placeholder (e.g. "
+                "[YOUR_PROJECT_REF] / [YOUR_PASSWORD]). Fill in your real Supabase "
+                "project reference and database password in backend/.env."
+            )
+            if not self.ALLOW_SQLITE_FALLBACK:
+                raise RuntimeError(
+                    f"{hint} ALLOW_SQLITE_FALLBACK is false, so startup is "
+                    "aborted instead of falling back to local SQLite."
+                )
+            logger.warning(
+                "%s Falling back to the local SQLite database (%s) so development "
+                "can continue; data written now will NOT reach Supabase. Set a "
+                "real DATABASE_URL and restart to switch.",
+                hint,
+                SQLITE_FALLBACK_URL,
+            )
+            return SQLITE_FALLBACK_URL
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgresql://"):
@@ -30,6 +112,15 @@ class Settings(BaseSettings):
         if "supabase.com" in url and "ssl=" not in url:
             separator = "&" if "?" in url else "?"
             url = f"{url}{separator}ssl=require"
+        # Supabase's transaction pooler (:6543) does not support prepared
+        # statements; asyncpg uses them by default, so disable its cache.
+        if (
+            "pooler.supabase.com" in url
+            and ":6543" in url
+            and "prepared_statement_cache_size=" not in url
+        ):
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}prepared_statement_cache_size=0"
         return url
 
     # Local LLM / LM Studio Orchestration Settings

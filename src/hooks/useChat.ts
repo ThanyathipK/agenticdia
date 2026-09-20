@@ -86,6 +86,37 @@ const rateLimitedContent = (err: unknown): string => {
   return `⏳ **Rate Limit Reached:** Too many requests in a short window. ${suffix}`;
 };
 
+// --- Payload-too-large (HTTP 413) awareness ---------------------------------
+// A 413 from the backend means the request payload — the project's full
+// structured requirements, user stories and acceptance criteria serialized to
+// JSON — exceeded MAX_CONTEXT_TOKENS before any agent ran (Finding #39 guard).
+// It is a *content size* problem, not a crash: nothing was saved or changed.
+// These helpers surface an actionable notice instead of the generic
+// "generation failed" message.
+const isPayloadTooLargeError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  return (err as { response?: { status?: number } }).response?.status === 413;
+};
+
+const extractErrorDetail = (err: unknown): string | null => {
+  if (!err || typeof err !== 'object') return null;
+  const detail = (err as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
+  return typeof detail === 'string' ? detail : null;
+};
+
+const payloadTooLargeContent = (err: unknown): string => {
+  const measured = extractErrorDetail(err);
+  return [
+    '📦 **Project Too Large for the Current Context Budget:**',
+    'The project\'s requirements, user stories and acceptance criteria exceed the LLM context budget (`MAX_CONTEXT_TOKENS`) — the request was rejected before any agent ran. Nothing was saved or changed.',
+    '',
+    '**How to resolve:**',
+    '- Trim the project: remove or merge redundant user stories / acceptance criteria, **or**',
+    '- Raise `MAX_CONTEXT_TOKENS` in `backend/.env` (e.g. `16384`) if the loaded LM Studio model supports a larger context window.',
+    measured ? `\n${measured}` : '',
+  ].filter(Boolean).join('\n');
+};
+
 // --- Stop-button (request abort) awareness ----------------------------------
 // When the user presses Stop we cancel the axios request. Axios then rejects
 // with a CanceledError — that is an intentional user action, NOT a failure, so
@@ -200,7 +231,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           store.setMessages(prev => [...prev, {
             id: `merge-preview-${Date.now()}`,
             role: 'assistant',
-            content: `📋 **Merge Preview Ready**\nI have analyzed your input and prepared the merged requirements. Please review the changes below and **Confirm** or **Cancel**.\n\n> *"${inputMsg}"*`,
+            content: `📋 **Merge Preview Ready**\nI have analyzed your input and prepared the merged requirements. Please review the changes below and **Save** or **Cancel**.\n\n> *"${inputMsg}"*`,
             timestamp: nowTime(),
           }]);
         } else if (receivedReqs && receivedReqs.epic_name) {
@@ -249,6 +280,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Rate limited — please wait before continuing.');
+        return;
+      }
+      if (isPayloadTooLargeError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `payload-too-large-${Date.now()}`,
+          role: 'assistant',
+          content: payloadTooLargeContent(err),
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Request rejected: project exceeds the LLM context budget. Nothing was saved.');
         return;
       }
       handleError('The requirement engine could not complete your request.', err);
@@ -369,6 +410,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setSyncStatus('Rate limited — please wait before continuing.');
         return;
       }
+      if (isPayloadTooLargeError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `payload-too-large-${Date.now()}`,
+          role: 'assistant',
+          content: payloadTooLargeContent(err),
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Audit skipped: project exceeds the LLM context budget.');
+        return;
+      }
       handleError('Compliance audit did not complete.', err);
       store.setMessages(prev => [...prev, {
         id: `audit-error-${Date.now()}`,
@@ -447,6 +498,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Rate limited — please wait before continuing.');
+        return;
+      }
+      if (isPayloadTooLargeError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `payload-too-large-${Date.now()}`,
+          role: 'assistant',
+          content: payloadTooLargeContent(err),
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('PRD generation blocked: project exceeds the LLM context budget.');
         return;
       }
       handleError('PRD generation did not complete.', err);

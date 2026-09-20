@@ -5,11 +5,15 @@ alembic
 asyncpg
 pydantic
 pydantic-settings
+# Auth: password hashing (bcrypt pinned: passlib 1.7.4 reads bcrypt.__about__,
+# which was removed in bcrypt>=4.1)
+passlib>=1.7.4
+bcrypt==4.0.1
+python-jose[cryptography]
 openai
 langgraph
-langchain
-langchain-openai
 langchain>=0.3
+langchain-openai
 greenlet>=3.1
 mammoth>=1.8.0
 python-docx>=1.1.0

@@ -14,10 +14,12 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
 
+# NOTE: app.auth / app.repositories.user imports were removed together with
+# the retired bootstrap seeder — user rows are created exclusively through
+# POST /api/auth/register now.
+from app.config import settings
 from app.database import AsyncSessionLocal
-from app.models import UserModel
 
 logger = logging.getLogger("app.migrations")
 
@@ -53,26 +55,20 @@ async def run_migrations() -> None:
 
 
 async def seed_default_user() -> None:
-    """Seed the default system user used by automated agents."""
-    logger.info("Running migration step: seed_default_user.")
-    try:
-        async with AsyncSessionLocal() as session:
-            system_user_id = uuid.UUID("00000000-0000-0000-0000-000000000000")
-            stmt = select(UserModel).where(UserModel.id == system_user_id)
-            res = await session.execute(stmt)
-            exists = res.scalar_one_or_none()
-            if not exists:
-                system_user = UserModel(
-                    id=system_user_id,
-                    email="system@banking.com",
-                    full_name="System User",
-                    role="Developer"
-                )
-                session.add(system_user)
-                await session.commit()
-                logger.info("Seeded default system user successfully.")
-            else:
-                logger.info("Default system user already exists.")
-    except Exception as e:
-        logger.critical("CRITICAL: Failed to seed default system user!", exc_info=True)
-        raise RuntimeError("Default user seeding failed") from e
+    """DISABLED — users are self-service registrations only.
+
+    This bootstrap seeder used to auto-create ``system@banking.com`` (with a
+    bcrypt hash from ``SYSTEM_USER_PASSWORD``) on every startup. Per the
+    product decision to run exclusively off Supabase with real, registered
+    users only, the seeder is retired: it no longer inserts anything, and the
+    ``users`` table starts empty. The function is kept as a no-op so existing
+    call sites (``app.main`` lifespan) do not break.
+
+    The project/requirement agent workflows that previously resolved this
+    account via ``DEFAULT_SYSTEM_USER_ID`` must use an authenticated user's id
+    instead.
+    """
+    logger.info(
+        "Skipping seed_default_user: bootstrap account seeding is disabled "
+        "(users are created exclusively through POST /api/auth/register)."
+    )

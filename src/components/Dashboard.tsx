@@ -35,6 +35,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { useProjectState } from '../hooks/useProjectState';
+import { isLockableRequirementId } from '../hooks/useArtifactLocks';
 import type { WorkspaceTab } from '../hooks/useWorkspaceUi';
 import { ChatPanel } from './ChatPanel';
 import { PRDEditor } from './PRDEditor';
@@ -45,6 +46,9 @@ import { ConfirmationPanel } from './ConfirmationPanel';
 import { DocumentLibrary } from './DocumentLibrary';
 import { NewProjectModal } from './NewProjectModal';
 import { ConfirmModal } from './ConfirmModal';
+import { AuthPanel } from './AuthPanel';
+import { AuthModal } from './AuthModal';
+import { useAuth } from '../hooks/useAuth';
 import { ProjectsDashboard } from './ProjectsDashboard';
 import { Tooltip, TooltipBubble } from './Tooltip';
 import { highlightMatch } from '../utils/highlight';
@@ -60,7 +64,19 @@ const TAB_ITEMS: ReadonlyArray<{ id: WorkspaceTab; label: string; icon: typeof F
 ];
 
 export default function Dashboard() {
-  const state = useProjectState();
+  // useAuth must resolve BEFORE useProjectState: the project list is scoped to
+  // the signed-in user (empty until login, that user's projects after).
+  const {
+    user: authUser,
+    isAuthenticating,
+    signupEnabled,
+    login: handleLogin,
+    register: handleRegister,
+    logout: handleLogout,
+    isAuthModalOpen,
+    setIsAuthModalOpen,
+  } = useAuth();
+  const state = useProjectState(!!authUser, authUser?.id ?? null);
   const {
     projectId,
     setProjectId,
@@ -86,6 +102,8 @@ export default function Dashboard() {
     pendingActions,
     setPendingActions,
     loadProjectState,
+    setMessages,
+    currentVersion,
     isDraggingSplit,
     setIsDraggingSplit,
     splitContainerRef,
@@ -104,6 +122,8 @@ export default function Dashboard() {
     lockedRequirements,
     handleLockRequirement,
     handleUnlockRequirement,
+    lockableRequirements,
+    refreshLockableRequirements,
     documents,
   } = state;
 
@@ -125,6 +145,23 @@ export default function Dashboard() {
   const mobileTabsRef = useRef<HTMLDivElement>(null);
   const collapsed = historyCollapsed && !mobileSidebarOpen;
   const expanded = !collapsed;
+
+  // ---- Requirements tab: lockable requirement rows -------------------------
+  // The "Requirement Lock Status" panel lists EVERY requirement of the project:
+  // the authoritative DB rows (real UUIDs + lock metadata) when they are loaded,
+  // otherwise the requirement groups held in memory. Previously it required an
+  // in-memory `requirements` array to be present, so the whole panel silently
+  // disappeared whenever the state came from a flat/legacy payload.
+  const lockTargets =
+    lockableRequirements.length > 0
+      ? lockableRequirements
+      : structuredRequirements.requirements ?? [];
+
+  // Story counts per requirement (only the in-memory groups carry stories).
+  const storiesByRequirement: Record<string, number> = {};
+  for (const req of structuredRequirements.requirements ?? []) {
+    storiesByRequirement[req.requirement_code] = req.user_stories?.length ?? 0;
+  }
 
   useEffect(() => {
     if (isSearchOpen) {
@@ -153,6 +190,9 @@ export default function Dashboard() {
   }, [mobileTabsOpen]);
 
   const handleToggleProjectSearch = () => {
+    // Search is a per-user, server-scoped query — meaningless (and 401) before
+    // login, so the toggle is a no-op for signed-out visitors.
+    if (!authUser) return;
     // Expanding the sidebar first guarantees the input row is visible.
     if (historyCollapsed) setHistoryCollapsed(false);
     setIsSearchOpen((open) => !open);
@@ -231,11 +271,11 @@ export default function Dashboard() {
         </div>
 
         <div className="px-2">
-          <Tooltip label="New Project" side="right" className="w-full">
+          <Tooltip label={authUser ? 'New Project' : 'Sign in to create a project'} side="right" className="w-full">
             <button
               className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${collapsed ? 'justify-center' : ''}`}
               aria-label="New Project"
-              onClick={() => setIsCreateModalOpen(true)}
+              onClick={() => (authUser ? setIsCreateModalOpen(true) : setIsAuthModalOpen(true))}
             >
               <Plus className="w-4 h-4 shrink-0" />
               {expanded && <span>New Project</span>}
@@ -288,7 +328,7 @@ export default function Dashboard() {
               {expanded && <span>Search Projects</span>}
             </button>
           </Tooltip>
-          {isSearchOpen && expanded && (
+          {authUser && isSearchOpen && expanded && (
             <div className="relative flex items-center mt-1">
               <Search className="absolute left-2.5 w-3.5 h-3.5 text-on-surface-variant pointer-events-none" />
               <input
@@ -325,7 +365,15 @@ export default function Dashboard() {
         {/* Section headers ("Pinned" / "Recent Projects") render inside the
             scrollable list below, directly above each group of chats. */}
         <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
-          {projects.length === 0 && expanded && (
+          {!authUser && expanded && (
+            // Signed out: no project data exists on screen at all (the hook
+            // never fetches without a session) — prompt for sign-in instead.
+            // The Sign in button lives in AuthPanel at the bottom of the rail.
+            <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">
+              Sign in to see your projects
+            </div>
+          )}
+          {authUser && projects.length === 0 && expanded && (
             <div className="px-2.5 py-2 text-[12.5px] text-on-surface-variant">No projects yet</div>
           )}
           {projects.length > 0 && visibleProjects.length === 0 && expanded && (
@@ -546,6 +594,18 @@ export default function Dashboard() {
             </button>
           </div>
         )}
+
+        {/* AUTH — sign-in button / signed-in user chip, pinned to the sidebar's
+            BOTTOM-LEFT. It is the last child of the sidebar column and the
+            project list above it is `flex-1`, so it stays glued to the bottom
+            while the list scrolls. */}
+        <AuthPanel
+          user={authUser}
+          isAuthenticating={isAuthenticating}
+          collapsed={collapsed}
+          onOpenAuth={() => setIsAuthModalOpen(true)}
+          onLogout={handleLogout}
+        />
       </aside>
       {/* MOBILE SIDEBAR DRAWER (below `lg`): hamburger toggle + dimmed backdrop.
           The sidebar itself is re-positioned as an overlay by #project-sidebar.mobile-open. */}
@@ -682,12 +742,33 @@ export default function Dashboard() {
                 <ConfirmationPanel 
                     key={action.id} 
                     action={action} 
-                    onConfirm={() => {
+                    onConfirm={(result) => {
                         setPendingActions(prev => prev.filter(a => a.id !== action.id));
                         if(projectId) loadProjectState(projectId);
+                        // The merge just created/renamed requirement records, so
+                        // re-read the authoritative lock list (new rows must be
+                        // listed and lockable immediately, with their real ids).
+                        void refreshLockableRequirements();
+                        const savedVersion = result?.requirement_state?.version_number;
+                        setMessages(prev => [...prev, {
+                            id: `merge-saved-${Date.now()}`,
+                            role: 'system',
+                            content: `✅ **Changes saved.** The merged requirements were applied${savedVersion ? ` as version ${savedVersion}` : ''} and logged in the Version History.`,
+                            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        }]);
                     }}
                     onCancel={() => {
                         setPendingActions(prev => prev.filter(a => a.id !== action.id));
+                        // ROLLBACK: the merge was only ever a draft — re-fetch the
+                        // stored state so the workspace shows exactly the version
+                        // from BEFORE the preview was shown. Nothing was saved.
+                        if(projectId) loadProjectState(projectId);
+                        setMessages(prev => [...prev, {
+                            id: `merge-cancelled-${Date.now()}`,
+                            role: 'system',
+                            content: `↩️ **Merge discarded.** Rolled back to the previous version (v${currentVersion}) — nothing was saved.`,
+                            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        }]);
                     }}
                 />
             ))}
@@ -755,18 +836,33 @@ export default function Dashboard() {
 
 
             {/* Requirement Lock Status Panel — only shown on the Requirements tab */}
-            {activeTab === 'trace' && structuredRequirements.requirements && structuredRequirements.requirements.length > 0 && (
+            {activeTab === 'trace' && lockTargets.length > 0 && (
               <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-2xl shadow-sm">
                 <div className="flex flex-wrap items-center gap-2 mb-3">
                   <Lock className="text-primary w-4 h-4 shrink-0" />
-                  <h3 className="font-bold text-sm text-on-surface min-w-0">Requirement Lock Status</h3>
+                  <h3 className="font-bold text-sm text-on-surface min-w-0">
+                    Requirement Lock Status
+                    <span className="ml-1.5 text-[10.5px] font-mono font-normal text-on-surface-variant">
+                      ({lockTargets.length})
+                    </span>
+                  </h3>
                   <span className="text-[10px] text-on-surface-variant font-mono basis-full sm:basis-auto sm:ml-auto">
                     Locked requirements cannot be updated, deleted, merged, or modified by AI
                   </span>
                 </div>
                 <div className="space-y-2">
-                  {structuredRequirements.requirements.map((req) => {
-                    const isLocked = req.is_locked || lockedRequirements[req.requirement_code]?.is_locked;
+                  {lockTargets.map((req) => {
+                    const isLocked = Boolean(req.is_locked || lockedRequirements[req.requirement_code]?.is_locked);
+                    // A requirement created by a gather run has no database UUID
+                    // until its merge is saved; the lock API would reject it, so
+                    // the row is flagged instead of offering a button that fails.
+                    const canLock =
+                      isLockableRequirementId(req.id) ||
+                      isLockableRequirementId(lockedRequirements[req.requirement_code]?.artifact_id);
+                    const lockedBy = req.locked_by || lockedRequirements[req.requirement_code]?.locked_by || 'user';
+                    const lockedAt = req.locked_at || lockedRequirements[req.requirement_code]?.locked_at || '';
+                    const storyCount = req.user_stories?.length ?? storiesByRequirement[req.requirement_code] ?? 0;
+                    const isArchived = req.status?.toLowerCase() === 'archived';
                     return (
                       <div key={req.requirement_code} className={`flex items-center justify-between gap-2 sm:gap-3 p-3 rounded-xl border ${isLocked ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
                         <div className="flex items-center gap-3 min-w-0">
@@ -775,38 +871,74 @@ export default function Dashboard() {
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
                               <span className="text-xs font-mono font-bold text-on-surface shrink-0">{req.requirement_code}</span>
                               <span className="text-xs text-on-surface break-words min-w-0">{req.title}</span>
+                              {isArchived && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">Archived</span>
+                              )}
+                              {typeof storyCount === 'number' && storyCount > 0 && (
+                                <span className="text-[10px] font-mono text-on-surface-variant shrink-0">
+                                  · {storyCount} {storyCount === 1 ? 'story' : 'stories'}
+                                </span>
+                              )}
                             </div>
                             {isLocked && (
                               <p className="text-[10px] text-amber-700 font-mono mt-0.5">
-                                🔒 Locked by {req.locked_by || lockedRequirements[req.requirement_code]?.locked_by || 'user'} 
-                                {req.locked_at || lockedRequirements[req.requirement_code]?.locked_at ? ` at ${new Date(req.locked_at || lockedRequirements[req.requirement_code]?.locked_at || '').toLocaleString()}` : ''}
+                                🔒 Locked by {lockedBy}
+                                {lockedAt ? ` at ${new Date(lockedAt).toLocaleString()}` : ''}
                               </p>
                             )}
                           </div>
                         </div>
-                        <button
-                          onClick={() => isLocked ? handleUnlockRequirement(req.requirement_code) : handleLockRequirement(req.requirement_code)}
-                          className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                            isLocked 
-                              ? 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200' 
-                              : 'bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20'
-                          }`}
-                        >
-                          {isLocked ? (
-                            <>
-                              <Unlock className="w-3.5 h-3.5" />
-                              <span>Unlock</span>
-                            </>
-                          ) : (
-                            <>
+                        {canLock ? (
+                          <button
+                            onClick={() => isLocked ? handleUnlockRequirement(req.requirement_code) : handleLockRequirement(req.requirement_code)}
+                            className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                              isLocked 
+                                ? 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200' 
+                                : 'bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20'
+                            }`}
+                          >
+                            {isLocked ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Unlock</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Lock</span>
+                              </>
+                            )}
+                          </button>
+                        ) : (
+                          <Tooltip label="This requirement has no saved record yet — save the pending merge preview first, then lock it.">
+                            <button
+                              disabled
+                              className="px-3 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1.5 shrink-0 cursor-not-allowed bg-slate-100 text-slate-500 border border-slate-200"
+                            >
                               <Lock className="w-3.5 h-3.5" />
-                              <span>Lock</span>
-                            </>
-                          )}
-                        </button>
+                              <span>Save first</span>
+                            </button>
+                          </Tooltip>
+                        )}
                       </div>
                     );
                   })}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'trace' && lockTargets.length === 0 && (
+              <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-dashed border-outline rounded-2xl">
+                <div className="flex items-start gap-3 min-w-0">
+                  <Lock className="text-on-surface-variant w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <h3 className="font-bold text-sm text-on-surface">Requirement Lock Status</h3>
+                    <p className="text-xs text-on-surface-variant mt-0.5 break-words">
+                      {(structuredRequirements.user_stories?.length ?? 0) > 0
+                        ? 'No requirement records are stored for this project yet, so there is nothing to lock. Save the pending merge preview to create the requirement records — they become lockable immediately afterwards.'
+                        : 'No requirements yet. Describe what you need in the chat and the Gatherer will create the requirement records you can lock here.'}
+                    </p>
+                  </div>
                 </div>
               </div>
             )}
@@ -846,6 +978,18 @@ export default function Dashboard() {
         danger
         onConfirm={() => handleDeleteProject(projectPendingDelete as string)}
         onClose={() => setProjectPendingDelete(null)}
+      />
+
+      {/* AUTH MODAL — sign in (POST /api/auth/login) / create account
+          (POST /api/auth/register, only when the backend allows it). On success
+          useAuth stores the JWT, so the sidebar chip flips to the user's name. */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        signupEnabled={signupEnabled}
+        isAuthenticating={isAuthenticating}
+        onSignIn={handleLogin}
+        onSignUp={handleRegister}
+        onClose={() => setIsAuthModalOpen(false)}
       />
     </div>
   );

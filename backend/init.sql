@@ -26,7 +26,8 @@ CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
     full_name VARCHAR(255) NOT NULL,
-    role VARCHAR(50) NOT NULL, -- e.g., 'Product Owner', 'Business Analyst', 'Auditor', 'Developer'
+    password_hash VARCHAR(255) NOT NULL DEFAULT '',
+    role VARCHAR(50) NOT NULL, -- e.g., 'Business Analyst', 'System Analyst', 'Product Owner', 'Technical Product Owner', 'Project Manager', 'Developer', 'QA'
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -371,3 +372,28 @@ CREATE TABLE artifact_event_logs (
 CREATE INDEX idx_artifact_event_logs_artifact ON artifact_event_logs(artifact_type, artifact_id);
 CREATE INDEX idx_artifact_event_logs_action ON artifact_event_logs(action);
 CREATE INDEX idx_artifact_event_logs_timestamp ON artifact_event_logs(timestamp);
+
+-- ==========================================
+-- 13. SEMANTIC MEMORIES TABLE
+-- ==========================================
+-- Project-scoped distilled facts (Option A memory layer) extracted from chat
+-- turns by a small LLM pass, embedded with the local LM Studio embedding model
+-- and recalled at prompt-build time by blended cosine-relevance + recency
+-- scoring. Mirrors alembic/versions/0008_add_semantic_memories.py.
+-- Embeddings are stored as a JSON float array (not pgvector) so the schema
+-- works on both Supabase Postgres and the SQLite dev fallback.
+CREATE TABLE semantic_memories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind VARCHAR(30) NOT NULL DEFAULT 'semantic',   -- 'semantic'; room for future kinds ('preference', 'decision', ...)
+    content TEXT NOT NULL,
+    embedding JSONB NOT NULL,                        -- unit-normalised float vector (JSON array)
+    embedding_model VARCHAR(100) NOT NULL DEFAULT '',
+    source_message_id UUID,                          -- conversation_messages.id, no FK (chat may run standalone)
+    recall_count INTEGER NOT NULL DEFAULT 0,
+    last_recalled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_semantic_memories_project_id ON semantic_memories(project_id);
+CREATE INDEX idx_semantic_memories_source_message_id ON semantic_memories(source_message_id);

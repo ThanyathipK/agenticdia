@@ -199,6 +199,9 @@ Then edit the two things that matter:
 - **`DATABASE_URL`** — point it at your Supabase Postgres, e.g.
   `postgresql://postgres.<ref>:<password>@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`.
   If you leave it unset (or empty), the backend automatically falls back to a local SQLite file `backend/app.db`.
+  Leaving the `<ref>`/`<password>` placeholders unfilled is treated the same way: the backend logs a warning and
+  uses the SQLite fallback instead of failing with asyncpg's `tenant/user postgres.[YOUR_PROJECT_REF] not found`
+  (set `ALLOW_SQLITE_FALLBACK=false` to turn that into a hard startup error in production).
 - **`LM_STUDIO_MODEL_FALLBACK`** — must match a model you have loaded in LM Studio.
 
 ### 4. Start LM Studio
@@ -282,9 +285,10 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `LM_STUDIO_URL` | `http://localhost:1234/v1` | Base URL of the LM Studio OpenAI-compatible server |
 | `LM_STUDIO_API_KEY` | `lm-studio` | Bearer token sent to LM Studio (any value is accepted locally) |
 | `LM_STUDIO_MODEL_FALLBACK` | `qwen3.5-9b-instruct` | Model id used in every request; must match a model loaded in LM Studio |
-| `DATABASE_URL` | *(empty → SQLite `backend/app.db`)* | PostgreSQL URL. `postgres://` → `postgresql+asyncpg://`; `ssl=require` auto-appended for `supabase.com` hosts |
+| `DATABASE_URL` | *(empty → SQLite `backend/app.db`)* | PostgreSQL URL. `postgres://` → `postgresql+asyncpg://`; `ssl=require` auto-appended for `supabase.com` hosts. Unfilled placeholders (`[YOUR_PROJECT_REF]`, `<password>`) also fall back to SQLite |
+| `ALLOW_SQLITE_FALLBACK` | `true` | When `true`, an empty or placeholder `DATABASE_URL` warns and uses SQLite. Set `false` in production to abort startup on such a misconfiguration |
 | `CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated browser origins allowed by CORS |
-| `MAX_CONTEXT_TOKENS` | `8192` | Total context budget injected into every system prompt (MacBook-memory-safe); incoming `/api/chat` and workflow payloads exceeding this limit are rejected with HTTP 413 | 
+| `MAX_CONTEXT_TOKENS` | `8192` | Total context budget injected into every system prompt; incoming `/api/chat` and workflow payloads exceeding this limit are rejected with HTTP 413. Raise it (e.g. `16384`) in `backend/.env` when the loaded LM Studio model supports a larger context window (qwen3.5-9b supports 32k+) — output `max_tokens` budgets are separate constants and are unaffected | 
 | `TEMPERATURE` | `0.0` | Sampling temperature for all agent calls |
 | `LM_STUDIO_DISABLE_THINKING` | `true` | Sends `enable_thinking: false` to Qwen3.x reasoning models so structured-JSON generation (PRD / audit) never exhausts `max_tokens` on chain-of-thought |
 | `MAX_UPLOAD_MB` | `25` | Document upload size gate — the **only** size limit; the full converted markdown is always persisted regardless of size |
@@ -358,7 +362,7 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 2. In the **Agent Workspace**, create a project (or pick the seeded one).
 3. Type a feature brief in the chat (e.g. *"Add a PromptPay real-time merchant settlement flow"*). The Router + Matcher classify it and the **Gatherer** produces user stories. Then run the **Auditor** to validate compliance and **Generate PRD** to have the Architect draft the document.
 4. Alternatively, upload an existing brief (DOCX / PDF / MD / TXT) in the **Document Library** and hit **Process** — the extraction runs through the Gatherer and lands as a single staged pending action to confirm.
-5. Review the result in the **ConfirmationPanel** — accept (`confirm`) or reject (`cancel`).
+5. Review the result in the **ConfirmationPanel** — a compact *merge window* that shows only what matters: **What changes** (requirements / user stories / acceptance criteria deltas) and **What is affected** (PRD sections and diagrams referencing the affected `REQ-`/`US-` codes, with `DANGLING` and `locked` flags). Then accept (`confirm`) or reject (`cancel`).
 6. Use the **lock** buttons on any artifact to freeze it.
 
 ## 🔒 Human-in-the-Loop & Locking

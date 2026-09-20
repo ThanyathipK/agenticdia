@@ -51,15 +51,31 @@ class ProjectRepository:
         projects.sort(key=lambda p: (not (p.is_pinned or False), -(p.updated_at or p.created_at).timestamp() if (p.updated_at or p.created_at) else 0))
 
     @staticmethod
-    async def list_all(session: AsyncSession) -> List[Dict[str, Any]]:
+    async def list_all(
+        session: AsyncSession,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> List[Dict[str, Any]]:
+        """List projects, optionally scoped to a single owner.
+
+        When ``user_id`` is given only that user's projects are returned — the
+        per-user data boundary behind the sidebar (nothing before login, only
+        the signed-in user's projects after). ``None`` lists everything and is
+        reserved for internal/admin callers.
+        """
         stmt = select(ProjectModel)
+        if user_id is not None:
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         projects = list(result.scalars().all())
         ProjectRepository._sort_projects(projects)
         return [serialize_project(p) for p in projects]
 
     @staticmethod
-    async def search(session: AsyncSession, query: str) -> List[Dict[str, Any]]:
+    async def search(
+        session: AsyncSession,
+        query: str,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> List[Dict[str, Any]]:
         """Search projects by name OR by their persisted conversation messages.
 
         A project is returned when its name contains ``query`` (case-insensitive)
@@ -86,6 +102,10 @@ class ProjectRepository:
                 msg_col.ilike(pattern),
             ))
         )
+        if user_id is not None:
+            # Same per-owner boundary as list_all: a user only ever searches
+            # their own projects (name or conversation content).
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         rows = (await session.execute(stmt)).all()
 
         # De-duplicate by project while capturing one snippet per project from
@@ -184,9 +204,18 @@ class ProjectRepository:
         return None
 
     @staticmethod
-    async def update(project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
+    async def update(
+        project_id: str,
+        updates: Dict[str, Any],
+        session: AsyncSession,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> Optional[Dict[str, Any]]:
         pid = as_uuid(project_id)
         stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        if user_id is not None:
+            # Owner boundary: a non-owner sees the same None a missing project
+            # produces, so the route answers 404 either way (no existence leak).
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if p:
@@ -214,7 +243,12 @@ class ProjectRepository:
         return None
 
     @staticmethod
-    async def update_status(project_id: str, new_status: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
+    async def update_status(
+        project_id: str,
+        new_status: str,
+        session: AsyncSession,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Set a project's user-editable workflow status (dashboard table).
 
         Mirrors :meth:`toggle_pinned`: a UI metadata update, so it is NOT gated
@@ -226,13 +260,16 @@ class ProjectRepository:
             new_status: Workflow status to apply ('draft' | 'in_review_hpo' |
                 'in_review_po' | 'approved' | 'revised').
             session: Active asynchronous database session.
+            user_id: When given, only a project owned by this user qualifies.
 
         Returns:
             Optional[Dict[str, Any]]: The updated project record, or None if the
-                project does not exist.
+                project does not exist (or is not owned by ``user_id``).
         """
         pid = as_uuid(project_id)
         stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        if user_id is not None:
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if not p:
@@ -243,20 +280,28 @@ class ProjectRepository:
         return serialize_project(p)
 
     @staticmethod
-    async def toggle_pinned(project_id: str, is_pinned: bool, session: AsyncSession) -> Optional[Dict[str, Any]]:
+    async def toggle_pinned(
+        project_id: str,
+        is_pinned: bool,
+        session: AsyncSession,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Pin or unpin a project (chat) so it floats to the top of the sidebar.
 
         Args:
             project_id: Project UUID string.
             is_pinned: New pinned state to apply.
             session: Active asynchronous database session.
+            user_id: When given, only a project owned by this user qualifies.
 
         Returns:
             Optional[Dict[str, Any]]: The updated project record, or None if the
-                project does not exist.
+                project does not exist (or is not owned by ``user_id``).
         """
         pid = as_uuid(project_id)
         stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        if user_id is not None:
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if not p:
@@ -267,7 +312,12 @@ class ProjectRepository:
         return serialize_project(p)
 
     @staticmethod
-    async def toggle_flagged(project_id: str, is_flagged: bool, session: AsyncSession) -> Optional[Dict[str, Any]]:
+    async def toggle_flagged(
+        project_id: str,
+        is_flagged: bool,
+        session: AsyncSession,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Flag or unflag a project (dashboard ★ marker).
 
         Deliberately independent of :meth:`toggle_pinned`: flagging marks a
@@ -278,13 +328,16 @@ class ProjectRepository:
             project_id: Project UUID string.
             is_flagged: New flagged state to apply.
             session: Active asynchronous database session.
+            user_id: When given, only a project owned by this user qualifies.
 
         Returns:
             Optional[Dict[str, Any]]: The updated project record, or None if the
-                project does not exist.
+                project does not exist (or is not owned by ``user_id``).
         """
         pid = as_uuid(project_id)
         stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        if user_id is not None:
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if not p:
@@ -295,9 +348,15 @@ class ProjectRepository:
         return serialize_project(p)
 
     @staticmethod
-    async def delete(project_id: str, session: AsyncSession) -> bool:
+    async def delete(
+        project_id: str,
+        session: AsyncSession,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> bool:
         pid = as_uuid(project_id)
         stmt = select(ProjectModel).where(ProjectModel.id == pid)
+        if user_id is not None:
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         p = result.scalar_one_or_none()
         if p:
