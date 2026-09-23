@@ -20,6 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import AuthenticatedUser, require_project_owner
 from app.database import get_db
 from app.event_manager import event_manager
 from app.prd_section_service import (
@@ -99,7 +100,11 @@ async def _get_section_or_404(section_key: str, project_id: str, session: AsyncS
 
 
 @router.get("/api/project/{project_id}/prd/sections", response_model=PrdSectionListResponse, status_code=status.HTTP_200_OK)
-async def list_prd_sections(project_id: str, session: AsyncSession = Depends(get_db)) -> PrdSectionListResponse:
+async def list_prd_sections(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> PrdSectionListResponse:
     """List all PRD parts (the nine preview parts) in document order.
 
     Seeds the parts on first access: from the project's current markdown PRD
@@ -117,6 +122,7 @@ async def update_prd_section(
     project_id: str,
     section_key: str,
     payload: PrdSectionUpdate,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> PrdSectionUpdateResponse:
     """
@@ -219,6 +225,7 @@ async def update_prd_section(
 async def list_prd_section_versions(
     project_id: str,
     section_key: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> list[PrdSectionVersionResponse]:
     """Version history of one PRD part, newest first (append-only)."""
@@ -233,6 +240,7 @@ async def revert_prd_section(
     section_key: str,
     version_number: int,
     updated_by: str = "user",
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> PrdSectionRevertResponse:
     """
@@ -303,6 +311,7 @@ async def lock_prd_section(
     project_id: str,
     section_key: str,
     payload: ArtifactLockRequest,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> Dict:
     """Lock ONE PRD part: blocks edits AND excludes it from AI regeneration."""
@@ -337,6 +346,7 @@ async def unlock_prd_section(
     project_id: str,
     section_key: str,
     payload: ArtifactLockRequest,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> Dict:
     """Unlock ONE PRD part so it can be edited and AI-regenerated again."""
@@ -370,6 +380,7 @@ async def unlock_prd_section(
 async def get_prd_section(
     project_id: str,
     section_key: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> PrdSectionResponse:
     """Fetch one PRD part (including its lock + review metadata)."""

@@ -19,6 +19,7 @@ import {
 } from '../api/transforms';
 import { getSafeSectionContent } from '../utils/markdown';
 import { handleWarning } from '../components/Toast';
+import { readStoredToken } from './useAuth';
 import { getPrdTemplateMarkdown } from './useRequirementStore';
 import type { RequirementStore } from './useRequirementStore';
 import type { WorkspaceTab } from './useWorkspaceUi';
@@ -312,7 +313,14 @@ export function useProjectSync(
 
     // Open the Server-Sent Events stream. The backend publishes a change event
     // whenever the project state is mutated, so no periodic polling is needed.
-    const source = new EventSource(`/api/project/${projectId}/sse`);
+    // EventSource cannot send an Authorization header, so the JWT travels as a
+    // `?token=` query parameter — the backend's SSE dependency accepts either
+    // the Bearer header or this query token, then enforces project ownership.
+    const token = readStoredToken();
+    const sseUrl = token
+      ? `/api/project/${projectId}/sse?token=${encodeURIComponent(token)}`
+      : `/api/project/${projectId}/sse`;
+    const source = new EventSource(sseUrl);
 
     // Debounce window for event-triggered refreshes. A multi-agent run publishes
     // bursts of events (per-step saves, PRD section updates, progress frames) in

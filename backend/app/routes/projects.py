@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import AuthenticatedUser, get_current_user
+from app.auth import AuthenticatedUser, get_current_user, require_project_owner
 from app.database import get_db
 from app.latex_service import (
     compile_latex_to_pdf,
@@ -353,7 +353,11 @@ async def set_project_status(
 
 
 @router.get("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
-async def get_project_requirement_state(project_id: str, session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
+async def get_project_requirement_state(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> RequirementStateResponse:
     """
     Retrieves the centralized RequirementState for a project from Supabase.
 
@@ -379,48 +383,29 @@ async def get_project_requirement_state(project_id: str, session: AsyncSession =
     state = await RequirementStateRepository.get_by_project_id(project_id, session)
     logger.info(f"[DB LOG] Loading RequirementState for project {project_id} complete. Found: {state is not None}")
     if not state:
-        state = {
-            "project_id": project_id,
-            "project_name": "PromptPay Settlement Engine",
-            "requirements": [
-                {
-                    "requirement_code": "REQ-001",
-                    "title": "PromptPay Real-Time Merchant Settlement Engine",
-                    "description": "Main epic for PromptPay settlement",
-                    "user_stories": []
-                }
-            ],
-            "business_goals": [],
-            "actors": [],
-            "user_stories": [
-                {
-                    "ticket_code": "US-001",
-                    "story_title": "Real-time Fund Settlement via QR Scan",
-                    "as_a": "Corporate Merchant Retailer",
-                    "i_want_to": "receive instant notifications and settlement when a customer scans my PromptPay QR code",
-                    "so_that": "I can verify payment immediately and dispense goods without settlement delay",
-                    "acceptance_criteria": [
-                        "Given a customer has scanned a valid static PromptPay QR code, When the transaction is approved by the national switch, Then the funds are instantly credited to the corporate account.",
-                        "Given the system detects a network timeout during national switch callback, When the transaction is retried, Then an explicit idempotency key must be checked to prevent double posting."
-                    ]
-                }
-            ],
-            "acceptance_criteria": [
-                "Given a customer has scanned a valid static PromptPay QR code, When the transaction is approved by the national switch, Then the funds are instantly credited to the corporate account.",
-                "Given the system detects a network timeout during national switch callback, When the transaction is retried, Then an explicit idempotency key must be checked to prevent double posting."
-            ],
-            "clarification_questions": [],
+        # A brand-new project starts with an EMPTY requirement board.
+        # This endpoint used to seed a HARDCODED demo requirement (``REQ-001``
+        # "PromptPay Real-Time Merchant Settlement Engine" plus a demo ``US-001``)
+        # and persist it. The phantom requirement owned ``REQ-001``, so the first
+        # requirement the user actually gathered was numbered ``REQ-002`` and the
+        # demo content polluted the board, the PRD and the traceability matrix.
+        # The authoritative project name lives in the projects table, so it is
+        # read from there instead of a fabricated demo label.
+        project = await ProjectRepository.get_by_id(project_id, session)
+        logger.info(f"[DB LOG] Initializing empty state for project {project_id}...")
+        # Persist BOOKKEEPING fields only: passing the empty
+        # ``requirements``/``user_stories`` lists would make the state repository
+        # fabricate a "Default Requirement" (``REQ-001``) row — exactly the
+        # phantom first requirement this fix removes. Requirement rows are
+        # created by the first real merge/gather save instead, which is what lets
+        # the requirement sequence start at ``REQ-001``.
+        state = await RequirementStateRepository.save_or_update(project_id, {
+            "project_name": (project or {}).get("name") or "",
             "validation_status": "pending",
-            "generated_prd": "",
-            "generated_diagrams": "",
             "current_workflow_state": "gatherer_node",
             "version_number": 1,
-            "updated_at": None
-        }
-        # Save default to database
-        logger.info(f"[DB LOG] Saving default state for project {project_id}...")
-        state = await RequirementStateRepository.save_or_update(project_id, state, session)
-        logger.info(f"[DB LOG] Saving default state for project {project_id} complete.")
+        }, session)
+        logger.info(f"[DB LOG] Initializing empty state for project {project_id} complete.")
         await event_manager.publish(project_id, "state_initialized", {"project_id": project_id})
 
     # Reuse the request's AsyncSession instead of opening a second pooled
@@ -434,7 +419,10 @@ async def get_project_requirement_state(project_id: str, session: AsyncSession =
 
 
 @router.get("/api/project/{project_id}/conversations", response_model=List[ConversationMessageResponse], status_code=status.HTTP_200_OK)
-async def get_project_conversations(project_id: str) -> List[ConversationMessageResponse]:
+async def get_project_conversations(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+) -> List[ConversationMessageResponse]:
     """
     Retrieve the persisted conversation history for a project.
 
@@ -455,7 +443,12 @@ async def get_project_conversations(project_id: str) -> List[ConversationMessage
 
 
 @router.put("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
-async def update_project_requirement_state(project_id: str, updates: Dict[str, Any], session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
+async def update_project_requirement_state(
+    project_id: str,
+    updates: Dict[str, Any],
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> RequirementStateResponse:
     """
     Directly updates the centralized RequirementState for a project in the database.
 
@@ -513,7 +506,7 @@ async def update_project_requirement_state(project_id: str, updates: Dict[str, A
 
 
 @router.get("/api/prd/template", status_code=status.HTTP_200_OK)
-def get_prd_template() -> Dict[str, str]:
+def get_prd_template(current_user: AuthenticatedUser = Depends(get_current_user)) -> Dict[str, str]:
     """
     Serves the authoritative Krungsri Nimble PRD templates.
 
@@ -533,7 +526,11 @@ def get_prd_template() -> Dict[str, str]:
 
 
 @router.post("/api/prd/export/{project_id}", response_model=PRDExportResponse, status_code=status.HTTP_200_OK)
-async def post_prd_export_generation(project_id: UUID, db: AsyncSession = Depends(get_db)) -> PRDExportResponse:
+async def post_prd_export_generation(
+    project_id: UUID,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    db: AsyncSession = Depends(get_db),
+) -> PRDExportResponse:
     """
     Gathers linked user stories and acceptance criteria from the database,
     dispatches them to the local LLM, and returns a clean, finalized
@@ -872,6 +869,7 @@ async def _export_prd_bytes(
 async def export_prd_pdf(
     project_id: str,
     payload: LatexExportPayload,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """
@@ -894,6 +892,7 @@ async def export_prd_pdf(
 async def export_prd_docx(
     project_id: str,
     payload: LatexExportPayload,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """
@@ -909,7 +908,10 @@ async def export_prd_docx(
 
 
 @router.post("/api/prd/convert", status_code=status.HTTP_200_OK)
-async def convert_prd_to_markdown(payload: LatexExportPayload) -> Dict[str, str]:
+async def convert_prd_to_markdown(
+    payload: LatexExportPayload,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Dict[str, str]:
     """
     Normalize a stored PRD into GFM Markdown for the on-screen preview.
 
@@ -953,7 +955,11 @@ async def convert_prd_to_markdown(payload: LatexExportPayload) -> Dict[str, str]
 # ==========================================
 
 @router.get("/api/project/{project_id}/prd-versions", response_model=List[PRDVersionResponse], status_code=status.HTTP_200_OK)
-async def get_prd_versions(project_id: str, session: AsyncSession = Depends(get_db)) -> List[PRDVersionResponse]:
+async def get_prd_versions(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> List[PRDVersionResponse]:
     """
     Retrieves all PRD versions for a project.
 
@@ -985,6 +991,7 @@ async def get_prd_version_diff(
     project_id: str,
     version_number: int,
     base_version: Optional[int] = Query(default=None, description="Older base version; defaults to the immediate predecessor."),
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> PrdVersionDiffResponse:
     """Section-level diff of one PRD version against an earlier base version.
@@ -1015,7 +1022,11 @@ async def get_prd_version_diff(
 
 
 @router.get("/api/project/{project_id}/prd-versions/latest", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)
-async def get_latest_prd_version(project_id: str, session: AsyncSession = Depends(get_db)) -> PRDVersionResponse:
+async def get_latest_prd_version(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> PRDVersionResponse:
     """
     Retrieves the latest PRD version for a project.
 
@@ -1042,7 +1053,12 @@ async def get_latest_prd_version(project_id: str, session: AsyncSession = Depend
 
 
 @router.get("/api/project/{project_id}/prd-versions/{version_number}", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)
-async def get_prd_version_by_number(project_id: str, version_number: int, session: AsyncSession = Depends(get_db)) -> PRDVersionResponse:
+async def get_prd_version_by_number(
+    project_id: str,
+    version_number: int,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> PRDVersionResponse:
     """
     Retrieves a specific PRD version by version number.
 
@@ -1079,6 +1095,7 @@ async def restore_prd_version(
     version_number: int,
     restored_by: str = "user",
     session: AsyncSession = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_project_owner),
 ) -> PrdVersionRestoreResponse:
     """Restore the whole PRD document from a ledger version.
 

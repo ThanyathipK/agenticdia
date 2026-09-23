@@ -162,7 +162,7 @@ agenticdia/
 │       ├── llm_factory.py      # Shared LangChain ChatOpenAI factory (agents + services)
 │       ├── llm_utils.py        # Structured-output helpers
 │       ├── agents.py           # LangGraph nodes + compiled prd_workflow graph
-│       ├── semantic_service.py # Workflow router / intent / matcher agents
+│       ├── semantic_service.py # Semantic change detection + router / intent / matcher agents
 │       ├── semantic_memory.py  # Long-term per-project memory (distil → embed → recall)
 │       ├── merge_service.py    # User story reconciliation (unit-testable core)
 │       ├── version_service.py  # Immutable PRD version snapshots + diffs
@@ -400,13 +400,33 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 | Node | Role |
 |------|------|
 | **router_node** | Classifies each message as `CHAT`, `QUESTION`, `COMMAND`, or `REQUIREMENT` with a confidence score and reason (heuristic fallback). Below the confidence floor it asks a clarifying question instead of guessing. |
-| **requirement_matcher_node** | Maps the message to existing user stories (e.g. `US-001`) and proposes `NEW / UPDATE / DELETE / CLARIFY` via `requirement-matcher` + semantic change detection; low-confidence matches stop the workflow rather than mutate the wrong story. |
+| **requirement_matcher_node** | Maps the message to existing user stories (e.g. `US-001`) and proposes `NEW / UPDATE / DELETE / CLARIFY` via `requirement-matcher` + semantic change detection; low-confidence matches stop the workflow rather than mutate the wrong story. A ticket code the model invented (absent from the backlog) is discarded and forces clarification instead of driving a mutation. |
 | **gatherer_node** | Parses the requirement text into structured **user stories + acceptance criteria**; sanitizes and re-codes the LLM output, then reconciles it against previously persisted stories (create / update / archive / unchanged) using the merge service. |
 | **auditor_node** | Runs the **7-point banking compliance checklist** over changed stories, marks validation status, and emits clarification questions for anything ambiguous or non-compliant. `is_valid` is recomputed in code as *“no open questions remain”*, and every new question is merged with the previously unresolved ones. |
 | **architect_node** | Synthesizes the final **PRD markdown** and a **Mermaid diagram** from the *audited* dataset only, honouring human-owned/locked PRD parts. Skips the LLM entirely when nothing changed. |
 | **delete_requirement_node** | Handles `DELETE_REQUIREMENT` intent to archive/remove a requirement, asking for disambiguation when the target is unclear. |
 
 Every agent output crosses a **typed boundary**: it is parsed into Pydantic schemas from [`backend/app/schemas.py`](backend/app/schemas.py) (with a markdown-fence-stripping fallback in `llm_utils.invoke_llm_structured`), so malformed JSON can never silently reach the database.
+
+### Semantic change detection
+
+Before the Gatherer writes anything, `semantic_service.detect_semantic_changes` asks the local model to classify what the message changes about the existing backlog — `NEW_REQUIREMENT`, `MODIFY_REQUIREMENT`, `REMOVE_REQUIREMENT`, `RENAME_REQUIREMENT`, `NO_MEANINGFUL_CHANGE`, `EXPAND_REQUIREMENT`, `SPLIT_REQUIREMENT`, `MERGE_REQUIREMENTS` — and recommends an action per affected story.
+
+That answer is **untrusted input**, so `normalize_semantic_changes` is a deterministic guardrail between the model and the writers:
+
+| Guardrail | Why |
+|---|---|
+| Classification + action canonicalisation (aliases like `ADD`/`MODIFY`, plus the classification echoed into the action field) | Keeps the vocabulary in one place so prompt and code cannot drift apart |
+| `INSERT` / `UPDATE` / `ARCHIVE` / `NO_CHANGE` only — `MERGE` maps to `UPDATE` | `merge_service` and `RequirementStateRepository` act on exactly those four; any other action used to be silently ignored, turning a detected change into a no-op |
+| `confidence` clamped to `[0.0, 1.0]` | Drives the clarification gate, so it must be a real number |
+| Target resolution: exact ticket code → normalized title → fuzzy title, against the real backlog | A hallucinated `US-404` never mutates (or archives) the wrong story |
+| Unresolvable/missing target ⇒ downgraded to `NO_CHANGE` below the clarification threshold | The Gatherer asks the user *which* story was meant instead of guessing |
+| `NEW_REQUIREMENT` never carries a target | New stories own no existing ticket code |
+| One recommendation per story; conflicting actions resolved by a fixed priority (removal > rewrite > insert), with the conflict surfaced at reduced confidence | Deterministic behaviour instead of "last entry in the list wins" |
+| Empty model answer ⇒ an explicit `NO_MEANINGFUL_CHANGE` entry | No ambiguous empty result, and no spurious clarification |
+| A parse/LLM failure still raises (HTTP 500) | A failure must never be masked as a legitimate new requirement |
+
+The Gatherer then **merges** the Requirement Matcher's recommendation with the detected changes (the matcher wins for the ticket it already resolved) instead of letting it replace detection, so a message that updates one story *and* adds another keeps both halves. Clarification questions are de-duplicated, so re-running a gather neither piles up questions nor re-posts the same chat message.
 
 > **Workflow state machine** — the endpoint tracks `current_workflow_state` per project:
 >
@@ -515,7 +535,7 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `POST` | `/api/workflow-router` | Classify a message → `CHAT / QUESTION / COMMAND / REQUIREMENT` |
 | `POST` | `/api/intent-detector` | Detect intent → `GENERAL_CHAT` or `REQUIREMENT_REQUEST` |
 | `POST` | `/api/requirement-matcher` | Match a message to an existing story and recommend `NEW / UPDATE / DELETE / CLARIFY` |
-| `POST` | `/api/audit/respond/{question_id}` | Submit a stakeholder answer to close a clarification question |
+| `POST` | `/api/audit/respond/{question_id}` | Submit a stakeholder answer to close a clarification question (owner-only: the question's project is resolved from the question id, then ownership is enforced; `409` when the question is locked) |
 | `POST` | `/api/clarification/submit` | Submit clarification answers (`{project_id, answers}`), re-run the Auditor, and update workflow state |
 
 ### Traceability & Impact
@@ -678,8 +698,9 @@ npm run lint
 # Frontend unit tests (node:test via tsx): locks · auth · DDL parsing
 npm test
 
-# Backend unit tests (pytest — 27 modules: agents, auth, documents, impact,
-# merge, PRD sections/versions/restore, semantic memory, traceability, …)
+# Backend unit tests (pytest — 31 modules: agents, auth, documents, impact,
+# merge, PRD sections/versions/restore, semantic change detection, semantic
+# memory, traceability, …)
 cd backend && python -m pytest tests/
 
 # Schema drift harness (init.sql ↔ models.py must stay identical)

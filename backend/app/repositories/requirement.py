@@ -17,6 +17,7 @@ from app.models import (
 )
 from app.repositories.base import as_uuid, serialize_requirement
 from app.repositories.event_log import ArtifactEventLogRepository
+from app.requirement_codes import UNASSIGNED_REQUIREMENT_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class RequirementRepository:
         req = RequirementModel(
             project_id=pid,
             epic_id=uuid.UUID(data["epic_id"]) if data.get("epic_id") else None,
-            requirement_code=data.get("requirement_code", "REQ-000"),
+            requirement_code=data.get("requirement_code", UNASSIGNED_REQUIREMENT_CODE),
             title=data.get("title", "Untitled Requirement"),
             description=data.get("description"),
             status=data.get("status", "active"),

@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 # NOTE: must match the descriptive-slug convention used by every other
@@ -23,11 +24,35 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _users_columns(bind) -> set:
+    inspector = inspect(bind)
+    if "users" not in inspector.get_table_names():
+        return set()
+    return {col["name"] for col in inspector.get_columns("users")}
+
+
 def upgrade() -> None:
-    # Add password_hash column to users table
+    # Add password_hash column to users table.
+    # GUARDED like every other post-baseline revision (0002/0003/0010/...):
+    # 0001_initial_schema runs Base.metadata.create_all, which already creates
+    # the users table WITH password_hash on a fresh database. A blind
+    # ALTER TABLE ADD COLUMN here aborted every fresh install with
+    # "duplicate column name: password_hash" and the app refused to boot.
+    bind = op.get_bind()
+    cols = _users_columns(bind)
+
+    if "password_hash" in cols:
+        return
+
     op.add_column('users', sa.Column('password_hash', sa.String(255), nullable=False, server_default=''))
 
 
 def downgrade() -> None:
-    # Remove password_hash column from users table
+    # Remove password_hash column from users table (guard mirrors upgrade).
+    bind = op.get_bind()
+    cols = _users_columns(bind)
+
+    if "password_hash" not in cols:
+        return
+
     op.drop_column('users', 'password_hash')

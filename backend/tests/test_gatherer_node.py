@@ -618,6 +618,108 @@ def test_renumber_fresh_project_codes_never_touches_an_existing_board():
     assert agents._renumber_fresh_project_codes([], {}) == {}
 
 
+@pytest.mark.asyncio
+async def test_first_requirement_of_a_fresh_project_is_req_001(monkeypatch):
+    """The reported bug: a brand-new project's first requirement was REQ-002.
+
+    The route hands the gatherer a legacy payload (placeholder epic name + no
+    stories + no ``requirements`` key) for every new project. The gatherer used
+    to fabricate an empty ``REQ-001`` group from it, which made the board look
+    non-empty, skipped the fresh-project renumbering and was then dropped for
+    having no stories — leaving the user's first requirement as the LLM's
+    REQ-002.
+    """
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [
+            {
+                # Copied verbatim from the gatherer prompt's "new requirement"
+                # example — the reason the board used to start at REQ-002.
+                "requirement_code": "REQ-002",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001)],
+            }
+        ],
+    }
+    fresh_state = {
+        "project_id": "p1",
+        "project_name": "",
+        "requirements": [],
+        "business_goals": [],
+        "actors": [],
+        "user_stories": [],
+        "acceptance_criteria": [],
+        "clarification_questions": [],
+        "validation_status": "pending",
+        "generated_prd": "",
+        "generated_diagrams": "",
+        "current_workflow_state": "gatherer_node",
+        "version_number": 1,
+        "updated_at": None,
+    }
+    _patch(monkeypatch, fresh_state, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Add refund request submission",
+        "detected_intent": "CREATE_REQUIREMENT",
+        "current_version": 1,
+        # Exactly what the route builds for a brand-new project: the frontend's
+        # placeholder epic name, no stories and no requirements key.
+        "structured_requirements": {
+            "epic_name": "Structured Requirements Draft",
+            "version": 1,
+            "user_stories": [],
+        },
+    })
+
+    reqs = result["requirement_state"]["requirements"]
+    assert _story_codes_by_requirement(reqs) == {"REQ-001": ["US-001"]}
+    # The phantom group's placeholder title never reaches the board.
+    assert [r["title"] for r in reqs] == ["Refund Request Submission"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_payload_still_preserves_persisted_requirement_identity(monkeypatch):
+    """The guard above must not break the case it exists for: a legacy payload
+    that DOES carry stories still resolves to the persisted requirement code and
+    title instead of minting a fresh/hardcoded group."""
+    single_group_state = {
+        **copy.deepcopy(REQ_STATE),
+        "requirements": [copy.deepcopy(REQ_STATE["requirements"][0])],
+        "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002)],
+    }
+    llm_result = {
+        "epic_name": "Refund Request Submission",
+        "requirements": [
+            {
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [copy.deepcopy(US_001)],
+            }
+        ],
+    }
+    _patch(monkeypatch, single_group_state, llm_result=llm_result)
+
+    result = await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "Refund submission wording changed",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {
+            "epic_name": "Refund Request Submission",
+            "version": 5,
+            "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002)],
+        },
+    })
+
+    reqs = result["requirement_state"]["requirements"]
+    # The persisted code/title are reused — no fresh REQ-002 group is minted and
+    # the unmentioned story stays under its requirement.
+    assert _story_codes_by_requirement(reqs) == {"REQ-001": ["US-001", "US-002"]}
+    assert reqs[0]["title"] == "Refund Request Submission"
+
+
 def test_epic_rename_regex_understands_natural_phrasing():
     assert agents._user_requests_epic_rename("rename the epic to Payments Hub")
     assert agents._user_requests_epic_rename("The epic should be called Payments")
@@ -753,5 +855,163 @@ async def test_locked_stories_are_flagged_in_the_prompt_context(monkeypatch):
     assert "Flags: LOCKED" in context
     assert "US-002" in context            # the locked story is visible
     assert context.count("US-002") == 1   # ...and rendered exactly once
+
+# ==========================================
+# SEMANTIC RECOMMENDATION MERGE (matcher + detection)
+# ==========================================
+def test_merge_semantic_recommendations_keeps_both_halves_of_a_request():
+    """The matcher result used to REPLACE semantic detection entirely, dropping
+    any brand-new requirement described in the same message."""
+    detected = [{
+        "change_type": "NEW_REQUIREMENT",
+        "target_requirement_id": None,
+        "confidence": 0.95,
+        "reason": "Also asks for QR payments.",
+        "recommended_action": "INSERT",
+    }]
+    matcher = [{
+        "change_type": "MODIFY_REQUIREMENT",
+        "target_requirement_id": "US-002",
+        "confidence": 0.95,
+        "reason": "Matched via Requirement Matcher Agent.",
+        "recommended_action": "UPDATE",
+    }]
+
+    merged = agents._merge_semantic_recommendations(detected, matcher)
+
+    actions = {(c["target_requirement_id"], c["recommended_action"]) for c in merged}
+    assert ("US-002", "UPDATE") in actions
+    assert (None, "INSERT") in actions
+    # The matcher's authoritative recommendation comes first (intent guidance).
+    assert merged[0]["target_requirement_id"] == "US-002"
+
+
+def test_merge_semantic_recommendations_matcher_wins_for_its_target():
+    detected = [{
+        "change_type": "MODIFY_REQUIREMENT",
+        "target_requirement_id": "us-2",
+        "confidence": 0.9,
+        "reason": "detected",
+        "recommended_action": "UPDATE",
+    }]
+    matcher = [{
+        "change_type": "REMOVE_REQUIREMENT",
+        "target_requirement_id": "US-002",
+        "confidence": 0.95,
+        "reason": "matcher",
+        "recommended_action": "ARCHIVE",
+    }]
+
+    merged = agents._merge_semantic_recommendations(detected, matcher)
+
+    assert len(merged) == 1
+    assert merged[0]["recommended_action"] == "ARCHIVE"
+    assert merged[0]["reason"] == "matcher"
+
+
+def test_merge_semantic_recommendations_drops_redundant_no_change_entries():
+    no_change = [{
+        "change_type": "NO_MEANINGFUL_CHANGE",
+        "target_requirement_id": None,
+        "confidence": 0.9,
+        "reason": "nothing",
+        "recommended_action": "NO_CHANGE",
+    }]
+    matcher = [{
+        "change_type": "MODIFY_REQUIREMENT",
+        "target_requirement_id": "US-002",
+        "confidence": 0.95,
+        "reason": "matcher",
+        "recommended_action": "UPDATE",
+    }]
+
+    # Alone it is the only signal available, so it is preserved...
+    assert agents._merge_semantic_recommendations(no_change, []) == no_change
+    # ...but next to a real change it is noise.
+    merged = agents._merge_semantic_recommendations(no_change, matcher)
+    assert [c["change_type"] for c in merged] == ["MODIFY_REQUIREMENT"]
+
+
+@pytest.mark.asyncio
+async def test_matcher_and_detected_changes_reach_the_prompt_together(monkeypatch):
+    semantic_recs = [{
+        "change_type": "NEW_REQUIREMENT",
+        "target_requirement_id": None,
+        "confidence": 0.93,
+        "reason": "Also asks for QR payments.",
+        "recommended_action": "INSERT",
+    }]
+    llm_result = {
+        "epic_name": "Refund Portal",
+        "requirements": [{
+            "requirement_code": "REQ-001",
+            "title": "Refund Request Submission",
+            "user_stories": [copy.deepcopy(US_001), copy.deepcopy(US_002)],
+        }],
+    }
+    _saved, llm_calls = _patch(monkeypatch, REQ_STATE, llm_result=llm_result, semantic_recs=semantic_recs)
+
+    await agents.gatherer_node({
+        "project_id": "p1",
+        "raw_input": "change the refund tracking and add QR payments",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+        "requirement_match": {"matched_requirement_id": "US-002", "action": "UPDATE", "confidence": 0.95},
+    })
+
+    recommendations = llm_calls[0]["variables"]["recommendations"]
+    assert '"US-002"' in recommendations        # matcher-derived UPDATE
+    assert "NEW_REQUIREMENT" in recommendations  # detected INSERT survived
+
+
+@pytest.mark.asyncio
+async def test_repeated_low_confidence_question_is_not_asked_twice(monkeypatch):
+    """Re-running the gather used to append the same clarification question (and
+    re-post the same chat message) every single time."""
+    semantic_recs = [{
+        "change_type": "NEW_REQUIREMENT",
+        "target_requirement_id": None,
+        "confidence": 0.4,
+        "reason": "It is unclear whether this is a new story or an update to US-002",
+        "recommended_action": "INSERT",
+    }]
+    holder = {"state": copy.deepcopy(REQ_STATE)}
+    saved = []
+
+    async def fake_state(project_id, session=None, current_version=1):
+        return copy.deepcopy(holder["state"])
+
+    async def fake_save(**kwargs):
+        saved.append(kwargs)
+        return None
+
+    async def fake_semantic(raw_input, current_stories):
+        return copy.deepcopy(semantic_recs)
+
+    async def fake_intent(raw_input, current_stories):
+        return {"intent": "UPDATE_REQUIREMENT", "confidence": 0.95, "reason": "test"}
+
+    monkeypatch.setattr(agents, "get_or_init_requirement_state", fake_state)
+    monkeypatch.setattr(agents.ConversationMessageRepository, "save_message", fake_save)
+    monkeypatch.setattr(agents, "detect_semantic_changes", fake_semantic)
+    monkeypatch.setattr(agents, "detect_requirement_intent", fake_intent)
+
+    state = {
+        "project_id": "p1",
+        "raw_input": "maybe change that refund thing",
+        "detected_intent": "UPDATE_REQUIREMENT",
+        "current_version": 5,
+        "structured_requirements": {},
+    }
+    first = await agents.gatherer_node(dict(state))
+    holder["state"] = first["requirement_state"]
+    second = await agents.gatherer_node(dict(state))
+
+    questions = second["requirement_state"]["clarification_questions"]
+    assert len(questions) == 1                       # no duplicate pile-up
+    assert len(saved) == 1                           # only one chat message
+    assert questions[0]["is_resolved"] is False
+
 
 

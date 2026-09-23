@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import AuthenticatedUser, require_project_owner
 from app.database import get_db
 from app.repositories import ProjectRepository
 from app.schemas import TraceabilityResponse
@@ -28,6 +29,7 @@ router = APIRouter()
 )
 async def get_traceability(
     project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> TraceabilityResponse:
     """

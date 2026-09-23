@@ -2,7 +2,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.auth import AuthenticatedUser, get_current_user, verify_project_access
 from app.config import settings
+from app.database import get_db
 from app.repositories import ConversationMessageRepository
 from app.schemas import ChatSessionRequest, ChatResponse, HealthResponse
 from app.semantic_memory import build_memory_block, extract_and_remember, recall
@@ -56,6 +58,8 @@ async def get_health_status() -> HealthResponse:
 @router.post("/api/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 async def post_chat_query(
     request: ChatSessionRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(
         rate_limit_dependency(
             "chat", settings.RATE_LIMIT_CHAT_LIMIT, settings.RATE_LIMIT_CHAT_WINDOW
@@ -83,6 +87,11 @@ async def post_chat_query(
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="Conversation message list cannot be empty.")
+
+    # AUTHZ: a project-bound chat may only read/write the caller's own project
+    # (conversation rows are persisted below whenever project_id is set).
+    if request.project_id:
+        await verify_project_access(str(request.project_id), current_user, session)
 
     # Finding #39: enforce MAX_CONTEXT_TOKENS on incoming payload before any
     # token budget is consumed by the LLM gateway.

@@ -20,8 +20,17 @@ from app.merge_service import (
     normalize_title,
 )
 from app.prd_section_service import prd_is_sectioned_markdown
+from app.requirement_codes import (
+    # Requirement numbering is canonicalized in ONE place so no module ever
+    # hardcodes a literal code such as ``"REQ-001"``.
+    default_requirement_code as _default_requirement_code,
+    next_requirement_code as _generate_next_requirement_code,
+    normalize_requirement_code as _normalize_requirement_code,
+)
 from app.semantic_service import (
+    SEMANTIC_LOW_CONFIDENCE_THRESHOLD,
     classify_workflow,
+    coerce_confidence,
     detect_requirement_intent,
     detect_semantic_changes,
     match_requirement,
@@ -298,10 +307,6 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
         "requirement_match": match_result
     }
 
-def _default_requirement_code(index: int = 0) -> str:
-    """Deterministic fallback requirement code (REQ-001, REQ-002, ...)."""
-    return f"REQ-{index + 1:03d}"
-
 
 def _previous_requirement_identity(req_state: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -433,7 +438,9 @@ async def _generate_flow_diagram(
 # ==========================================
 # GATHERER HELPERS
 # ==========================================
-_REQUIREMENT_CODE_RE = re.compile(r"^(?:REQ[-_ ]?)(\d+)$", re.IGNORECASE)
+# Requirement-code normalization / sequencing helpers live in ONE place
+# (``app.requirement_codes``) and are imported above, so no module ever
+# hardcodes a literal code such as ``"REQ-001"``.
 # Below this classifier confidence the Gatherer is told to prefer the safest
 # interpretation of an ambiguous message (preserve > invent).
 _LOW_INTENT_CONFIDENCE = 0.65
@@ -448,22 +455,6 @@ _EPIC_RENAME_PATTERNS = (
     r"\bepic\s+name\b",
     r"\bepic\b[^.;\n]{0,30}\bshould\s+be\b",
 )
-
-
-def _normalize_requirement_code(code: Any) -> str:
-    """Canonicalize an LLM/DB requirement code to ``REQ-NNN`` (``''`` if invalid)."""
-    match = _REQUIREMENT_CODE_RE.match(str(code or "").strip())
-    return f"REQ-{int(match.group(1)):03d}" if match else ""
-
-
-def _generate_next_requirement_code(used_codes: Any) -> str:
-    """Return the lowest free ``REQ-NNN`` code above every used code."""
-    max_num = 0
-    for code in used_codes or []:
-        match = _REQUIREMENT_CODE_RE.match(str(code or "").strip())
-        if match:
-            max_num = max(max_num, int(match.group(1)))
-    return f"REQ-{max_num + 1:03d}"
 
 
 def _renumber_fresh_project_codes(
@@ -555,6 +546,36 @@ def _sanitize_incoming_story(raw: Any) -> Optional[Dict[str, Any]]:
             story["story_title"] or story["i_want_to"],
         )
     return story
+
+
+def _merge_semantic_recommendations(
+    detected: Optional[List[Dict[str, Any]]],
+    authoritative: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Combine semantic-change recommendations with the Requirement Matcher's.
+
+    ``authoritative`` (derived from the Requirement Matcher, which already
+    resolved a concrete ticket code) wins for the target it covers; every other
+    detected change is preserved. The previous ``if/else`` in the Gatherer let
+    the matcher result REPLACE semantic detection entirely, so a message that
+    updates one story *and* asks for something new silently lost the second
+    half of the request.
+    """
+    merged: List[Dict[str, Any]] = []
+    covered: set = set()
+
+    for entry in list(authoritative or []) + list(detected or []):
+        if not isinstance(entry, dict):
+            continue
+        target = normalize_ticket_code(entry.get("target_requirement_id"))
+        key = target or "__project__"
+        if key in covered:
+            continue
+        covered.add(key)
+        merged.append(entry)
+
+    meaningful = [c for c in merged if c.get("change_type") != "NO_MEANINGFUL_CHANGE"]
+    return meaningful or merged
 
 
 def _build_intent_guidance(
@@ -752,16 +773,25 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             # Legacy epic-only payload: preserve the persisted requirement
             # identity (code/title/description) instead of resetting every
             # project to a hardcoded ``REQ-001``.
+            #
+            # A payload that carries NO requirement identity and NO stories must
+            # NOT fabricate a requirement: the empty ``REQ-001`` group it used to
+            # create made a brand-new project look like an existing board, so the
+            # fresh-project renumbering below was skipped. That phantom group was
+            # then dropped for having no stories, leaving the first requirement
+            # the user actually gathered numbered ``REQ-002`` — the reported bug.
             prev_req = _previous_requirement_identity(req_state)
-            req_state["requirements"] = [
-                {
-                    **prev_req,
-                    "requirement_code": prev_req.get("requirement_code") or _default_requirement_code(0),
-                    "title": passed_structured.get("epic_name") or prev_req.get("title", ""),
-                    "description": prev_req.get("description", ""),
-                    "user_stories": passed_structured.get("user_stories", []),
-                }
-            ]
+            legacy_stories = passed_structured.get("user_stories") or []
+            if prev_req or legacy_stories:
+                req_state["requirements"] = [
+                    {
+                        **prev_req,
+                        "requirement_code": prev_req.get("requirement_code") or _default_requirement_code(0),
+                        "title": passed_structured.get("epic_name") or prev_req.get("title", ""),
+                        "description": prev_req.get("description", ""),
+                        "user_stories": legacy_stories,
+                    }
+                ]
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
 
     result = None
@@ -848,59 +878,83 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     matched_req_id = requirement_match.get("matched_requirement_id")
     match_action = requirement_match.get("action")
 
-    semantic_recs = []
+    # Semantic change detection always runs over the UNLOCKED stories (locked
+    # ones are human-verified and must never be proposed for mutation). The
+    # Requirement Matcher's recommendation is MERGED in — not substituted for it,
+    # as the old if/else did — so a message that targets an existing story and
+    # also asks for something new keeps both halves.
+    semantic_recs = await detect_semantic_changes(raw_input, unlocked_user_stories)
     if matched_req_id and match_action in ["UPDATE", "DELETE"]:
         rec_action = "UPDATE" if match_action == "UPDATE" else "ARCHIVE"
-        semantic_recs = [{
+        matcher_rec = {
             "change_type": "MODIFY_REQUIREMENT" if rec_action == "UPDATE" else "REMOVE_REQUIREMENT",
             "target_requirement_id": matched_req_id,
             "confidence": requirement_match.get("confidence", 0.95),
             "reason": requirement_match.get("reason", "Matched via Requirement Matcher Agent."),
             "recommended_action": rec_action
-        }]
-        logger.info(f"Gatherer using Requirement Matcher result: target_id={matched_req_id}, action={rec_action}")
-    else:
-        # Only detect semantic changes on unlocked user stories
-        semantic_recs = await detect_semantic_changes(raw_input, unlocked_user_stories)
+        }
+        semantic_recs = _merge_semantic_recommendations(semantic_recs, [matcher_rec])
+        logger.info(
+            "Gatherer merged Requirement Matcher result (target_id=%s, action=%s) into %d detected change(s).",
+            matched_req_id, rec_action, len(semantic_recs),
+        )
 
     # Check for low confidence changes
-    low_confidence_changes = [c for c in semantic_recs if c.get("confidence", 1.0) < 0.70]
+    low_confidence_changes = [
+        c for c in semantic_recs
+        if coerce_confidence(c.get("confidence"), default=1.0) < SEMANTIC_LOW_CONFIDENCE_THRESHOLD
+    ]
     if low_confidence_changes:
         logger.warning(f"Detected {len(low_confidence_changes)} low confidence semantic changes. Triggering clarification questions.")
 
-        # Generate clarification questions
+        # Generate clarification questions. The detected target (when there is
+        # one) and the model's own confidence are surfaced so the user can answer
+        # with a ticket code instead of a generic "which story?" prompt.
         cqs = []
         for c in low_confidence_changes:
-            q_text = f"I detected a possible change with low confidence: '{c.get('reason', '')}'. Which requirement or user story would you like to update, or is this a new requirement?"
+            confidence = coerce_confidence(c.get("confidence"), default=0.0)
+            target = c.get("target_requirement_id") or "a new requirement"
+            reason = str(c.get("reason", "")).strip() or "the request is ambiguous"
+            q_text = (
+                f"I detected a possible change to **{target}** but my confidence is low "
+                f"({confidence:.2f}): {reason} Please confirm the ticket code to change, "
+                "or tell me if this is a brand-new requirement."
+            )
             cqs.append({
                 "checklist_category": "Semantic Ambiguity",
-                "target_user_story_id": None,
+                "target_user_story_id": c.get("target_requirement_id"),
                 "question_text": q_text,
                 "user_answer": None,
                 "is_resolved": False
             })
 
-        # Append to existing questions
+        # Merge with the still-unresolved questions, skipping the ones already
+        # asked (re-running the gather used to append the same question again).
         existing_cqs = req_state.get("clarification_questions", []) or []
         preserved_cqs = [q for q in existing_cqs if not q.get("is_resolved", False)]
-        combined_cqs = preserved_cqs + cqs
+        known_questions = {str(q.get("question_text", "")).strip() for q in preserved_cqs}
+        new_cqs = [q for q in cqs if q["question_text"] not in known_questions]
 
-        req_state["clarification_questions"] = combined_cqs
+        req_state["clarification_questions"] = preserved_cqs + new_cqs
         req_state["validation_status"] = "invalid"
         req_state["current_workflow_state"] = "gatherer_node"
         req_state["detected_intent"] = detected_intent
 
         # Surface the clarification to the user: previously this branch saved
         # questions to state only, so the chat showed NOTHING and the gather
-        # looked like a silent failure.
-        clarify_msg = "⚠️ **Clarification Needed (Requirements):**\n" + "\n".join(f"- {q['question_text']}" for q in cqs)
-        await ConversationMessageRepository.save_message(
-            project_id=project_id,
-            role="assistant",
-            message=clarify_msg,
-            workflow_state="gatherer_node",
-            intent=detected_intent,
-        )
+        # looked like a silent failure. A repeated (already-asked) question is
+        # not re-posted, so the chat does not fill up with duplicates.
+        if new_cqs:
+            clarify_msg = "⚠️ **Clarification Needed (Requirements):**\n" + "\n".join(f"- {q['question_text']}" for q in new_cqs)
+            await ConversationMessageRepository.save_message(
+                project_id=project_id,
+                role="assistant",
+                message=clarify_msg,
+                workflow_state="gatherer_node",
+                intent=detected_intent,
+            )
+        else:
+            logger.info("Low-confidence semantic changes matched already-asked questions; no duplicate message saved.")
 
         return {
             "requirement_state": req_state,
@@ -1013,7 +1067,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         # merge/reassembly pipeline handles both output shapes.
         prev_identity = _previous_requirement_identity(req_state)
         llm_requirements = [{
-            "requirement_code": prev_identity.get("requirement_code") or "REQ-001",
+            "requirement_code": prev_identity.get("requirement_code") or _default_requirement_code(0),
             "title": epic_name or prev_identity.get("title") or "Structured Requirements",
             "description": prev_identity.get("description", ""),
             "user_stories": result.get("user_stories", []),
@@ -1423,14 +1477,21 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             us for us in passed_structured.get("user_stories", [])
             if not (us.get("is_locked", False))
         ]
-        req_state["requirements"] = [
-            {
-                "requirement_code": "REQ-001",
-                "title": passed_structured.get("epic_name", ""),
-                "description": "",
-                "user_stories": passed_stories
-            }
-        ]
+        # The reloaded database board is authoritative: auditing stories must
+        # never rebuild requirement groups. A legacy FLAT board (no requirement
+        # rows yet) still needs ONE group to hold the audited stories, and it is
+        # only synthesized when there really are stories — never with a hardcoded
+        # code, which is what used to claim the first requirement number and
+        # flatten every project onto a phantom ``REQ-001``.
+        if not (req_state.get("requirements") or []) and passed_stories:
+            req_state["requirements"] = [
+                {
+                    "requirement_code": _default_requirement_code(0),
+                    "title": passed_structured.get("epic_name", ""),
+                    "description": "",
+                    "user_stories": passed_stories
+                }
+            ]
         req_state["user_stories"] = passed_stories
         req_state["version_number"] = passed_structured.get("version", req_state["version_number"])
         all_ac = []

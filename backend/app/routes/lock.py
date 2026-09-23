@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import AuthenticatedUser, require_project_owner
 from app.database import get_db
 from app.repositories import PendingActionRepository, RequirementStateRepository
 from app.schemas import (
@@ -44,6 +45,7 @@ async def lock_artifact(
     artifact_type: str,
     artifact_id: str,
     payload: ArtifactLockRequest,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db)
 ) -> ArtifactLockResponse:
     """
@@ -110,6 +112,7 @@ async def unlock_artifact(
     artifact_type: str,
     artifact_id: str,
     payload: ArtifactLockRequest,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db)
 ) -> ArtifactLockResponse:
     """
@@ -172,6 +175,7 @@ async def get_artifact_lock_status(
     project_id: str,
     artifact_type: str,
     artifact_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db)
 ) -> LockStatusResponse:
     """
@@ -217,7 +221,11 @@ async def get_artifact_lock_status(
 # ==========================================
 
 @router.get("/api/pending-actions/{project_id}", response_model=List[PendingActionResponse], status_code=status.HTTP_200_OK)
-async def get_pending_actions(project_id: str, session: AsyncSession = Depends(get_db)) -> List[PendingActionResponse]:
+async def get_pending_actions(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> List[PendingActionResponse]:
     """
     Retrieve all pending (awaiting-confirmation) actions for a project.
 
@@ -233,7 +241,12 @@ async def get_pending_actions(project_id: str, session: AsyncSession = Depends(g
 
 
 @router.get("/api/pending-actions/{action_id}/impact", response_model=ImpactAnalysisResponse, status_code=status.HTTP_200_OK)
-async def get_action_impact(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ImpactAnalysisResponse:
+async def get_action_impact(
+    action_id: str,
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> ImpactAnalysisResponse:
     """
     Requirement Impact Analysis for a pending merge action (READ-ONLY).
 
@@ -272,7 +285,12 @@ async def get_action_impact(action_id: str, project_id: str, session: AsyncSessi
 
 
 @router.post("/api/confirm-action/{action_id}", response_model=ConfirmActionResponse, status_code=status.HTTP_200_OK)
-async def confirm_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ConfirmActionResponse:
+async def confirm_action(
+    action_id: str,
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> ConfirmActionResponse:
     """
     Confirm a pending merge action, applying its proposed changes to the database.
 
@@ -407,7 +425,12 @@ async def confirm_action(action_id: str, project_id: str, session: AsyncSession 
 
 
 @router.post("/api/cancel-action/{action_id}", response_model=ActionStatusResponse, status_code=status.HTTP_200_OK)
-async def cancel_action(action_id: str, project_id: str, session: AsyncSession = Depends(get_db)) -> ActionStatusResponse:
+async def cancel_action(
+    action_id: str,
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> ActionStatusResponse:
     """
     Cancel (delete) a pending action without applying its proposed changes.
 

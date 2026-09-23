@@ -8,6 +8,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import (
+    AuthenticatedUser,
+    get_current_user,
+    require_project_owner,
+    require_project_owner_flexible,
+)
 from app.database import get_db
 from app.event_manager import event_manager
 from app.repositories import ArtifactEventLogRepository
@@ -27,6 +33,11 @@ router = APIRouter()
 async def stream_project_events(
     project_id: str,
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    # SSE clients are browser EventSources, which cannot send an Authorization
+    # header — they authenticate with the Bearer header when available or a
+    # `?token=` query parameter (see get_current_user_flexible). The caller
+    # must additionally OWN the project.
+    current_user: AuthenticatedUser = Depends(require_project_owner_flexible),
 ):
     """
     Server-Sent Events (SSE) stream for a project.
@@ -97,6 +108,7 @@ async def stream_project_events(
 async def get_recent_events(
     limit: int = 50,
     offset: int = 0,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db)
 ) -> EventListResponse:
     """
@@ -125,6 +137,7 @@ async def get_artifact_events(
     artifact_id: str,
     limit: int = 100,
     offset: int = 0,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db)
 ) -> ArtifactEventListResponse:
     """
@@ -158,6 +171,7 @@ async def get_events_by_action(
     action: str,
     limit: int = 100,
     offset: int = 0,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db)
 ) -> ActionEventListResponse:
     """
@@ -198,6 +212,7 @@ async def get_project_events(
     action: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db)
 ) -> ProjectEventListResponse:
     """

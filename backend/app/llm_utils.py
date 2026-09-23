@@ -15,13 +15,31 @@ def extract_llm_content(response: Any) -> str:
     Handles AIMessage-like objects (.content), plain dictionaries holding a
     "content" key, and providers that nest the answer under additional_kwargs
     (e.g. reasoning models exposing "content" / "final_answer").
+
+    Reasoning models served by LM Studio (e.g. Qwen3.x) frequently place the
+    actual answer inside ``reasoning_content`` while leaving ``content`` EMPTY
+    (verified live: even with ``enable_thinking=false`` the server still emits
+    the JSON answer in reasoning_content). When content is blank, the reasoning
+    text is the only payload available, so it is returned for JSON parsing —
+    returning an empty string here used to make every structured generation
+    fail and fall through to the error path.
     """
     # Priority 1: top-level .content string
     if hasattr(response, "content") and isinstance(response.content, str) and response.content.strip():
         return response.content
-    # Priority 2: dict with "content"
-    if isinstance(response, dict) and "content" in response:
-        return str(response.get("content") or "")
+    # Priority 1b: reasoning models answering in reasoning_content with empty content
+    if hasattr(response, "additional_kwargs"):
+        kwargs = response.additional_kwargs or {}
+        reasoning = kwargs.get("reasoning_content") or kwargs.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
+    # Priority 2: dict with "content" (non-blank) or a reasoning fallback
+    if isinstance(response, dict):
+        if "content" in response and str(response.get("content") or "").strip():
+            return str(response.get("content") or "")
+        reasoning = response.get("reasoning_content") or response.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
     # Priority 3: provider-specific kwargs (reasoning models)
     if hasattr(response, "additional_kwargs"):
         kwargs = response.additional_kwargs or {}
@@ -30,8 +48,13 @@ def extract_llm_content(response: Any) -> str:
         if kwargs.get("final_answer"):
             return str(kwargs["final_answer"])
     # Priority 4: response_metadata
-    if hasattr(response, "response_metadata") and response.response_metadata.get("content"):
-        return str(response.response_metadata["content"])
+    if hasattr(response, "response_metadata") and response.response_metadata:
+        metadata = response.response_metadata
+        if metadata.get("content"):
+            return str(metadata["content"])
+        reasoning = metadata.get("reasoning_content") or metadata.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
     return str(response)
 
 
@@ -67,36 +90,27 @@ async def invoke_llm_structured(
     validate: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> Dict[str, Any]:
     """
-    Invoke the LLM preferring structured output, falling back to raw JSON parsing.
+    Invoke the LLM and return the parsed result as a plain dict.
 
-    Attempt 1: runs ``prompt_template | llm.with_structured_output(schema)`` with
-    ``variables`` and normalizes the result to a dict. When a ``validate`` callback
-    is supplied, the result is only accepted if it returns True.
+    Attempt 1 (primary): ONE raw invocation carrying the full
+    ``format_instructions``; markdown fences are stripped and the content is
+    parsed as JSON. Raw parsing is the primary path because the deployed
+    LM Studio / Qwen build does not honor json-schema enforcement —
+    ``with_structured_output`` fails on EVERY call there (the answer lands in
+    ``reasoning_content``), which silently DOUBLED each generation's latency
+    and token cost before the fallback ever ran. ``extract_llm_content``
+    recovers the answer from ``reasoning_content`` when ``content`` is empty.
 
-    Attempt 2 (if attempt 1 raised or failed validation): runs a raw invocation with
-    the same ``variables`` but the full ``format_instructions``, strips markdown
-    fences from the content, and parses it with ``json.loads``. The same
-    ``validate`` callback is applied.
+    Attempt 2 (fallback): ``prompt_template | llm.with_structured_output(schema)``
+    for providers whose structured-output mode actually works.
+
+    The same optional ``validate`` callback gates both attempts.
 
     Returns the parsed result as a plain dict. Raises ``RuntimeError`` when both
     attempts fail so the caller can apply its own heuristic fallback.
     """
-    # Attempt 1: structured output
-    try:
-        logger.info(f"Attempting .with_structured_output() for {description}.")
-        chain = prompt_template | llm.with_structured_output(schema)
-        parsed_output = await chain.ainvoke(variables)
-        result = normalize_output(parsed_output)
-        if validate is None or validate(result):
-            logger.info(f"Successfully obtained structured output for {description}.")
-            return result
-        logger.warning(f"Structured output for {description} failed validation. Falling back to raw parse.")
-    except Exception as e:
-        logger.warning(
-            f"with_structured_output failed for {description}: {str(e)}. Falling back to raw parse."
-        )
-
-    # Attempt 2: raw invocation + JSON parsing
+    # Attempt 1: single raw invocation + JSON parsing
+    raw_failure = "unknown"
     try:
         raw_variables = {**variables, "format_instructions": format_instructions}
         raw_chain = prompt_template | llm
@@ -106,7 +120,23 @@ async def invoke_llm_structured(
         if validate is None or validate(result):
             logger.info(f"Successfully parsed {description} from raw LLM output.")
             return result
-    except Exception as e2:
-        raise RuntimeError(f"All parsing attempts failed for {description}: {str(e2)}") from e2
+        raw_failure = f"raw output failed validation for {description}"
+        logger.warning(f"{raw_failure}. Falling back to structured output.")
+    except Exception as e:
+        raw_failure = str(e)
+        logger.warning(f"Raw parse failed for {description}: {e}. Falling back to structured output.")
 
-    raise RuntimeError(f"All parsing attempts failed for {description}: result did not pass validation.")
+    # Attempt 2: provider structured output (fallback)
+    try:
+        logger.info(f"Attempting .with_structured_output() for {description}.")
+        chain = prompt_template | llm.with_structured_output(schema)
+        parsed_output = await chain.ainvoke(variables)
+        result = normalize_output(parsed_output)
+        if validate is None or validate(result):
+            logger.info(f"Successfully obtained structured output for {description}.")
+            return result
+        raise RuntimeError(f"structured output failed validation for {description}")
+    except Exception as e2:
+        raise RuntimeError(
+            f"All parsing attempts failed for {description} (raw attempt: {raw_failure}): {str(e2)}"
+        ) from e2

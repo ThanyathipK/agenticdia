@@ -38,6 +38,7 @@ from app.merge_service import (
     normalize_ticket_code,
 )
 from app.prompt_loader import load_prompt
+from app.requirement_codes import next_requirement_code
 from app.schemas import GatheredRequirements
 
 logger = logging.getLogger("app.document_processor")
@@ -269,7 +270,10 @@ def accumulate_document_draft(chunk_results: List[Dict[str, Any]]) -> Dict[str, 
         if chunk_epic:
             epic_name = chunk_epic
         for req in chunk.get("requirements") or []:
-            code = (req.get("requirement_code") or "").strip() or "REQ-001"
+            # A chunk that omits the code gets the next code of the sequence
+            # being accumulated (REQ-001 for the first group) instead of a
+            # hardcoded code that would collide with every other codeless group.
+            code = (req.get("requirement_code") or "").strip() or next_requirement_code(req_map)
             if code not in req_map:
                 req_map[code] = {
                     "requirement_code": code,
@@ -343,14 +347,14 @@ def build_merge_preview(
     # the freshly extracted stories too.
     existing_by_code: Dict[str, Dict[str, Any]] = {}
     for r in existing_requirements:
-        code = (r.get("requirement_code") or "").strip() or "REQ-001"
+        code = (r.get("requirement_code") or "").strip() or next_requirement_code(existing_by_code)
         existing_by_code.setdefault(code, dict(r))
         existing_by_code[code]["user_stories"] = list(
             existing_by_code[code].get("user_stories") or []
         )
 
     for doc_req in doc_draft.get("requirements", []):
-        code = (doc_req.get("requirement_code") or "").strip() or "REQ-001"
+        code = (doc_req.get("requirement_code") or "").strip() or next_requirement_code(existing_by_code)
         target = existing_by_code.get(code)
         if target is None:
             target = {

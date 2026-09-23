@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AuditResultModel, RequirementModel
 from app.repositories.base import as_uuid, serialize_audit_result
+from app.requirement_codes import UNASSIGNED_REQUIREMENT_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class AuditResultRepository:
             if not req:
                 req = RequirementModel(
                     project_id=pid,
-                    requirement_code="REQ-000",
+                    requirement_code=UNASSIGNED_REQUIREMENT_CODE,
                     title="Untitled Requirement",
                     status="active",
                     is_locked=False,

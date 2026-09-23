@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.lock_service import LockService
 from app.models import RequirementModel, UserStoryModel
 from app.repositories.base import as_uuid, serialize_user_story
+from app.requirement_codes import UNASSIGNED_REQUIREMENT_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class UserStoryRepository:
             if not req:
                 req = RequirementModel(
                     project_id=pid,
-                    requirement_code="REQ-000",
+                    requirement_code=UNASSIGNED_REQUIREMENT_CODE,
                     title="Untitled Requirement",
                     status="active",
                     is_locked=False,

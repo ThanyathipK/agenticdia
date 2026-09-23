@@ -7,8 +7,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import (
+    AuthenticatedUser,
+    get_current_user,
+    require_project_owner,
+    verify_project_access,
+)
 from app.config import settings
 from app.database import get_db
+from app.llm_client import (
+    LMStudioGatewayError,
+    LMStudioOutputParsingError,
+    LMStudioUnavailableError,
+)
 from app.rate_limit import rate_limit_dependency
 from app.workflow_cancellation import workflow_cancellations
 from app.input_validation import validate_text_budget, validate_body_budget
@@ -17,6 +28,7 @@ from app.repositories import (
     RequirementStateRepository,
     ConversationMessageRepository,
     PendingActionRepository,
+    ClarificationQuestionRepository,
 )
 from app.schemas import (
     ProcessRequirementsRequest,
@@ -36,6 +48,7 @@ from app.schemas import (
 )
 from app.agents import prd_workflow
 from app.event_manager import event_manager
+from app.requirement_codes import default_requirement_code
 
 logger = logging.getLogger("app.routes.requirements")
 
@@ -64,7 +77,7 @@ def _ensure_requirement_ids(reqs: Any) -> List[Dict[str, Any]]:
         if not item.get("id"):
             item["id"] = item.get("requirement_code") or str(uuid4())
         if not item.get("requirement_code"):
-            item["requirement_code"] = f"REQ-{len(safe) + 1:03d}"
+            item["requirement_code"] = default_requirement_code(len(safe))
         if item.get("title") is None:
             item["title"] = ""
         safe.append(item)
@@ -76,7 +89,11 @@ def _ensure_requirement_ids(reqs: Any) -> List[Dict[str, Any]]:
 # ==========================================
 
 @router.get("/api/project/{project_id}/requirements", response_model=List[RequirementDetail], status_code=status.HTTP_200_OK)
-async def get_project_requirements(project_id: str, session: AsyncSession = Depends(get_db)) -> List[RequirementDetail]:
+async def get_project_requirements(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> List[RequirementDetail]:
     """
     Retrieve all requirements for a project, including lock status.
 
@@ -100,7 +117,12 @@ async def get_project_requirements(project_id: str, session: AsyncSession = Depe
 
 
 @router.get("/api/project/{project_id}/requirements/{requirement_id}", response_model=RequirementDetail, status_code=status.HTTP_200_OK)
-async def get_requirement(project_id: str, requirement_id: str, session: AsyncSession = Depends(get_db)) -> RequirementDetail:
+async def get_requirement(
+    project_id: str,
+    requirement_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
+) -> RequirementDetail:
     """
     Retrieve a single requirement by ID, including lock status.
 
@@ -136,6 +158,7 @@ async def lock_requirement(
     project_id: str,
     requirement_id: str,
     payload: RequirementLockRequest,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db)
 ) -> RequirementLockResponse:
     """
@@ -181,6 +204,7 @@ async def unlock_requirement(
     project_id: str,
     requirement_id: str,
     payload: RequirementLockRequest,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db)
 ) -> RequirementLockResponse:
     """
@@ -229,7 +253,12 @@ async def unlock_requirement(
 # ==========================================
 
 @router.post("/api/audit/respond/{question_id}", response_model=AuditRespondResponse, status_code=status.HTTP_200_OK)
-async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubmit, db: AsyncSession = Depends(get_db)) -> AuditRespondResponse:
+async def post_audit_resolution_reply(
+    question_id: UUID,
+    payload: UserAnswerSubmit,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> AuditRespondResponse:
     """
     Submits official BA/PO answer to close an active compliance query roadblock.
 
@@ -238,43 +267,75 @@ async def post_audit_resolution_reply(question_id: UUID, payload: UserAnswerSubm
     Args:
         question_id: Clarification-question UUID.
         payload: The official stakeholder resolution text.
-        db: Active asynchronous database session.
+        session: Active asynchronous database session.
 
     Returns:
         AuditRespondResponse: Confirmation with the resolution timestamp.
 
     Raises:
-        HTTPException: 404 if the clarification question does not exist.
+        HTTPException: 404 if the clarification question does not exist; 403 if
+            the caller does not own the question's project; 409 if the question
+            is locked.
     """
-    from sqlalchemy import select
-    from app.models import ClarificationQuestionModel
     from datetime import datetime, timezone
 
     logger.info(f"Updating clarification question {question_id} state with resolution.")
 
-    db_query = select(ClarificationQuestionModel).where(ClarificationQuestionModel.id == question_id)
-    result = await db.execute(db_query)
-    question = result.scalar_one_or_none()
-    if not question:
+    # AUTHZ: the path carries ONLY the question id, so the owning project is
+    # resolved first and the caller must own it. Writing by primary key alone
+    # let any authenticated user resolve — and overwrite the answer of — any
+    # other project's compliance question (the same IDOR class fixed on the
+    # project-scoped routes). An unknown id is a 404, never a 403, so the
+    # endpoint does not leak which question ids exist.
+    project_id = await ClarificationQuestionRepository.get_project_id(str(question_id), session)
+    if project_id is None:
+        raise HTTPException(status_code=404, detail=f"Clarification question {question_id} not found")
+    await verify_project_access(str(project_id), current_user, session)
+
+    # Project-scoped write through the repository: it resolves the question
+    # through its own project (audit_result -> requirement) and honours the
+    # artifact lock, instead of a bare ORM update by PK.
+    from app.lock_service import ArtifactLockError
+
+    try:
+        updated = await ClarificationQuestionRepository.update(
+            str(question_id),
+            str(project_id),
+            {"user_answer": payload.answer_text, "is_resolved": True},
+            session,
+        )
+    except ArtifactLockError as e:
+        # Locked questions must be unlocked before they can be answered. The
+        # repository's lock gate raises a domain error, not an HTTP one.
+        raise HTTPException(status_code=409, detail=str(e))
+    if updated is None:
+        # The question vanished between the ownership lookup and the write.
         raise HTTPException(status_code=404, detail=f"Clarification question {question_id} not found")
 
-    question.user_answer = payload.answer_text
-    question.is_resolved = True
-    await db.commit()
-    await db.refresh(question)
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    await event_manager.publish(str(project_id), "clarification_answered", {
+        "project_id": str(project_id),
+        "question_id": str(question_id),
+        "is_resolved": True,
+    })
 
     logger.info(f"Clarification question {question_id} resolved successfully.")
 
     return {
         "status": "success",
         "message": f"Answer to clarification question {question_id} has been logged and registered.",
-        "resolved_at": question.updated_at.isoformat() if question.updated_at else datetime.now(timezone.utc).isoformat(),
-        "is_resolved": question.is_resolved
+        "resolved_at": updated.get("updated_at") or datetime.now(timezone.utc).isoformat(),
+        "is_resolved": bool(updated.get("is_resolved")),
     }
 
 
 @router.post("/api/clarification/submit", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
-async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
+async def post_clarification_submit(payload: Dict[str, Any], current_user: AuthenticatedUser = Depends(get_current_user), session: AsyncSession = Depends(get_db)) -> RequirementStateResponse:
     """
     Submits answers to clarification questions, runs Auditor compliance check,
     and updates workflow state.
@@ -300,6 +361,10 @@ async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSessi
         UUID(project_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    # AUTHZ: the caller must own the project before anything is read/written.
+    await verify_project_access(str(project_id), current_user, session)
+
     try:
         lock_info = await LockService.get_lock_status("project", project_id, session, project_id=project_id)
         LockService.raise_if_locked("project", project_id, lock_info)
@@ -342,6 +407,7 @@ async def post_clarification_submit(payload: Dict[str, Any], session: AsyncSessi
 @router.post("/api/process-requirements/cancel", status_code=status.HTTP_200_OK)
 def post_cancel_process_requirements(
     project_id: str = Query(..., description="Project whose in-flight generation should be terminated."),
+    current_user: AuthenticatedUser = Depends(require_project_owner),
 ) -> Dict[str, Any]:
     """
     Cancel an in-flight multi-agent generation for a project (Stop button).
@@ -376,6 +442,7 @@ def post_cancel_process_requirements(
 @router.post("/api/process-requirements", response_model=ProcessRequirementsResponse, status_code=status.HTTP_200_OK)
 async def post_process_requirements(
     request: ProcessRequirementsRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(
         rate_limit_dependency(
@@ -392,6 +459,12 @@ async def post_process_requirements(
     ``{"status": "cancelled"}`` response and NO results are persisted. See
     :func:`_process_requirements_pipeline` for the full pipeline behavior.
     """
+    # AUTHZ: the caller must own the project (which must exist) before the
+    # workflow registers, reads, or persists anything for it. This also closes
+    # the orphaned-conversation-rows hole: a bogus project_id is a 404 here,
+    # never a half-written conversation record.
+    await verify_project_access(str(request.project_id), current_user, session)
+
     current_task = asyncio.current_task()
     if current_task is not None:
         workflow_cancellations.register(str(request.project_id), current_task)
@@ -638,6 +711,13 @@ async def _process_requirements_pipeline(
         for us in reqs.get("user_stories", []):
             all_ac.extend(us.get("acceptance_criteria", []))
 
+        # Only synthesize a requirement when the payload actually carries user
+        # stories. An epic-name-only payload (e.g. the frontend's placeholder
+        # "Structured Requirements Draft" on a brand-new project) must leave the
+        # board EMPTY so the requirement sequence starts at REQ-001 — a
+        # fabricated requirement used to claim REQ-001 and push the first real
+        # requirement to REQ-002.
+        legacy_stories = reqs.get("user_stories", []) or []
         req_state = {
             "project_id": request.project_id,
             # The authoritative project name lives in the projects table;
@@ -645,15 +725,15 @@ async def _process_requirements_pipeline(
             "project_name": "",
             "requirements": [
                 {
-                    "requirement_code": "REQ-001",
+                    "requirement_code": default_requirement_code(0),
                     "title": reqs.get("epic_name", ""),
                     "description": "",
-                    "user_stories": reqs.get("user_stories", [])
+                    "user_stories": legacy_stories
                 }
-            ] if reqs else [],
+            ] if legacy_stories else [],
             "business_goals": [],
             "actors": [],
-            "user_stories": reqs.get("user_stories", []),
+            "user_stories": legacy_stories,
             "acceptance_criteria": all_ac,
             "clarification_questions": [],
             "validation_status": "pending",
@@ -682,19 +762,27 @@ async def _process_requirements_pipeline(
                 # previous requirement record: a bare synthetic dict without
                 # the REQUIRED ``id`` field previously failed RequirementDetail
                 # response validation -> opaque HTTP 500 on PRD generation.
+                #
+                # Nothing is fabricated when there is neither a previous
+                # requirement record nor any story to attach: an epic-name-only
+                # payload must leave the board EMPTY so the requirement sequence
+                # still starts at REQ-001 (a fabricated REQ-001 used to push the
+                # first real requirement to REQ-002).
                 previous_reqs = [r for r in (req_state.get("requirements", []) or []) if isinstance(r, dict)]
                 prev_matched = previous_reqs[0] if previous_reqs else {}
-                req_state["requirements"] = [
-                    {
-                        **prev_matched,
-                        # Preserve the stored requirement code; only synthesize
-                        # one when no prior requirement record exists at all.
-                        "requirement_code": prev_matched.get("requirement_code") or "REQ-001",
-                        "title": reqs.get("epic_name") or prev_matched.get("title", ""),
-                        "description": prev_matched.get("description", ""),
-                        "user_stories": reqs.get("user_stories", [])
-                    }
-                ]
+                legacy_stories = reqs.get("user_stories", []) or []
+                if prev_matched or legacy_stories:
+                    req_state["requirements"] = [
+                        {
+                            **prev_matched,
+                            # Preserve the stored requirement code; only synthesize
+                            # one when no prior requirement record exists at all.
+                            "requirement_code": prev_matched.get("requirement_code") or default_requirement_code(0),
+                            "title": reqs.get("epic_name") or prev_matched.get("title", ""),
+                            "description": prev_matched.get("description", ""),
+                            "user_stories": legacy_stories
+                        }
+                    ]
             req_state["user_stories"] = reqs.get("user_stories", [])
             req_state["acceptance_criteria"] = all_ac
             if "version" in reqs:
@@ -842,6 +930,33 @@ async def _process_requirements_pipeline(
             "pending_merge": True,
             "pending_action_id": pending_action_id
         }
+    except LMStudioUnavailableError as e:
+        logger.error(f"LM Studio unreachable during workflow for project {request.project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The local inference gateway (LM Studio) is unreachable. Start LM Studio with a loaded model and retry the generation.",
+        )
+    except LMStudioGatewayError as e:
+        logger.error(f"LM Studio gateway error during workflow for project {request.project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The local inference gateway rejected the generation request. Retry once the model is responsive.",
+        )
+    except LMStudioOutputParsingError as e:
+        logger.error(f"LM Studio returned an unreadable payload for project {request.project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The model returned an unreadable response. Please retry the generation.",
+        )
+    except RuntimeError as e:
+        # invoke_llm_structured exhausts both of its parse attempts (e.g. a
+        # reasoning model burning its whole token budget on thinking content).
+        # That is a retryable model-output failure, not a server bug — 503, not 500.
+        logger.error(f"Workflow produced no usable structured output for project {request.project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The model failed to produce a valid structured response. Please retry the generation.",
+        )
     except Exception as e:
         logger.error(f"Multi-agent workflow execution failed for project {request.project_id}: {str(e)}")
         raise HTTPException(
@@ -875,6 +990,7 @@ async def _load_current_stories(project_id: str, db: AsyncSession) -> List[Dict[
 @router.post("/api/workflow-router", response_model=WorkflowRoutingResult, status_code=status.HTTP_200_OK)
 async def post_workflow_router(
     payload: WorkflowRouterRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     _rate_limit: None = Depends(
         rate_limit_dependency(
             "workflow", settings.RATE_LIMIT_WORKFLOW_LIMIT, settings.RATE_LIMIT_WORKFLOW_WINDOW
@@ -906,6 +1022,7 @@ async def post_workflow_router(
 @router.post("/api/intent-detector", response_model=RequirementIntentDetectionResult, status_code=status.HTTP_200_OK)
 async def post_intent_detector(
     payload: IntentDetectorRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(
         rate_limit_dependency(
@@ -935,6 +1052,11 @@ async def post_intent_detector(
 
     current_stories = []
     if payload.project_id:
+        # AUTHZ: project stories are tenant data (titles/descriptions that get
+        # injected into the LLM prompt). The caller must own the project before
+        # they are loaded — otherwise any authenticated user could probe another
+        # project's story content by passing its id here.
+        await verify_project_access(str(payload.project_id), current_user, db)
         current_stories = await _load_current_stories(payload.project_id, db)
 
     result = await detect_requirement_intent(payload.message, current_stories)
@@ -944,6 +1066,7 @@ async def post_intent_detector(
 @router.post("/api/requirement-matcher", response_model=RequirementMatcherResult, status_code=status.HTTP_200_OK)
 async def post_requirement_matcher(
     payload: RequirementMatcherRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(
         rate_limit_dependency(
@@ -977,6 +1100,9 @@ async def post_requirement_matcher(
 
     current_stories = []
     if payload.project_id:
+        # AUTHZ: same tenant-data gate as the intent detector — the caller must
+        # own the project before its stories are loaded for matching.
+        await verify_project_access(str(payload.project_id), current_user, db)
         current_stories = await _load_current_stories(payload.project_id, db)
 
     intent = payload.detected_intent

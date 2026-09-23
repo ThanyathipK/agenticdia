@@ -27,6 +27,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import AuthenticatedUser, require_project_owner
 from app.config import settings
 from app.database import get_db
 from app.document_processor import (
@@ -223,6 +224,7 @@ def _convert_to_markdown(raw: bytes, original_format: str) -> str:
 async def upload_document(
     project_id: str,
     file: UploadFile = File(..., description="The document file (.docx/.pdf/.md/.txt)."),
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Upload a document into the project's knowledge base.
@@ -329,6 +331,7 @@ async def upload_document(
 )
 async def list_documents(
     project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> List[Dict[str, Any]]:
     """List every uploaded document for a project (metadata only, newest first).
@@ -356,6 +359,7 @@ async def list_documents(
 async def get_document_markdown(
     project_id: str,
     document_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Return the FULL canonical markdown for a document.
@@ -395,6 +399,7 @@ async def get_document_markdown(
 async def delete_document(
     project_id: str,
     document_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Permanently remove an uploaded document from the project's knowledge base.
@@ -606,6 +611,7 @@ async def _run_extraction_by_chunks(
 async def process_document(
     project_id: str,
     document_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(
         rate_limit_dependency(

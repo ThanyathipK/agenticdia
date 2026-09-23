@@ -12,7 +12,7 @@ import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -416,14 +416,19 @@ class UserMinimalResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def require_project_owner(
+async def verify_project_access(
     project_id: str,
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    session: AsyncSession = Depends(get_db),
-) -> AuthenticatedUser:
+    current_user: AuthenticatedUser,
+    session: AsyncSession,
+) -> None:
     """
-    Dependency that verifies the current user owns the specified project.
-    Raises 403 if the user does not own the project.
+    Core ownership gate shared by every project-scoped route.
+
+    Raises 404 when ``project_id`` is malformed or the project does not exist
+    (never leaks whether an id belongs to someone else), and 403 when the
+    authenticated user does not own the project. Routes whose project id comes
+    from the request BODY (which a FastAPI ``Depends`` cannot reach) call this
+    directly; path/query-scoped routes use :func:`require_project_owner`.
     """
     try:
         project_key = as_uuid(project_id)
@@ -437,17 +442,82 @@ async def require_project_owner(
         select(ProjectModel).where(ProjectModel.id == project_key)
     )
     project = result.scalar_one_or_none()
-    
+
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
         )
-    
+
     if str(project.user_id) != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to access this project",
         )
-    
+
+
+async def require_project_owner(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> AuthenticatedUser:
+    """
+    Dependency that verifies the current user owns the specified project.
+    ``project_id`` is resolved from the route path (or query string) by name.
+    Raises 403 if the user does not own the project; 404 if it does not exist.
+    """
+    await verify_project_access(project_id, current_user, session)
+    return current_user
+
+
+async def _resolve_user_from_raw_token(
+    raw_token: str, session: AsyncSession
+) -> AuthenticatedUser:
+    """Verify a raw JWT string and load its user (401 on any failure)."""
+    token_data = verify_token(raw_token)
+    user = await UserRepository.get_by_id(token_data.user_id, session)
+    if user is None:
+        logger.warning("Accepted token for unknown user id: %s", token_data.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return to_authenticated_user(user)
+
+
+async def get_current_user_flexible(
+    token: Optional[str] = Query(
+        default=None,
+        description="JWT for clients that cannot send headers (browser EventSource).",
+    ),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(
+        HTTPBearer(auto_error=False)
+    ),
+    session: AsyncSession = Depends(get_db),
+) -> AuthenticatedUser:
+    """
+    Like :func:`get_current_user`, but additionally accepts the JWT as a
+    ``?token=`` query parameter. Browser ``EventSource`` cannot attach an
+    Authorization header, so the SSE stream authenticates through the query
+    string; every other client keeps using the standard Bearer header.
+    """
+    if credentials is not None:
+        return await _resolve_user_from_raw_token(credentials.credentials, session)
+    if token:
+        return await _resolve_user_from_raw_token(token, session)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def require_project_owner_flexible(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user_flexible),
+    session: AsyncSession = Depends(get_db),
+) -> AuthenticatedUser:
+    """Project-ownership gate for the SSE route (Bearer header OR ?token=)."""
+    await verify_project_access(project_id, current_user, session)
     return current_user

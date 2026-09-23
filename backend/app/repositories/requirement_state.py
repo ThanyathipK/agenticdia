@@ -27,6 +27,7 @@ from app.repositories.clarification_question import ClarificationQuestionReposit
 from app.repositories.epic import EpicRepository
 from app.repositories.prd import PRDDocumentRepository, PRDVersionRepository
 from app.repositories.user_story import UserStoryRepository
+from app.requirement_codes import UNASSIGNED_REQUIREMENT_CODE, default_requirement_code
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +285,7 @@ class RequirementStateRepository:
                     legacy_epic = reqs_data.get("epic_name", "")
                     legacy_stories = reqs_data.get("user_stories", []) if "user_stories" in reqs_data else updates.get("user_stories", [])
                     req_items = [{
-                        "requirement_code": "REQ-001",
+                        "requirement_code": default_requirement_code(0),
                         "title": legacy_epic or updates.get("project_name", "Default Requirement"),
                         "description": "",
                         "user_stories": legacy_stories if isinstance(legacy_stories, list) else []
@@ -292,7 +293,7 @@ class RequirementStateRepository:
             elif "user_stories" in updates and updates["user_stories"] is not None:
                 # Legacy flat user_stories fallback
                 req_items = [{
-                    "requirement_code": "REQ-001",
+                    "requirement_code": default_requirement_code(0),
                     "title": "Structured Requirements",
                     "description": "",
                     "user_stories": updates["user_stories"] if isinstance(updates["user_stories"], list) else []
@@ -300,7 +301,7 @@ class RequirementStateRepository:
 
             if not req_items:
                 req_items = [{
-                    "requirement_code": "REQ-001",
+                    "requirement_code": default_requirement_code(0),
                     "title": "Default Requirement",
                     "description": "",
                     "user_stories": []
@@ -353,7 +354,7 @@ class RequirementStateRepository:
             touched_req_ids = set()
 
             for req_item in req_items:
-                req_code = req_item.get("requirement_code", "REQ-000")
+                req_code = req_item.get("requirement_code", UNASSIGNED_REQUIREMENT_CODE)
                 req_title = req_item.get("title", "Untitled Requirement")
                 req_desc = req_item.get("description", "")
                 stories = req_item.get("user_stories", [])

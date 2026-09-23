@@ -15,7 +15,8 @@ from app.models import (
     RequirementModel,
     UserStoryModel,
 )
-from app.repositories.base import as_uuid, serialize_clarification_question
+from app.repositories.base import as_uuid, dt_iso, serialize_clarification_question
+from app.requirement_codes import UNASSIGNED_REQUIREMENT_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class ClarificationQuestionRepository:
             if not req:
                 req = RequirementModel(
                     project_id=pid,
-                    requirement_code="REQ-000",
+                    requirement_code=UNASSIGNED_REQUIREMENT_CODE,
                     title="Untitled Requirement",
                     status="active",
                     is_locked=False,
@@ -179,6 +180,37 @@ class ClarificationQuestionRepository:
         return out
 
     @staticmethod
+    async def get_project_id(question_id: str, session: AsyncSession) -> Optional[str]:
+        """
+        Resolve the project that owns a clarification question.
+
+        Routes that receive ONLY a ``question_id`` (e.g.
+        ``POST /api/audit/respond/{question_id}``) cannot express ownership as a
+        ``Depends`` — the project id is not in the path. They use this lookup to
+        find the owning project and then gate on it. The join runs
+        ``clarification_questions -> audit_results -> requirements``, so a
+        question is only ever reachable through its own project.
+
+        Args:
+            question_id: Clarification-question UUID (string or UUID).
+            session: Active database session.
+
+        Returns:
+            The owning project id as a string, or None when the question does
+            not exist (also covers a dangling audit/requirement row).
+        """
+        cqid = as_uuid(question_id)
+        stmt = select(RequirementModel.project_id).join(
+            AuditResultModel, AuditResultModel.requirement_id == RequirementModel.id
+        ).join(
+            ClarificationQuestionModel,
+            ClarificationQuestionModel.audit_result_id == AuditResultModel.id,
+        ).where(ClarificationQuestionModel.id == cqid)
+        result = await session.execute(stmt)
+        project_id = result.scalars().first()
+        return str(project_id) if project_id else None
+
+    @staticmethod
     async def update(id_val: str, project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Optional[Dict[str, Any]]:
         cqid = as_uuid(id_val)
         pid = as_uuid(project_id)
@@ -227,7 +259,13 @@ class ClarificationQuestionRepository:
 
             ret_story_id = await ClarificationQuestionRepository._resolve_story_code(session, cq.target_user_story_id)
 
-            return serialize_clarification_question(cq, pid, ret_story_id)
+            record = serialize_clarification_question(cq, pid, ret_story_id)
+            # The write timestamp is reported by the caller (POST
+            # /api/audit/respond returns ``resolved_at``). ``serialize_...`` is
+            # shared with the read paths, so it is attached here instead of
+            # leaking into every clarification-question payload.
+            record["updated_at"] = dt_iso(cq.updated_at)
+            return record
         return None
 
     @staticmethod
