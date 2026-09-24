@@ -93,6 +93,12 @@ class RegisterResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# AUTH 1.7 — FastAPI route: POST /api/auth/login (router mounted in app/main.py).
+#            Layer chain: axios AUTH 1.4 → [this handler] → service AUTH 1.7.1 →
+#            repository AUTH 1.7.1.1 → bcrypt AUTH 1.7.1.3 → JWT AUTH 1.7.3 →
+#            LoginResponse AUTH 1.7.4 → frontend persistence AUTH 1.5.
+#            Deliberately has NO auth dependency: obtaining a token is the point.
+#            `session` is the request-scoped DB session (app/database.py get_db).
 @router.post("/api/auth/login", response_model=LoginResponse, status_code=status.HTTP_200_OK)
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -109,8 +115,17 @@ async def login(
     Raises:
         HTTPException 401: If credentials are invalid
     """
+    # AUTH 1.7.1 — Service layer (app/auth.py authenticate_user): users-table
+    #              lookup + credential check. Every failure raises 401 "Invalid
+    #              credentials" — unknown account (1.7.1.1), unprovisioned
+    #              password (1.7.1.2) and wrong password (1.7.1.3) are
+    #              indistinguishable to the caller by design.
     user = await authenticate_user(form_data.username, form_data.password, session)
 
+    # AUTH 1.7.3 — JWT issuance (app/auth.py create_access_token): HS256, signed
+    #              with JWT_SECRET_KEY, TTL = JWT_EXPIRATION_MINUTES. Stateless —
+    #              nothing is written to the DB, which is why AUTH 4.4 cannot
+    #              revoke it server-side.
     access_token = create_access_token(
         user_id=str(user.id),
         email=user.email,
@@ -119,6 +134,8 @@ async def login(
     
     logger.info(f"User logged in: {user.email} (role: {user.role})")
     
+    # AUTH 1.7.4 — Response: access_token + public user projection (no
+    #              password_hash) → parsed by AUTH 1.4, persisted by AUTH 1.5.
     return LoginResponse(
         access_token=access_token,
         user=UserResponse(
@@ -135,6 +152,11 @@ async def login(
 # ---------------------------------------------------------------------------
 
 
+# AUTH 2.3 — FastAPI route: GET /api/auth/me — the client's session-validity
+#            probe, called by AUTH 2.2 on mount. Authorization happens entirely in
+#            the dependency AUTH 7.1 (Bearer → verify_token → users-table read),
+#            so a token for a deleted account never reaches this body; the 401 it
+#            raises is what triggers AUTH 2.4.
 @router.get("/api/auth/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
 async def read_current_user(
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -154,6 +176,11 @@ async def read_current_user(
     )
 
 
+# AUTH 3.3 — FastAPI route: GET /api/auth/config. Deliberately anonymous (no
+#            get_current_user dependency): the client must know whether signup is
+#            available BEFORE it holds a token. Consumed by AUTH 3.2 → AUTH 3.1
+#            (gates the sign-up tab of AUTH 1.1.1) and mirrors the server-side
+#            gate enforced in AUTH 6.3.1.
 @router.get("/api/auth/config", status_code=status.HTTP_200_OK)
 async def auth_config():
     """Public auth capabilities, so the UI can hide the sign-up form.
@@ -172,6 +199,10 @@ async def auth_config():
 # ---------------------------------------------------------------------------
 
 
+# AUTH 4.4 — FastAPI route: POST /api/auth/logout. The AUTH 7.1 dependency only
+#            identifies the caller so the event can be logged — no server state
+#            changes (the JWT is stateless, AUTH 1.7.3), so the sign-out that
+#            actually takes effect is the client-side AUTH 4.3.
 @router.post("/api/auth/logout", status_code=status.HTTP_200_OK)
 async def logout(
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -191,6 +222,15 @@ async def logout(
 # ---------------------------------------------------------------------------
 
 
+# AUTH 5.1 — FastAPI route: POST /api/auth/change-password. Authenticated through
+#            AUTH 7.1, and the target account is `current_user.id` from the
+#            verified token — never a body field — so a caller can only change
+#            its OWN password.
+#            DISCREPANCY vs. the expected end-to-end flow: there is NO frontend
+#            caller. src/api/client.ts exposes no authChangePassword helper and no
+#            component invokes this route (src/api/types.ts only carries the
+#            response type), so the flow ends at AUTH 5.1.3 for API/test clients
+#            and has no UI surface yet.
 @router.post(
     "/api/auth/change-password",
     response_model=PasswordChangeResponse,
@@ -202,12 +242,17 @@ async def change_password_endpoint(
     session: AsyncSession = Depends(get_db),
 ):
     """Change the current user's password with old password verification."""
+    # AUTH 5.1.1 — Validation branch: 400 before any hashing/DB work (mirrors the
+    #              MIN_PASSWORD_LENGTH check the register route does in AUTH 6.3.2).
     if len(password_request.new_password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters",
         )
 
+    # AUTH 5.1.2 — Service layer: app/auth.py change_password (AUTH 5.2) re-verifies
+    #              the old password and rewrites the bcrypt hash; it raises 400 for
+    #              a wrong old password, so no new token is issued on success.
     await auth_change_password(
         user_id=current_user.id,
         old_password=password_request.old_password,
@@ -217,6 +262,8 @@ async def change_password_endpoint(
     
     logger.info(f"Password changed for user: {current_user.email}")
     
+    # AUTH 5.1.3 — Response: message only (never a token), so already-issued JWTs
+    #              stay valid until they expire.
     return PasswordChangeResponse(message="Password changed successfully")
 
 
@@ -225,6 +272,12 @@ async def change_password_endpoint(
 # ---------------------------------------------------------------------------
 
 
+# AUTH 6.3 — FastAPI route: POST /api/auth/register. Anonymous by design; the
+#            deployment gate below (6.3.1) is the only thing keeping it closed,
+#            and AUTH 3.3 mirrors that flag to the UI.
+#            Layer chain: useAuth.register AUTH 6.1 → api.authRegister AUTH 6.2
+#            → [this handler] → UserRepository AUTH 6.3.4/6.3.5 → users table →
+#            RegisterResponse AUTH 6.3.6 → frontend AUTH 6.4 (login chaining).
 @router.post(
     "/api/auth/register",
     response_model=RegisterResponse,
@@ -246,18 +299,24 @@ async def register(
         HTTPException 403: If self-service signup is disabled.
         HTTPException 409: If an account with this email already exists.
     """
+    # AUTH 6.3.1 — Deployment gate: 403 when SIGNUP_ENABLED=false, so a shared or
+    #              production instance cannot be given new accounts anonymously.
     if not settings.SIGNUP_ENABLED:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Self-service registration is disabled",
         )
 
+    # AUTH 6.3.2 — Payload validation branch: minimum password length → 400 (the
+    #              client mirrors it in AUTH 1.1.1, but the server is the gate).
     if len(register_request.password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters",
         )
 
+    # AUTH 6.3.3 — Role validation branch: only the canonical VALID_ROLES are
+    #              accepted → 400; free-form strings never reach the users table.
     # ROLE VALIDATION: only the canonical roles are accepted. Whitespace is
     # tolerated on input but the stored value is the exact canonical string.
     requested_role = register_request.role.strip()
@@ -267,6 +326,9 @@ async def register(
             detail="Invalid role. Allowed roles: " + ", ".join(sorted(VALID_ROLES)),
         )
 
+    # AUTH 6.3.4 — Repository READ: canonicalize the email and check uniqueness
+    #              case-insensitively (UserRepository.email_exists →
+    #              get_by_email, AUTH 1.7.1.1 helper) → 409 on a duplicate.
     email = normalize_email(str(register_request.email))
 
     if await UserRepository.email_exists(email, session):
@@ -276,6 +338,9 @@ async def register(
             detail="A user with this email already exists",
         )
 
+    # AUTH 6.3.5 — WRITE path: bcrypt hash (app/auth.py get_password_hash) then
+    #              UserRepository.create_user (INSERT) + commit — the only place
+    #              in the AUTH namespace that adds a users row.
     new_user = await UserRepository.create_user(
         email=email,
         full_name=register_request.full_name.strip(),
@@ -288,6 +353,9 @@ async def register(
 
     logger.info(f"New user registered: {new_user.email}")
     
+    # AUTH 6.3.6 — Response: 201 + the created user, and deliberately NO token —
+    #              which is exactly why the frontend chains into the LOGIN flow
+    #              (AUTH 6.4 → AUTH 1.3.1) instead of trusting this response.
     return RegisterResponse(
         message="User registered successfully",
         user=UserResponse(

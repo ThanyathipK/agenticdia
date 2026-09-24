@@ -150,6 +150,13 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   };
 
   // Handle Raw Conversational Input Submission
+  // CHAT 1.2 — Frontend chat entry: one handler serves the composer, the send
+  // button and the empty-state suggestion chips (CHAT 1.1). Layer chain:
+  //   1.2 → 1.3 (api.processRequirements) → route 2.1 → intent 2.2 →
+  //   GENERAL_CHAT branch 2.3 → 1.4 (UI branch on the returned intent).
+  // Local guards: no selected project → inline warning bubble (no request);
+  // blank input → no-op. The optimistic user bubble is appended BEFORE the
+  // request, and the AbortController is what the Stop button cancels.
   const handleSendMessage = async (textToSend?: string) => {
     if (!deps.projectId) {
       store.setMessages(prev => [...prev, {
@@ -188,15 +195,26 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       // The backend handles intent detection internally and routes accordingly:
       //   - GENERAL_CHAT: returns conversational response directly (no agent workflow)
       //   - REQUIREMENT_REQUEST: proceeds to Gatherer workflow
+      // CHAT 1.3 — API boundary: POST /api/process-requirements, the SAME endpoint
+      //            the agent flows use. Intent detection server-side decides whether
+      //            this remains a conversation (CHAT 2.3) or enters the agent
+      //            workflow (GATHERING / AUDITOR / ARCHITECT flows).
       const data = await api.processRequirements({
         project_id: projectId,
         raw_input: inputMsg,
         current_version: deps.currentVersion,
+        // CHAT 1.3 — DISCREPANCY (documented, unchanged): the chat path hardcodes
+        // this string even though buildVersionHistorySummaries() above exists and
+        // the agent actions use it; the backend's default is the same text.
         version_history_summaries: 'No previous history.',
         target_agent: 'gatherer',
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
       }, controller.signal);
 
+      // CHAT 1.4 — Response branch. GENERAL_CHAT (below) is the pure-conversation
+      //            outcome: the assistant text is appended and NO requirement,
+      //            story, version or PRD state is modified. Every other intent
+      //            falls into the agent branches instead.
       const detectedIntent = data.detected_intent || 'GENERAL_CHAT';
 
       if (detectedIntent === 'GENERAL_CHAT') {
@@ -218,6 +236,11 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         const pendingActionId = data.pending_action_id;
         const isPendingMerge = data.pending_merge === true;
 
+        // GATHERING 8.1 — Frontend side of the handoff (UI layer): the staged merge is
+        //            pushed into `pendingActions`, which renders the ConfirmationPanel
+        //            ("Merge Preview Ready" bubble below). Nothing is written until the
+        //            user confirms (CONFIRMATION flow) — Cancel discards the action,
+        //            which is why the state above is reported as "unconfirmed".
         if (isPendingMerge && pendingActionId) {
           // Store the pending merge for confirmation
           deps.setPendingActions(prev => [...prev, {
@@ -310,6 +333,11 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   };
 
   // Handle On-Demand Audit Execution
+  // AUDIT 5.0 — Frontend entry of the AUDITOR flow (ChatPanel's "Validate
+  //             Requirements" button). Layer chain: 5.0 → 5.1 (on-demand agent request)
+  //             → AUDIT 1.0-2.x → 5.2/5.3/5.4 (UI verdict) → answers via AUDIT 3.x or
+  //             the FLOW 10 clarification endpoint.
+  //             Guarded by canRunAgentActions so an empty project cannot be audited.
   const handleValidateRequirements = async () => {
     if (!deps.projectId) return;
     if (!deps.canRunAgentActions) {
@@ -331,12 +359,20 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       const data = await api.processRequirements({
         project_id: projectId,
         raw_input: '',
+        // AUDIT 5.1 — The on-demand trigger: empty raw_input + target_agent="auditor"
+        //            is exactly why the pipeline must bypass the GENERAL_CHAT
+        //            short-circuit (see CHAT 2.3.0). On the backend this enters
+        //            ROUTING 1.2 → auditor_node.
         target_agent: 'auditor',
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
         current_version: deps.currentVersion,
         version_history_summaries: 'No previous history.',
       }, controller.signal);
 
+      // AUDIT 5.2 — Verdict mapping (api/transforms): audit_result → UI model
+      //            (is_valid, passed/failed checks, clarification questions).
+      //            Audits are also staged as a pending merge (GATHERING 8.1 pattern),
+      //            so nothing is persisted until the user saves.
       const receivedAudit = toAuditResultFromPayload(data.audit_result);
       const pendingActionId = data.pending_action_id;
       const isPendingMerge = data.pending_merge === true;
@@ -353,6 +389,10 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       }
 
       const isValid = receivedAudit.is_valid;
+      // AUDIT 5.3 — Failure branch: the assistant bubble carries the questions and
+      //            `isPendingClarifications` + `auditResultSnapshot`, which is what
+      //            renders the embedded clarification form (AUDIT 5.3.1). The sync
+      //            status tells the user the audit is pending, not failed hard.
       if (isValid === false) {
         const questions = receivedAudit.clarification_questions || [];
         const questionTexts = questions.map(q => `• ${q.question_text}`).join('\n');
@@ -369,6 +409,9 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
 
         store.setSyncStatus('Audit Pending. Clarifications required.');
       } else {
+        // AUDIT 5.4 — Success branch: a positive verdict bubble (no clarification
+        //            form). The audit is still only STAGED — the user's Save in the
+        //            ConfirmationPanel is what persists the verdict (CONFIRM 3.3).
         const successContent = `✅ **Compliance Audit Passed!**\nRequirements have successfully validated against all retail banking security and regulatory checks. Ready for PRD compilation.`;
         store.setMessages(prev => [...prev, {
           id: `audit-passed-${Date.now()}`,
@@ -437,6 +480,10 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   };
 
   // Handle On-Demand PRD & Architecture Diagram Generation
+  // ARCHITECT 1.0 — Frontend entry of the PRD-generation flow (ChatPanel's "Generate
+  //             PRD" button). Chain: 1.0 → 1.2 (on-demand architect request) →
+  //             ARCHITECT 2.x-8.x → 1.5 (store + PRD tab) / 1.6 (abort-error branch).
+  //             Guarded by canRunAgentActions so an empty project cannot be compiled.
   const handleGeneratePRD = async () => {
     if (!deps.projectId) return;
     if (!deps.canRunAgentActions) {
@@ -458,12 +505,23 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       const data = await api.processRequirements({
         project_id: projectId,
         raw_input: '',
+        // ARCHITECT 1.2 — The on-demand trigger: empty raw_input + target_agent
+        //            "architect" is exactly why the pipeline bypasses the GENERAL_CHAT
+        //            short-circuit (CHAT 2.3.0); on the backend it enters ROUTING 1.2 →
+        //            architect_node. `version_history_summaries` is the real digest
+        //            (1.3 helper), which is what makes the reuse guard (2.2) and the
+        //            version-history table in the template meaningful.
         target_agent: 'architect',
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
         current_version: deps.currentVersion,
         version_history_summaries: buildVersionHistorySummaries(),
       }, controller.signal);
 
+      // ARCHITECT 1.5 — Response applied to UI state: the filled PRD markdown and the
+      //            refreshed Mermaid diagram replace the stored ones, a success bubble
+      //            is appended, and the workspace switches to the PRD tab. The
+      //            requirement rows are still unconfirmed (CONFIRMATION flow) — only the
+      //            document/version writes already happened server-side (5.1/6.0).
       const generatedPrd = data.prd_markdown || '';
       const generatedMermaid = data.mermaid_diagram || '';
 
@@ -480,6 +538,8 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setSyncStatus('PRD and flowchart diagram updated.');
       deps.setActiveTab('prd'); // switch tab automatically to PRD
     } catch (err) {
+      // ARCHITECT 1.6 — Abort branch (Stop pressed): the generation was terminated
+      //            server-side by the CANCELLATION flow, so no document was produced.
       if (isAbortError(err)) {
         store.setMessages(prev => [...prev, {
           id: `stopped-${Date.now()}`,
@@ -551,12 +611,22 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   // Fallback)" messages. All failure paths now surface a truthful error instead.
 
   // Submit Answer to Clarifications Form
+  // CLARIFY 1.3 — Frontend submit handler for BOTH clarification forms (1.1 / 1.2).
+  //             Chain: 1.3 → 1.5 (api.submitClarifications) → CLARIFY 3.x → the saved
+  //             state back here, where the audit view is refreshed:
+  //               • answers cleared, current agent node set from current_workflow_state
+  //               • auditResult.is_valid + clarification_questions updated
+  //               • full project state re-loaded (1.3 → PROJECT 2.x)
+  //             The empty-answer guard makes the button a no-op until something is typed.
   const handleSubmitClarifications = async (e: React.FormEvent) => {
     e.preventDefault();
     if (Object.keys(store.clarificationAnswers).length === 0) return;
 
     try {
       store.setSyncStatus('Submitting clarifications...');
+      // CLARIFY 1.5 — API boundary: POST /api/clarification/submit (CLARIFY 2.1 /
+      //             3.0) carrying the position-keyed answers (1.4). A failure leaves
+      //             the typed answers in place so the user can retry.
       const res = await api.submitClarifications(deps.projectId ?? '', store.clarificationAnswers);
       if (res) {
         store.setClarificationAnswers({});
@@ -579,6 +649,11 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     }
   };
 
+  // CLARIFY 1.4 — Answer state writer: the input keys are POSITIONAL (`q-<index>`),
+  //             matching the backend's enumerate() in CLARIFY 3.4. This is why the UI
+  //             maps the questions WITHOUT filtering before assigning the index
+  //             (1.1 / 1.2) — filtering first would shift every answer onto the wrong
+  //             question.
   const handleUpdateAnswerValue = (key: string, value: string) => {
     store.setClarificationAnswers(prev => ({
       ...prev,

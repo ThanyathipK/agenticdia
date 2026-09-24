@@ -61,6 +61,13 @@ def _duplicate_project_name_detail(name: str) -> str:
     return f"A project named '{name}' already exists. Please choose a different name."
 
 
+# PROJECT 1.4 — Route: GET /api/projects (the sidebar list).
+#              Auth: Depends(get_current_user) → AUTH 7.1 (Bearer → users row);
+#              the query itself is owner-scoped (1.4.1), so an anonymous caller is
+#              rejected before any DB work and a signed-in caller only ever sees
+#              their own projects — the same boundary the frontend applies in
+#              PROJECT 1.2.
+#              Response: List[ProjectSummary], pinned-first (PROJECT 1.5).
 @router.get("/api/projects", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
 async def get_projects(
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -81,9 +88,17 @@ async def get_projects(
     Returns:
         List[ProjectSummary]: That user's project summary records (pinned first).
     """
+    # PROJECT 1.4.1 — Repository read: SELECT projects (owner-scoped when user_id
+    #                is given) + pinned-first sort + serialization. DB: projects.
     return await ProjectRepository.list_all(db, user_id=UUID(current_user.id))
 
 
+# PROJECT 3.4 — Route: GET /api/projects/search (the debounced sidebar search).
+#              Auth: AUTH 7.1 + owner scoping inside the repository (PROJECT 3.4.1).
+#              Validation: `q` is required (min_length=1) and re-checked after
+#              trimming → 400 "Search query must not be empty".
+#              Response: matching ProjectSummary rows; a row matched through
+#              conversation content carries `match_snippet`.
 @router.get("/api/projects/search", response_model=List[ProjectSummary], status_code=status.HTTP_200_OK)
 async def search_projects(
     q: str = Query(..., min_length=1, description="Text matched case-insensitively against project names and conversation message content."),
@@ -108,12 +123,26 @@ async def search_projects(
     Raises:
         HTTPException: 400 if the query is empty after trimming.
     """
+    # PROJECT 3.4.0 — Validation branch: an all-whitespace query is rejected even
+    #                though the schema already enforces min_length=1.
     query = q.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Search query must not be empty")
+    # PROJECT 3.4.1 — Repository search: projects.name ILIKE OR the project's
+    #                conversation_messages.message ILIKE, owner-scoped, de-duplicated
+    #                per project with a bounded `match_snippet` excerpt.
     return await ProjectRepository.search(db, query, user_id=UUID(current_user.id))
 
 
+# PROJECT 4.4 — Route: POST /api/projects (create).
+#              Auth: AUTH 7.1 — the JWT subject becomes projects.user_id, which
+#              is exactly what authorizes PROJECT 2.x / 5.x / 6.x / 8.x later.
+#              Branches: 4.4.1 duplicate-name 409 (the check is deliberately NOT
+#              user-scoped, so names are workspace-global and a 409 can reveal
+#              another tenant's project name — documented in the analysis, not
+#              changed here) → 4.4.2 INSERT projects + requirement_states →
+#              4.4.3 SSE publish "project_created".
+#              Response: 201 ProjectCreated; the UI re-reads the list (PROJECT 4.5).
 @router.post("/api/projects", response_model=ProjectCreated, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
@@ -142,6 +171,9 @@ async def create_project(
     # workspace. ``payload.name`` is already stripped by the ProjectCreate
     # schema validator; a conflict surfaces as 409 so the UI can render an
     # inline "name already exists" error.
+    # PROJECT 4.4.1 — Duplicate-name branch (409). NOTE: this check is not
+    #                user-scoped, so names are globally unique and the 409 can
+    #                disclose another tenant's project name (analysis §9 item 3).
     if await ProjectRepository.name_exists(payload.name, db):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -152,11 +184,22 @@ async def create_project(
     # OWNERSHIP: the JWT subject is the owner. New projects are visible only to
     # their creator (GET /api/projects scopes to this same id).
     project_data["user_id"] = current_user.id
+    # PROJECT 4.4.2 — Repository write: INSERT projects + INSERT requirement_states
+    #                (empty board; only the project name is seeded).
     created_project = await ProjectRepository.create_project(project_data, db)
+    # PROJECT 4.4.3 — Real-time fan-out: other tabs viewports refresh their sidebar
+    #                (EVENTS flow consumes this frame).
     await event_manager.publish(str(project_data["id"]), "project_created", {"project_id": project_data["id"]})
     return created_project
 
 
+# PROJECT 5.3 — Route: PUT /api/projects/{project_id} (rename / field update).
+#              Auth: AUTH 7.1 + an owner filter inside the repository (5.3.2), so a
+#              non-owner receives the same 404 as a missing project (no leak).
+#              Branches: UUID format 400 → 5.3.1 duplicate-name 409 (excluding the
+#              project itself) → 5.3.2 UPDATE (artifact lock gate inside) →
+#              404 when unowned/missing → 5.3.4 SSE publish "project_updated".
+#              Response: ProjectSummary; the hook applies it optimistically (5.4).
 @router.put("/api/projects/{project_id}", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
 async def update_project(
     project_id: str,
@@ -189,15 +232,20 @@ async def update_project(
     updates = payload.model_dump()
     # DUPLICATE-NAME VALIDATION: the new name must not collide with any OTHER
     # project (the project may keep its own name). Same 409 contract as create.
+    # PROJECT 5.3.1 — Duplicate-name branch (409) excluding this project, so a
+    #                project may keep or re-adopt its own name.
     if await ProjectRepository.name_exists(updates["name"], db, exclude_project_id=project_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=_duplicate_project_name_detail(updates["name"]),
         )
+    # PROJECT 5.3.2 — Repository UPDATE (owner-scoped SELECT → artifact-lock check →
+    #                field assignment → flush/refresh). DB: projects.
     updated = await ProjectRepository.update(project_id, updates, db, user_id=UUID(current_user.id))
     if not updated:
         # Same answer for "missing" and "owned by someone else" — no existence leak.
         raise HTTPException(status_code=404, detail="Project not found")
+    # PROJECT 5.3.4 — Real-time fan-out with the new name.
     await event_manager.publish(project_id, "project_updated", {
         "project_id": project_id,
         "name": updates.get("name")
@@ -205,6 +253,13 @@ async def update_project(
     return updated
 
 
+# PROJECT 6.3 — Route: DELETE /api/projects/{project_id}.
+#              Auth: AUTH 7.1 + owner filter in the repository (6.3.1).
+#              Branches: UUID format 400 → 6.3.1 DELETE (lock-gated; also appends
+#              an artifact_event_logs row) → 404 when unowned/missing → 6.3.3 SSE
+#              publish "project_deleted". FK CASCADE removes every child artifact.
+#              Response: {status:"deleted", project_id}; the hook re-selects the
+#              first remaining project (PROJECT 6.4).
 @router.delete("/api/projects/{project_id}", response_model=ProjectDeleteResponse, status_code=status.HTTP_200_OK)
 async def delete_project(
     project_id: str,
@@ -229,13 +284,24 @@ async def delete_project(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # PROJECT 6.3.1 — Repository DELETE (owner-scoped SELECT → artifact-lock check →
+    #                session.delete → artifact_event_logs append, fail-open).
+    #                DB: projects (FK CASCADE clears all child artifacts).
     deleted = await ProjectRepository.delete(project_id, db, user_id=UUID(current_user.id))
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
+    # PROJECT 6.3.3 — Real-time fan-out. Note the stream is keyed by the deleted
+    #                project id, so only clients still subscribed to it see this.
     await event_manager.publish(project_id, "project_deleted", {"project_id": project_id})
     return {"status": "deleted", "project_id": project_id}
 
 
+# PROJECT 7.3 — Route: PUT /api/projects/{project_id}/pin (sidebar pin/unpin).
+#              Auth: AUTH 7.1 + owner filter inside 7.3.1.
+#              Metadata only — deliberately NOT lock-gated (locking protects
+#              document content, not review bookkeeping).
+#              Branches: UUID format 400 → 7.3.1 UPDATE is_pinned → 404 when
+#              unowned/missing → 7.3.2 SSE publish "project_updated".
 @router.put("/api/projects/{project_id}/pin", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
 async def pin_project(
     project_id: str,
@@ -261,6 +327,8 @@ async def pin_project(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # PROJECT 7.3.1 — Repository UPDATE of is_pinned only (owner-scoped). No lock
+    #                gate by design: pinning is view metadata, not content.
     updated = await ProjectRepository.toggle_pinned(project_id, payload.is_pinned, db, user_id=UUID(current_user.id))
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -271,6 +339,11 @@ async def pin_project(
     return updated
 
 
+# PROJECT 7.4.3 — Route: PUT /api/projects/{project_id}/flag (dashboard ★).
+#                Auth: AUTH 7.1 + owner filter in 7.4.4.
+#                Independent of pinning by design (never affects sidebar order).
+#                Branches: UUID format 400 → 7.4.4 UPDATE is_flagged → 404 when
+#                unowned/missing → 7.4.5 SSE publish "project_updated".
 @router.put("/api/projects/{project_id}/flag", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
 async def flag_project(
     project_id: str,
@@ -299,6 +372,8 @@ async def flag_project(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # PROJECT 7.4.4 — Repository UPDATE of is_flagged only (owner-scoped), by the
+    #                same no-lock rationale as pinning.
     updated = await ProjectRepository.toggle_flagged(project_id, payload.is_flagged, db, user_id=UUID(current_user.id))
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -309,6 +384,12 @@ async def flag_project(
     return updated
 
 
+# PROJECT 7.5.3 — Route: PUT /api/projects/{project_id}/status (workflow status).
+#                Auth: AUTH 7.1 + owner filter in 7.5.4.
+#                Branches: UUID format 400 → 7.5.3.1 allowed-status validation 400
+#                ({draft, in_review_hpo, in_review_po, approved, revised}) →
+#                7.5.4 UPDATE status → 404 when unowned/missing → 7.5.5 SSE publish.
+#                Also metadata-only: no artifact lock, no PRD version entry.
 @router.put("/api/projects/{project_id}/status", response_model=ProjectSummary, status_code=status.HTTP_200_OK)
 async def set_project_status(
     project_id: str,
@@ -335,6 +416,9 @@ async def set_project_status(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # PROJECT 7.5.3.1 — Validation branch: only the canonical workflow statuses are
+    #                accepted → 400 with the allowed set. (Free-form values may
+    #                still reach the column via the generic PUT /api/projects/{id}.)
     allowed = {"draft", "in_review_hpo", "in_review_po", "approved", "revised"}
     if payload.status not in allowed:
         raise HTTPException(
@@ -342,6 +426,7 @@ async def set_project_status(
             detail=f"Invalid status '{payload.status}'. Allowed: {', '.join(sorted(allowed))}",
         )
 
+    # PROJECT 7.5.4 — Repository UPDATE of status only (owner-scoped, no lock gate).
     updated = await ProjectRepository.update_status(project_id, payload.status, db, user_id=UUID(current_user.id))
     if not updated:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -352,6 +437,15 @@ async def set_project_status(
     return updated
 
 
+# PROJECT 2.3 — Route: GET /api/project/{project_id} (opening a project).
+#              Auth: Depends(require_project_owner) → AUTH 7.5 → AUTH 7.4
+#              (404 malformed/missing, 403 not-owner) — stricter than the
+#              /api/projects* group above, which scopes by query instead.
+#              Branches: 2.3.1 UUID format 400 → 2.3.2 repository read → 2.3.3
+#              first-open initialization (bookkeeping fields only, so the board
+#              stays empty and requirement numbering starts at REQ-001) → 2.3.4
+#              attach the conversation history.
+#              Response: RequirementStateResponse → PROJECT 2.4 (store mapping).
 @router.get("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
 async def get_project_requirement_state(
     project_id: str,
@@ -379,6 +473,10 @@ async def get_project_requirement_state(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # PROJECT 2.3.2 — Repository read (see the get_by_project_id branch comment):
+    #                SELECT requirement_states by project_id, then rebuild the
+    #                flattened board from epics / requirements / user_stories /
+    #                acceptance_criteria / audit_results / clarification_questions.
     logger.info(f"[DB LOG] Loading RequirementState for project {project_id}")
     state = await RequirementStateRepository.get_by_project_id(project_id, session)
     logger.info(f"[DB LOG] Loading RequirementState for project {project_id} complete. Found: {state is not None}")
@@ -391,6 +489,8 @@ async def get_project_requirement_state(
         # demo content polluted the board, the PRD and the traceability matrix.
         # The authoritative project name lives in the projects table, so it is
         # read from there instead of a fabricated demo label.
+        # PROJECT 2.3.3.1 — Repository read of the authoritative project name
+        #                  (projects row) instead of a fabricated demo label.
         project = await ProjectRepository.get_by_id(project_id, session)
         logger.info(f"[DB LOG] Initializing empty state for project {project_id}...")
         # Persist BOOKKEEPING fields only: passing the empty
@@ -399,6 +499,9 @@ async def get_project_requirement_state(
         # phantom first requirement this fix removes. Requirement rows are
         # created by the first real merge/gather save instead, which is what lets
         # the requirement sequence start at ``REQ-001``.
+        # PROJECT 2.3.3.2 — Repository write: bookkeeping fields ONLY (no
+        #                  requirements/user_stories lists), which is what keeps the
+        #                  board empty so the first real capture starts at REQ-001.
         state = await RequirementStateRepository.save_or_update(project_id, {
             "project_name": (project or {}).get("name") or "",
             "validation_status": "pending",
@@ -406,11 +509,16 @@ async def get_project_requirement_state(
             "version_number": 1,
         }, session)
         logger.info(f"[DB LOG] Initializing empty state for project {project_id} complete.")
+        # PROJECT 2.3.3.3 — Real-time fan-out for the first-open initialization.
         await event_manager.publish(project_id, "state_initialized", {"project_id": project_id})
 
     # Reuse the request's AsyncSession instead of opening a second pooled
     # connection just for the conversation history read (one fewer network
     # round-trip to the database on every project-state load).
+    # PROJECT 2.3.4 — Repository read of the persisted conversation history, using
+    #                the SAME request session (one fewer pooled connection); the
+    #                result is attached to the response below so the UI restores
+    #                the chat transcript in PROJECT 2.4.
     conv_history = await ConversationMessageRepository.get_conversation_history(project_id, session)
     if isinstance(state, dict):
         state = dict(state)
@@ -418,6 +526,13 @@ async def get_project_requirement_state(
     return state
 
 
+# PROJECT 9.1 — Route: GET /api/project/{project_id}/conversations.
+#              Auth: AUTH 7.5 ownership gate (no explicit session dependency —
+#              the repository opens its own read via the shared session factory).
+#              DISCREPANCY vs. the expected flow: no frontend caller exists
+#              (src/api/client.ts exposes no method for it) because the UI reads
+#              history through PROJECT 2.3.4, which embeds `conversation_history`
+#              in the state response. Documented as-is, not removed.
 @router.get("/api/project/{project_id}/conversations", response_model=List[ConversationMessageResponse], status_code=status.HTTP_200_OK)
 async def get_project_conversations(
     project_id: str,
@@ -442,6 +557,15 @@ async def get_project_conversations(
     return await ConversationMessageRepository.get_conversation_history(project_id)
 
 
+# PROJECT 8.2 — Route: PUT /api/project/{project_id} (DIRECT requirement-state write).
+#              Auth: AUTH 7.5 ownership gate.
+#              Branches: 8.2.1 UUID format 400 → project artifact lock check
+#              (409 locked / 404 unresolvable, via LockService) → 8.2.2
+#              RequirementStateRepository.save_or_update → 8.2.3 optional PRD
+#              version entry when `generated_prd` is present → 8.2.4 SSE publish
+#              "state_updated".
+#              This is the manual/legacy fallback; the AI write path is the
+#              CONFIRMATION flow (confirm-action).
 @router.put("/api/project/{project_id}", response_model=RequirementStateResponse, status_code=status.HTTP_200_OK)
 async def update_project_requirement_state(
     project_id: str,
@@ -472,6 +596,10 @@ async def update_project_requirement_state(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    # PROJECT 8.2.1 — Artifact-lock gate (coarse, project-level): a locked project
+    #                refuses this write with 409; an unresolvable project id maps
+    #                to 404. Uses the shared locks_service resolution so the lock
+    #                semantics match the generic /artifacts/.../lock endpoints.
     # LOCK ENFORCEMENT: Cannot update requirement state of a locked project
     from app.lock_service import LockService, ArtifactLockError
     try:
@@ -483,11 +611,18 @@ async def update_project_requirement_state(
         raise HTTPException(status_code=404, detail=str(e))
 
     logger.info(f"[DB LOG] Updating RequirementState directly for project {project_id}")
+    # PROJECT 8.2.2 — Repository write: RequirementStateRepository.save_or_update
+    #                (create-if-missing, else partial field update; child tables
+    #                re-derived when requirements/stories/AC lists are supplied).
     state = await RequirementStateRepository.save_or_update(project_id, updates, session)
 
     # If the update includes a new generated_prd (e.g. legacy manual section edit
     # fallback), record an immutable PRD version so the version ledger never
     # collapses — even when the primary section endpoint is unavailable.
+    # PROJECT 8.2.3 — Version ledger: a manual/legacy state write that carries a
+    #                new generated_prd appends an immutable prd_versions row
+    #                (VERSIONING flow) so the ledger never collapses. Fail-open:
+    #                a ledger failure is logged and does not undo the state write.
     if "generated_prd" in updates and updates["generated_prd"]:
         try:
             from app.version_service import record_prd_version
@@ -501,6 +636,8 @@ async def update_project_requirement_state(
         except Exception as ver_err:
             logger.warning("[DB LOG] Failed to record PRD version for legacy update: %s", ver_err)
 
+    # PROJECT 8.2.4 — Real-time fan-out; the frontend's SSE handler answers with a
+    #                debounced full state re-read (PROJECT 2.2).
     await event_manager.publish(project_id, "state_updated", {"project_id": project_id})
     return state
 
@@ -954,6 +1091,9 @@ async def convert_prd_to_markdown(
 # PRD VERSION HISTORY API
 # ==========================================
 
+# VERSION 2.1 — READ: the whole ledger (VERSION 1.1). Auth: AUTH 7.5. Returns every
+#             immutable snapshot NEWEST FIRST (repository 4.3) — this list drives the
+#             timeline, so ordering here is part of the UI contract.
 @router.get("/api/project/{project_id}/prd-versions", response_model=List[PRDVersionResponse], status_code=status.HTTP_200_OK)
 async def get_prd_versions(
     project_id: str,
@@ -982,6 +1122,10 @@ async def get_prd_versions(
     return versions
 
 
+# VERSION 2.2 — READ: per-section line diff for one version (VERSION 1.2).
+#             Auth: AUTH 7.5. `base_version` defaults to the immediate predecessor
+#             (resolved inside VERSION 3.8/4.2). Branches: UUID 400 → 404 when the
+#             version or its base is missing → the diff payload.
 @router.get(
     "/api/project/{project_id}/prd-versions/{version_number}/diff",
     response_model=PrdVersionDiffResponse,
@@ -1021,6 +1165,11 @@ async def get_prd_version_diff(
     return diff
 
 
+# VERSION 2.3 — READ: latest snapshot (repository 4.5) → 404 when the project has no
+#             ledger rows yet. Used by the export path and the PRD-preview sync.
+#             DISCREPANCY (documented, not changed): no frontend caller — the SPA reads
+#             the newest row from the VERSION 2.1 list instead (src/api/client.ts has no
+#             getLatestPrdVersion helper).
 @router.get("/api/project/{project_id}/prd-versions/latest", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)
 async def get_latest_prd_version(
     project_id: str,
@@ -1052,6 +1201,9 @@ async def get_latest_prd_version(
     return version
 
 
+# VERSION 2.4 — READ: one snapshot by number (repository 4.4) → 404 when absent.
+#             DISCREPANCY (documented, not changed): no frontend caller either (see 2.3);
+#             the diff endpoint (2.2) returns the section contents the UI needs.
 @router.get("/api/project/{project_id}/prd-versions/{version_number}", response_model=PRDVersionResponse, status_code=status.HTTP_200_OK)
 async def get_prd_version_by_number(
     project_id: str,
@@ -1085,6 +1237,13 @@ async def get_prd_version_by_number(
     return version
 
 
+# VERSION 2.5 — WRITE (append-only restore): the snapshot's document becomes a NEW
+#             version — history is NEVER rewritten. Auth: AUTH 7.5. The restore flows
+#             through the PRD-SECTION part contract, so LOCKED parts keep their current
+#             content (the restored document honours the lock) and each part update
+#             appends a prd_section_versions row; a fresh ledger row is then recorded
+#             via VERSION 3.6/4.1. Returns the re-stitched document + new version
+#             number, which VERSION 1.5 applies.
 @router.post(
     "/api/project/{project_id}/prd-versions/{version_number}/restore",
     response_model=PrdVersionRestoreResponse,

@@ -28,6 +28,15 @@ from app.repositories.base import as_uuid, dt_iso_or_none
 logger = logging.getLogger(__name__)
 
 
+# AUTH repository layer — the users-table access point for the whole AUTH
+# namespace. Call sites (all in app/auth.py or app/routes/auth.py):
+#   AUTH 1.7.1.1 — authenticate_user → get_by_email   (LOGIN read,      line 243)
+#   AUTH 5.2.1   — change_password   → get_by_id      (CHANGE PASSWORD read)
+#   AUTH 5.2.3   — change_password   → set_password_hash (UPDATE)
+#   AUTH 6.3.4   — register route    → email_exists   (uniqueness read)
+#   AUTH 6.3.5   — register route    → create_user    (INSERT)
+#   AUTH 7.1.2   — get_current_user  → get_by_id      (token → row, reused by
+#                                                       AUTH 7.2.1 / 7.3)
 def normalize_email(email: Optional[str]) -> str:
     """Return the canonical form of an email address.
 
@@ -40,6 +49,9 @@ def normalize_email(email: Optional[str]) -> str:
     return (email or "").strip().lower()
 
 
+# NOTE (flow trace): serialize_user has no caller — the AUTH flows project rows
+# via app.auth.to_authenticated_user (AUTH 7.1.3) / routes.auth.UserResponse
+# (AUTH 1.7.4, 2.3, 6.3.6) instead. Left in place, not part of any AUTH flow.
 def serialize_user(user: UserModel) -> Dict[str, Any]:
     """Serialize a :class:`UserModel` into its public dict representation."""
     return {
@@ -57,6 +69,7 @@ def serialize_user(user: UserModel) -> Dict[str, Any]:
 class UserRepository:
     """Database access for user accounts (authentication surface)."""
 
+    # AUTH 7.1.2 / AUTH 5.2.1 — SELECT users WHERE id = :key.
     @staticmethod
     async def get_by_id(
         user_id: Union[str, uuid.UUID], session: AsyncSession
@@ -79,6 +92,8 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    # AUTH 1.7.1.1 — SELECT users WHERE lower(email) = :normalized. The single LOGIN
+    #                read; also reused by AUTH 6.3.4 via email_exists below.
     @staticmethod
     async def get_by_email(
         email: Optional[str], session: AsyncSession
@@ -93,11 +108,14 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    # AUTH 6.3.4 — duplicate-email check for POST /api/auth/register (409 upstream).
     @staticmethod
     async def email_exists(email: Optional[str], session: AsyncSession) -> bool:
         """Return True when an account already owns *email* (case-insensitive)."""
         return await UserRepository.get_by_email(email, session) is not None
 
+    # AUTH 6.3.5 — INSERT users row (flush only; the route commits in AUTH 6.3.5).
+    #             The bcrypt hash is produced by the route, never here.
     @staticmethod
     async def create_user(
         *,
@@ -125,6 +143,7 @@ class UserRepository:
         await session.flush()
         return user
 
+    # AUTH 5.2.3 — UPDATE users.password_hash (flush only; the commit happens in AUTH 5.2.3).
     @staticmethod
     async def set_password_hash(
         user: UserModel, password_hash: str, session: AsyncSession

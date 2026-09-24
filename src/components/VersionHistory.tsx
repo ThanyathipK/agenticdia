@@ -7,6 +7,9 @@ import { api } from "../api/client";
 import { ConfirmModal } from "./ConfirmModal";
 import type { PrdVersionDiffPayload, PrdVersionDiffSectionPayload } from "../api/types";
 
+// VERSION 1.3 — Diff renderer primitives: `DiffLines` paints add/del/context lines;
+//              `SectionDiffCard` (1.4) wraps one section's change kind, counters and
+//              diff. Both are presentational — the data comes from VERSION 1.2.
 /** Renders diff lines: green for additions, red for deletions, grey for context. */
 function DiffLines({ diffLines }: { diffLines: [string, string][] }) {
   if (diffLines.length === 0) {
@@ -33,6 +36,9 @@ function DiffLines({ diffLines }: { diffLines: [string, string][] }) {
 }
 
 /** One per-section diff card showing title, change kind, line counts and diff. */
+// VERSION 1.4 — Per-section diff card: shows the section title, the change kind
+//              (created / updated / removed / unchanged / locked_preserved) and the
+//              line diff for that part.
 function SectionDiffCard({ section }: {
   section: PrdVersionDiffSectionPayload;
 }) {
@@ -111,6 +117,11 @@ function ChangeTypeBadge({ changeType }: { changeType: string | undefined }) {
   );
 }
 
+// VERSION 1.0 — Version History panel (the "Versions" tab): the ledger timeline plus
+//             the diff viewer and the restore confirm. Layer chain:
+//               1.1 (ledger) → timeline selection (1.2 base picker) →
+//               1.3/1.4 (diff cards, from api.getPrdVersionDiff) →
+//               1.5 (restore, via the store's handleRestoreVersion).
 export function VersionHistory({ state }: { state: ProjectState }) {
   const {
     versionHistory,
@@ -160,6 +171,10 @@ export function VersionHistory({ state }: { state: ProjectState }) {
     if (selectedHistVersion === 1 || !base || base === selectedHistVersion) {
       setDiff(null); setDiffError(null); return;
     }
+    // VERSION 1.2 — Diff fetch effect (the ONLY caller of api.getPrdVersionDiff):
+    //             skips work when there is no base to compare against (v1, no base
+    //             selected, or base === selected) and treats a 404 as "nothing to
+    //             compare" rather than an error, so the panel stays quiet.
     console.log('[Diff] Fetching diff:', projectId, 'v' + selectedHistVersion, 'vs v' + base);
     setDiffLoading(true);
     setDiffError(null);

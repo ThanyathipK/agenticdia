@@ -55,6 +55,9 @@ _GATHERER_INPUT_VARIABLES = [
 
 # Traceability marker stored inside a draft's ``proposed_changes`` so the
 # confirm-action flow can audit-log which document produced the merge.
+# DOC-UPLOAD 3.8 — Draft traceability markers, shared between FLOW 15 (which stamps them
+#             into ``proposed_changes``) and DOC-UPLOAD 2.4.2 (which matches on them when
+#             evicting the drafts of a deleted document). Keep both in sync.
 DRAFT_DOCUMENT_REF_KEY = "_document_ref"
 DRAFT_ACTION_TYPE = "INSERT_CHUNKED_REQUIREMENTS"
 

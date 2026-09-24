@@ -132,6 +132,16 @@ async def get_or_init_requirement_state(project_id: str, session: Optional[Async
 # GRAPH NODES (THE AGENTS)
 # ==========================================
 
+# ROUTING 2.0 — Router node: the classifier gate before any requirement work.
+#             State read:  raw_input, target_agent, project_id, db_session(†),
+#                          current_version
+#             State write: workflow_routing (always), requirement_state (always,
+#                          via get_or_init_requirement_state → PROJECT 2.3.2 read),
+#                          agent_message + target_agent in the branches below.
+#             (†) `db_session` is fetched with state.get("db_session") but is NOT
+#                 declared in AgentState (74-92) — see the analysis §9 item 6.
+#             Layer chain: 2.1 classify (ROUTING 3.x) → 2.2/2.3/2.4/2.5 branch →
+#             4.1 route_from_router.
 async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     """
     Workflow Router Node:
@@ -149,6 +159,9 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     logger.info(f"[WORKFLOW ROUTER] Intercepted raw_input: '{raw_input[:100]}'")
 
     # Run classification
+    # ROUTING 2.1 — Classification (LLM): ROUTING 3.x. The default here is
+    #             REQUIREMENT, i.e. an unparsable classifier result still tries the
+    #             requirement path rather than silently dropping the message.
     router_result = await classify_workflow(raw_input)
     workflow_type = str(router_result.get("workflow", "REQUIREMENT")).upper()
     logger.info(f"[WORKFLOW ROUTER] Classification: {router_result}")
@@ -159,6 +172,14 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
     db_session = state.get("db_session")
     req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
 
+    # ROUTING 2.2 — CHAT branch: answers inline and returns; route_from_router then
+    #             sends it to END (ROUTING 4.1). Prompt prompts/chat.md via the
+    #             shared llm. FAIL SOFT: an unreachable model yields a canned
+    #             greeting (logged with traceback) instead of failing the run.
+    #             NOTE: this is a THIRD chat implementation besides CHAT 2.3
+    #             (pipeline) and CHAT 5.1 (/api/chat) — reachable only when the
+    #             pipeline routed to the graph (e.g. intent=UPDATE but the router
+    #             sees a greeting). It does NOT use semantic memory.
     if workflow_type == "CHAT":
         logger.info("[WORKFLOW ROUTER] Handling as CHAT. Generating conversational response.")
         chat_sys = load_prompt("chat")
@@ -179,6 +200,10 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
             "requirement_state": req_state
         }
 
+    # ROUTING 2.3 — QUESTION branch: explains using a minimal project context
+    #             (first epic name + up to 10 story titles, prompts/question.md).
+    #             FAIL SOFT: falls back to echoing the question. Also terminates at
+    #             END via ROUTING 4.1 (CHAT|QUESTION ⇒ END).
     elif workflow_type == "QUESTION":
         logger.info("[WORKFLOW ROUTER] Handling as QUESTION. Answering direct question.")
         requirements = req_state.get("requirements", [])
@@ -200,6 +225,15 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
             "requirement_state": req_state
         }
 
+    # ROUTING 2.4 — COMMAND branch: deterministic keyword re-targeting of an action
+    #             request ("run auditor"/"validate" → auditor; "prd"/"diagram"/
+    #             "architect"/"export" → architect). Only writes target_agent +
+    #             agent_message and lets ROUTING 4.1 dispatch.
+    #             DISCREPANCY (documented, not changed): when neither keyword group
+    #             matches, target_agent keeps its incoming value (usually
+    #             "gatherer"), so route_from_router has no branch for it and the
+    #             command ends at END — after a message that says "Command routed
+    #             successfully".
     elif workflow_type == "COMMAND":
         logger.info("[WORKFLOW ROUTER] Handling as COMMAND. Routing backend command.")
         lower = raw_input.lower()
@@ -216,6 +250,9 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
             "requirement_state": req_state
         }
 
+    # ROUTING 2.5 — REQUIREMENT (default branch): no message, no re-target — the
+    #             state is handed to route_from_router → requirement_matcher_node
+    #             (ROUTING 4.1 → 4.2) and from there to the GATHERING flow.
     else: # REQUIREMENT
         logger.info("[WORKFLOW ROUTER] Handling as REQUIREMENT. Proceeding to Requirement Matcher & Intent Detection.")
         return {
@@ -223,6 +260,17 @@ async def workflow_router_node(state: AgentState) -> Dict[str, Any]:
             "requirement_state": req_state
         }
 
+# MATCHING 1.0 — Matcher node: the disambiguation step between the router and the
+#             gatherer. Graph position: ROUTING 4.1 sends workflow==REQUIREMENT
+#             here; MATCHING 1.5 can stop the run (ROUTING 4.2 → END), otherwise
+#             the node hands `requirement_match` to the GATHERING flow.
+# MATCHING 1.1 — State read:  raw_input, project_id, db_session(†), current_version,
+#             detected_intent, intent_confidence
+#             State write: requirement_state (clarifications/invalid status in 1.5),
+#             detected_intent, intent_confidence, requirement_match.
+#             (†) `requirement_match` and `db_session` are NOT declared in
+#                 AgentState (74-92) even though both are exchanged here — see the
+#                 analysis §9 item 6.
 async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
     """
     Requirement Matcher Node:
@@ -240,6 +288,11 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
 
     detected_intent = state.get("detected_intent")
     intent_confidence = state.get("intent_confidence")
+    # INTENT 3.1 — Requirement Matcher fallback detection (agents.py): the matcher
+    #             only calls the classifier when the pipeline did NOT supply an
+    #             intent (e.g. a direct graph invocation). The fallback intent here
+    #             is UPDATE_REQUIREMENT on purpose — an unreachable classifier must
+    #             not fabricate a brand-new requirement.
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_stories)
         # Safe fallback: when the classifier cannot be reached we must NOT
@@ -253,6 +306,9 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
         intent_confidence = 1.0
     intent_confidence = float(intent_confidence)
 
+    # MATCHING 1.4 — Service call (MATCHING 2.x): the LLM picks the target story for
+    #             this message out of the project's existing backlog, then 2.5.x
+    #             validates that target against the real ticket codes.
     match_result = await match_requirement(raw_input, detected_intent, existing_stories)
     matcher_status = str(match_result.get("status", "MATCHED")).upper()
     matcher_confidence = float(match_result.get("confidence", 1.0))
@@ -261,6 +317,21 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
 
     logger.info(f"[REQUIREMENT MATCHER] Match Result: {match_result}")
 
+    # MATCHING 1.5 — Ambiguity gate (the human-in-the-loop brake BEFORE extraction):
+    #             status AMBIGUOUS/LOW_CONFIDENCE or confidence < 0.75 halts the run.
+    #             Effects: a persistent clarification_question is appended (unresolved
+    #             questions preserved), validation_status flips to "invalid" — which
+    #             is exactly what ROUTING 4.2 reads to route to END — the workflow
+    #             state is stamped, and the assistant question is persisted
+    #             (conversation_messages) so the user sees it in the transcript.
+    #             DB: none here directly (the caller persists state on confirm).
+    #             NOTE (documented, not changed): `target_user_story_id` is set from
+    #             `candidates[0]`, and candidates were resolved by resolve_target_story
+    #             / normalize_target_reference (MATCHING 2.5.1/2.5.3) — those return
+    #             canonical TICKET CODES ("US-001"), whereas the field is a user-story
+    #             reference that the repository maps back through
+    #             _resolve_story_code/_resolve_story_id. The mismatch is tolerated by
+    #             the nullable column, but the linkage is not a UUID.
     if raw_input and (matcher_status in ["AMBIGUOUS", "LOW_CONFIDENCE"] or matcher_confidence < 0.75):
         logger.warning(f"[REQUIREMENT MATCHER] Ambiguous or low confidence match (status={matcher_status}, confidence={matcher_confidence}). Halting and asking clarification.")
         
@@ -300,6 +371,10 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
             "current_version": req_state.get("version_number", 1)
         }
 
+    # MATCHING 1.6 — Matched path: the SAME state keys are returned without touching
+    #             validation_status, so ROUTING 4.2 forwards to the gatherer, which
+    #             consumes `requirement_match` for its target-guided prompt
+    #             (MATCHING 3.1/3.2). The delete branch consumes it in MATCHING 3.3.
     return {
         "requirement_state": req_state,
         "detected_intent": detected_intent,
@@ -331,6 +406,10 @@ KRUNGSRI_TEMPLATE_MARKER = "Business & Strategic Overview"
 KRUNGSRI_TEMPLATE_MARKER_LATEX = "Business \\& Strategic Overview"
 
 
+# ARCHITECT 2.2.1 — Template marker test (helper behind 2.2): a stored PRD is treated as
+#               template-conformant when it contains the official heading, in markdown
+#               or LaTeX-escaped form. Legacy documents lack it, which is exactly how the
+#               reuse guard tells "migrate me" from "reuse me".
 def _prd_follows_krungsri_template(prd_markdown: Any) -> bool:
     """
     Heuristically detect whether a stored PRD follows the Krungsri Nimble
@@ -350,6 +429,11 @@ def _prd_follows_krungsri_template(prd_markdown: Any) -> bool:
 _MERMAID_HEADER_RE = re.compile(r"^\s*(flowchart|graph)\s+(TD|TB|LR|RL)\b", re.IGNORECASE)
 
 
+# ARCHITECT 4.2 — Diagram sanitizer (called by 4.1 and by the validator): strips code
+#               fences, then requires the classic flowchart header the
+#               ArchitectureFlows panel accepts; anything else returns "" so the caller
+#               keeps the previously stored diagram (4.3) instead of persisting an
+#               unrenderable one.
 def _sanitize_mermaid_diagram(text: Any) -> str:
     """
     Clean and validate an LLM-produced Mermaid diagram string.
@@ -370,6 +454,11 @@ def _sanitize_mermaid_diagram(text: Any) -> str:
     return clean
 
 
+# ARCHITECT 4.1 — Diagram generation (the node's only LLM call): prompts
+#               prompts/architect_diagram.md with the same validated dataset the PRD
+#               body was filled from, using the diagram LLM profile (larger token
+#               allowance) through the shared structured helper — unlike the auditor,
+#               this DOES get the raw-JSON retry. Fail-open: "" on any failure.
 async def _generate_flow_diagram(
     project_id: str,
     req_state: Dict[str, Any],
@@ -398,6 +487,9 @@ async def _generate_flow_diagram(
             pydantic_object=MermaidDiagramResult
         ).get_format_instructions()
 
+        # ARCHITECT 4.1.1 — Acceptance test for the model's answer: only a sanitisable
+        #                 flowchart (4.2) counts, so the raw-JSON retry triggers on any
+        #                 other shape and 4.3 keeps the stored diagram in the end.
         def _is_flowchart(result: Dict[str, Any]) -> bool:
             return bool(_sanitize_mermaid_diagram(result.get("mermaid_diagram", "")))
 
@@ -457,6 +549,9 @@ _EPIC_RENAME_PATTERNS = (
 )
 
 
+# GATHERING 3.7.1 — Fresh-board renumbering (called from 3.7): declared codes →
+# 1..N, but ONLY while the board has no requirements; returns {} when renumbering
+# does not apply, so legacy codes referenced by the PRD/traceability stay stable.
 def _renumber_fresh_project_codes(
     existing_requirements: Any,
     llm_group_meta: Dict[str, Dict[str, Any]],
@@ -496,6 +591,9 @@ def _user_requests_epic_rename(raw_input: str) -> bool:
     return any(re.search(pattern, lowered) for pattern in _EPIC_RENAME_PATTERNS)
 
 
+# GATHERING 3.4.1 — Epic-name policy: keep the persisted name unless it is a
+# placeholder/empty or the user explicitly asked for a rename (3.4.2), so the first
+# extraction names the epic and later gathers cannot silently rename it.
 def _resolve_epic_name(req_state: Dict[str, Any], llm_epic_name: str, raw_input: str) -> str:
     """Keep the persisted epic name unless the user explicitly renames it.
 
@@ -510,6 +608,11 @@ def _resolve_epic_name(req_state: Dict[str, Any], llm_epic_name: str, raw_input:
     return llm_epic_name or existing_epic_name or "Structured Requirements Draft"
 
 
+# GATHERING 3.8 — Draft sanitizer applied to EVERY incoming story (called inside the
+#             3.5/3.6 loop): trims fields, coerces acceptance criteria to a
+#             de-duplicated list of non-empty strings and drops entries without a
+#             usable title/action, because merge identity matching (6.1) depends on
+#             ticket codes and titles.
 def _sanitize_incoming_story(raw: Any) -> Optional[Dict[str, Any]]:
     """Normalize one LLM-drafted user story before it enters the merge.
 
@@ -548,6 +651,9 @@ def _sanitize_incoming_story(raw: Any) -> Optional[Dict[str, Any]]:
     return story
 
 
+# GATHERING 2.3.1 — Dedupe/merge of recommendation sources: combines the semantic
+#             detections with the matcher verdict, keyed by target so one target
+#             never yields two competing recommendations.
 def _merge_semantic_recommendations(
     detected: Optional[List[Dict[str, Any]]],
     authoritative: Optional[List[Dict[str, Any]]],
@@ -581,6 +687,9 @@ def _merge_semantic_recommendations(
 def _build_intent_guidance(
     detected_intent: str,
     intent_confidence: float,
+    # MATCHING 3.1 — Consumer #1 (prompt guidance, GATHERING flow): the matched
+    #             ticket code is injected into the gatherer prompt as the story to
+    #             modify, so the model returns ONLY that story changed.
     requirement_match: Optional[Dict[str, Any]] = None,
     has_existing_stories: bool = False,
 ) -> str:
@@ -646,6 +755,10 @@ def _build_intent_guidance(
     return "\n".join(lines)
 
 
+# GATHERING 4.4.1 — Change-summary builder: buckets the merge report into
+# created/updated/archived/conflict and renders the assistant message (ticket codes
+# per bucket). Conflicts are reported explicitly because protected stories refused a
+# requested archive and stayed active.
 def _build_change_summary(merge_report: Dict[str, Any]) -> str:
     """Compose the chat message describing exactly what the gather changed.
 
@@ -681,6 +794,21 @@ def _build_change_summary(merge_report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# GATHERING 1.0 — Gatherer node: the extraction heart of the product. It runs after
+#             ROUTING 4.1/4.2 (or directly for on-demand target_agent="gatherer").
+#             Reads:  project_id, raw_input, structured_requirements, current_version,
+#                     detected_intent, intent_confidence, requirement_match, db_session(†)
+#             Writes: requirement_state (requirements/user_stories/
+#                     acceptance_criteria/version_number/current_workflow_state/
+#                     detected_intent/semantic_recommendations), structured_requirements,
+#                     current_version.
+#             DB: requirement_states read (PROJECT 2.3.2) + conversation_messages
+#                 inserts; NO requirement rows are written here — the merged state is
+#                 staged as a pending action (GATHERING 8.0) and only persisted by
+#                 the CONFIRMATION flow.
+#             Sub-flow map: 1.x guards → 2.x pre-extraction intelligence →
+#             3.x LLM extraction → 4.x merge/version → 8.x handoff.
+#             (†) db_session is undeclared in AgentState (analysis §9 item 6).
 async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     """
     Standardizes messy Product Owner input into high-quality Agile structures.
@@ -718,6 +846,12 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Locked stories are still fed to the merge as PROTECTED entries so they stay
     # in the merged output under their original requirement - previously they
     # were excluded from the merge entirely and silently vanished from the board.
+    # GATHERING 1.3 — Lock partitioning: human-locked stories are split out of the
+    #             mutable set, but their UUIDs AND ticket codes are collected in
+    #             `locked_protected_ids` (GATHERING 6.4) so the merge can never
+    #             mutate them and they cannot vanish from the board. They are still
+    #             rendered into the prompt (GATHERING 2.6) to stop the model from
+    #             recreating them as duplicates.
     locked_user_stories = [us for us in existing_user_stories if us.get("is_locked", False)]
     unlocked_user_stories = [us for us in existing_user_stories if not us.get("is_locked", False)]
     if locked_user_stories:
@@ -736,6 +870,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Previously this fell through to the legacy fallback which rebuilt
     # ``requirements`` as a single flat REQ-001, destroying multi-requirement
     # grouping on a no-op invocation.
+    # GATHERING 1.4 — No-op guard: neither raw text nor a draft ⇒ NOTHING is
+    #             extracted. Returns the state untouched plus an explanatory
+    #             assistant message (conversation_messages INSERT). Without this the
+    #             legacy fallback rebuilt the board as a single flat REQ-001 and
+    #             destroyed multi-requirement grouping.
     if not (raw_input and str(raw_input).strip()) and not passed_structured:
         logger.info("[GATHERER] No raw input and no structured draft - nothing to gather.")
         noop_msg = (
@@ -756,6 +895,14 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             "current_version": req_state.get("version_number", 1),
         }
 
+    # GATHERING 1.5 — Structured-draft intake (the frontend re-syncs the board by
+    #             sending `structured_requirements`): rebuild the requirements from
+    #             the draft. Multi-requirement payloads keep their own codes (only
+    #             missing ones are synthesized); a legacy epic-only payload preserves
+    #             the PERSISTED identity instead of resetting the board to REQ-001,
+    #             and a payload with no identity and no stories fabricates nothing
+    #             (that phantom REQ-001 group was the original "first gather lands on
+    #             REQ-002" bug).
     if passed_structured:
         incoming_reqs = passed_structured.get("requirements")
         if isinstance(incoming_reqs, list) and incoming_reqs:
@@ -800,6 +947,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Detect user intent before running the Gatherer
     detected_intent = state.get("detected_intent")
     intent_confidence = state.get("intent_confidence")
+    # INTENT 3.2 — Gatherer fallback detection (agents.py): same defensive call as
+    #             INTENT 3.1, but against the stories the gatherer is about to merge,
+    #             so a direct graph run still gets an intent before extraction.
     if not detected_intent and raw_input:
         intent_res = await detect_requirement_intent(raw_input, existing_user_stories)
         detected_intent = intent_res.get("intent", "UPDATE_REQUIREMENT")
@@ -815,6 +965,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
 
     logger.info(f"Gatherer received raw_input: '{raw_input[:100]}' with detected_intent: {detected_intent}, confidence: {intent_confidence}")
 
+    # GATHERING 1.5.1 — Draft short-circuit: a draft WITHOUT new raw input must never
+    #             re-run extraction. Keeps the grouping from 1.5 and only re-derives
+    #             the flattened story/AC views from it (no LLM call at all).
     if not raw_input:
         # ---- Structured-draft short-circuit --------------------------------
         # A draft payload without new raw input (e.g. the frontend re-syncing
@@ -848,6 +1001,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             "current_version": version_number,
         }
 
+    # GATHERING 1.6 — Defensive GENERAL_CHAT guard: conversational input reaching the
+    #             gatherer (misrouted intent) is answered, never extracted. Returns
+    #             the state unchanged + an assistant message.
     if detected_intent == "GENERAL_CHAT":
         # Defensive guard: conversational input must never be extracted into
         # requirements. The router/route normally short-circuits earlier, but
@@ -873,6 +1029,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         }
 
 
+    # MATCHING 3.2 — Consumer #2 (gatherer semantic seed): when the deterministic
+    #             semantic-change pass found nothing, the matcher's single target is
+    #             converted into the same change-recommendation shape, so both
+    #             sources feed one code path instead of two competing edits.
     # Use requirement_match from Requirement Matcher Agent if available
     requirement_match = state.get("requirement_match") or {}
     matched_req_id = requirement_match.get("matched_requirement_id")
@@ -883,7 +1043,14 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Requirement Matcher's recommendation is MERGED in — not substituted for it,
     # as the old if/else did — so a message that targets an existing story and
     # also asks for something new keeps both halves.
+    # GATHERING 2.2 — Deterministic change detection (GATHERING 5.x) over the
+    #             UNLOCKED stories only: locked stories are human-verified and must
+    #             never even be proposed for mutation.
     semantic_recs = await detect_semantic_changes(raw_input, unlocked_user_stories)
+    # GATHERING 2.3 — Matcher reconciliation: the matcher's single verdict (MATCHING
+    #             3.1/3.2) is MERGED into the semantic recommendations instead of
+    #             replacing them, so "change story X AND add something new" keeps both
+    #             halves (the old if/else dropped one). Merge helper: 2.3.1.
     if matched_req_id and match_action in ["UPDATE", "DELETE"]:
         rec_action = "UPDATE" if match_action == "UPDATE" else "ARCHIVE"
         matcher_rec = {
@@ -900,6 +1067,13 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         )
 
     # Check for low confidence changes
+    # GATHERING 2.4 — Confidence gate BEFORE the LLM extraction: any recommendation
+    #             below SEMANTIC_LOW_CONFIDENCE_THRESHOLD raises a clarification
+    #             question (with target + confidence + reason), sets
+    #             validation_status="invalid" and RETURNS — no extraction, no merge,
+    #             no version bump. Questions are de-duplicated against the still
+    #             unresolved ones, and only genuinely new questions are posted to the
+    #             chat (conversation_messages INSERT).
     low_confidence_changes = [
         c for c in semantic_recs
         if coerce_confidence(c.get("confidence"), default=1.0) < SEMANTIC_LOW_CONFIDENCE_THRESHOLD
@@ -964,6 +1138,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         }
 
 
+    # GATHERING 2.6 — Backlog context for the prompt: epic name (with a "do not
+    #             rename" note), the mutable stories (shared formatter, GATHERING
+    #             6.6), then the locked stories with an explicit `Flags: LOCKED`
+    #             marker so the model reproduces them exactly and does not create
+    #             duplicates.
     # Format current stories context via the shared helper (also used by the
     # semantic/intent/matcher prompts so every agent describes the backlog
     # identically).
@@ -990,6 +1169,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Explicit intent rules for the LLM: with only the raw intent label the
     # model regularly re-emitted the whole backlog as reworded duplicates
     # instead of extracting just the requested change.
+    # GATHERING 2.5 — Prompt guidance: the raw intent label alone made the model
+    #             re-emit the whole backlog as reworded duplicates; 2.5 (helper
+    #             defined above, MATCHING 3.1) turns intent + matcher target into
+    #             explicit extraction rules ("return ONLY story X modified", …).
     intent_guidance = _build_intent_guidance(
         detected_intent=detected_intent,
         intent_confidence=intent_confidence,
@@ -1000,6 +1183,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Format semantic recommendations
     recs_str = json.dumps(semantic_recs, indent=2)
 
+    # GATHERING 3.1 — Extraction prompt: prompts/gatherer.md + the raw input, the
+    #             detected intent, the guidance from 2.5, the backlog context from
+    #             2.6 and the semantic recommendations, with the pydantic schema's
+    #             format instructions. (The markdown file itself is not annotated —
+    #             its text reaches the model verbatim.)
     prompt_template = PromptTemplate(
         template=load_prompt("gatherer"),
         input_variables=["raw_input", "detected_intent", "intent_guidance", "current_context", "recommendations", "format_instructions"]
@@ -1023,6 +1211,9 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     parsing_error = None
 
     try:
+        # GATHERING 3.2 — The single extraction call: shared structured-output
+        #             helper (raw JSON → with_structured_output) returning
+        #             GatheredRequirements. LM Studio via llm_factory (CHAT 6.1).
         result = await invoke_llm_structured(
             llm,
             prompt_template,
@@ -1044,6 +1235,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         logger.error(parsing_error)
 
     # Stop execution if parsing fails entirely
+    # GATHERING 3.3 — FAIL LOUD: a total parse failure raises, and the route surfaces
+    #             it as HTTP 500. Deliberately no fallback draft — silently inventing
+    #             requirements from an unparseable model answer is worse than an
+    #             explicit error (contrast GATHERING 1.4/1.6, which are safe no-ops).
     if parsing_error:
         raise ValueError(
             f"The Gatherer agent failed to parse raw input into structured JSON requirements. "
@@ -1053,12 +1248,19 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # Keep the persisted epic name unless the user explicitly asked to rename
     # it (regex detection now understands "rename the epic to X", "the epic
     # should be called X", etc. - the old substring check missed those).
+    # GATHERING 3.4 — Epic-name resolution (helper 3.4.1 + rename regex 3.4.2): the
+    #             stored epic name wins unless the user explicitly asked to rename it,
+    #             so a re-gather cannot silently rename the epic.
     epic_name = _resolve_epic_name(req_state, str(result.get("epic_name") or ""), raw_input)
 
 
     # ===============================================
     # Normalize the LLM output into requirement groups
     # ===============================================
+    # GATHERING 3.5 — Output-shape normalization: a legacy flat `user_stories`
+    #             payload is wrapped into ONE requirement group (reusing the
+    #             persisted identity) so a single merge/reassembly path handles both
+    #             schema generations.
     llm_requirements = result.get("requirements")
     if not isinstance(llm_requirements, list):
         llm_requirements = []
@@ -1116,6 +1318,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
                 if isinstance(us, dict)
             }
             title_same = normalize_title(group_title) == normalize_title(existing_req_by_code[target_code].get("title"))
+            # GATHERING 3.6 — Recycled-code guard: the LLM reusing an EXISTING
+            #             requirement code is treated as an update only when the title
+            #             matches or at least one incoming story belongs to that group;
+            #             otherwise a fresh code is minted so a new feature can never
+            #             pollute an existing requirement group.
             if not title_same and not (incoming_codes & existing_group_codes):
                 fresh = _generate_next_requirement_code(used_req_codes)
                 logger.warning(
@@ -1152,6 +1359,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # project at REQ-002. Nothing references requirement codes yet on an empty
     # board, so remap every declared group to 1..N in declaration order — the
     # first requirement is always REQ-001.
+    # GATHERING 3.7 — Fresh-board renumbering (helper 3.7.1): on an empty board the
+    #             declared groups are remapped to REQ-001..REQ-00N in declaration
+    #             order, because nothing references codes yet. Skipped entirely once
+    #             requirements exist (the PRD text and traceability quote those codes).
     renumber = _renumber_fresh_project_codes(existing_requirements, llm_group_meta)
     if renumber:
         logger.info(f"[GATHERER] Fresh project: renumbering LLM requirement codes: {renumber}")
@@ -1168,6 +1379,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # requirement group. Locked stories are protected (never mutated) but
     # stay in the merge input so they never vanish from the board.
     # ===============================================
+    # GATHERING 4.1 — THE merge (GATHERING 6.0): one pass over the flattened story
+    #             list (unlocked mutable + locked protected) with the semantic
+    #             recommendations and `locked_protected_ids`. Per-story field merge,
+    #             AC union and the protected/conflict rule live in merge_service.
     merged_stories, merge_report = merge_user_stories_with_report(
         existing_stories=unlocked_user_stories + locked_user_stories,
         new_incoming_stories=incoming_entries,
@@ -1178,6 +1393,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # ===============================================
     # Reassemble requirement groups from the merged story set
     # ===============================================
+    # GATHERING 4.2 — Requirement-group reassembly: seeded with the existing groups
+    #             (identity + ordering preserved) plus the genuinely new LLM-declared
+    #             ones. Created stories go to the group the LLM assigned; matched/
+    #             unchanged/conflict stories RETAIN their original membership. Groups
+    #             left without stories are dropped so the board has no empty shells.
     req_groups: Dict[str, Dict[str, Any]] = {}
     # Seed with existing requirements to preserve identity & ordering
     for req in existing_requirements:
@@ -1262,6 +1482,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # project version on every gather). Bump by exactly one when the merge
     # actually changed something; otherwise keep the current version.
     # ===============================================
+    # GATHERING 4.3 — Version bump rule: the LLM's own `version` echo is ignored (it
+    #             does not know the current version and its schema default RESET the
+    #             counter). Exactly +1 when the merge report contains created /
+    #             updated / archived, otherwise the version stays put.
     report_actions = {str((info or {}).get("action", "")) for info in merge_report.values()}
     has_changes = bool(report_actions & {"created", "updated", "archived"})
     current_version = req_state.get("version_number") or 1
@@ -1275,6 +1499,11 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
     # A change-summary chat message (added/updated/archived ticket codes)
     # persisted as a regular assistant message - the old static message told
     # the Product Owner nothing about what actually changed.
+    # GATHERING 4.4 — Change summary (helper 4.4.1): the assistant message lists the
+    #             created/updated/archived ticket codes (plus protected conflicts), so
+    #             the Product Owner sees WHAT changed. Persisted via
+    #             conversation_messages; the client then stages the merge preview
+    #             (GATHERING 8.1).
     gatherer_msg = _build_change_summary(merge_report)
     await ConversationMessageRepository.save_message(
         project_id=project_id,
@@ -1292,6 +1521,10 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         "requirements": req_state.get("requirements", [])
     }
 
+    # GATHERING 4.5 — Return contract back to the pipeline: the merged (still
+    #             PERSISTED-NOTHING) state, the flattened compatibility view, the
+    #             intent and the new version. The route then stages it as a pending
+    #             action (GATHERING 8.0) and publishes `workflow_update`.
     return {
         "requirement_state": req_state,
         "structured_requirements": structured_out,
@@ -1312,6 +1545,9 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
     db_session = state.get("db_session")
     req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     
+    # MATCHING 3.3 — Consumer #3 (DELETE flow): the archive target + its confidence
+    #             come straight from the matcher result; below 0.75 the node refuses
+    #             to archive anything and asks for confirmation instead.
     # Get the requirement match result
     requirement_match = state.get("requirement_match") or {}
     matched_req_id = requirement_match.get("matched_requirement_id")
@@ -1457,6 +1693,17 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
         }
 
 
+# AUDIT 1.0 — Auditor node (graph position: ROUTING 1.2 for target_agent="auditor",
+#             ROUTING 4.1 for a classify COMMAND, or the on-demand AUDIT 5.1 request).
+#             Reads:  project_id, structured_requirements, current_version, db_session(†)
+#             Writes: requirement_state (clarification_questions, validation_status,
+#                     passed_checks, failed_checks, current_workflow_state) +
+#                     audit_result.
+#             DB: requirement_states read (PROJECT 2.3.2) + conversation_messages insert;
+#                 NOTHING else — the questions become real rows only when the staged
+#                 merge is confirmed (CONFIRMATION flow).
+#             Sub-flow: 1.x scope → 2.x LLM audit → (3.x answers the questions).
+#             (†) db_session is undeclared in AgentState (analysis §9 item 6).
 async def auditor_node(state: AgentState) -> Dict[str, Any]:
     """
     Runs compliance, safety, and business rule audits on structured drafts.
@@ -1483,6 +1730,10 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         # only synthesized when there really are stories — never with a hardcoded
         # code, which is what used to claim the first requirement number and
         # flatten every project onto a phantom ``REQ-001``.
+        # AUDIT 1.1 — Legacy flat-board fallback: a board without requirement rows gets
+        #             ONE group to hold the audited stories, and only when stories exist
+        #             — never a hardcoded code on an empty board (that is what used to
+        #             claim REQ-001 and flatten every project).
         if not (req_state.get("requirements") or []) and passed_stories:
             req_state["requirements"] = [
                 {
@@ -1510,11 +1761,19 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     ]
     if len(unlocked_stories) != len(all_stories):
         logger.info(f"[AUDITOR] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from audit.")
+    # AUDIT 1.2 — Audit scope (cost + consistency control): only UNLOCKED stories with
+    #             change_type created/updated (or missing) are sent to the LLM;
+    #             `unchanged` stories are tracked separately so their existing
+    #             unresolved questions can be carried over in AUDIT 2.2.
     to_audit_stories = [story for story in unlocked_stories if story.get("change_type") in ["created", "updated", None]]
     unchanged_stories = [story for story in unlocked_stories if story.get("change_type") == "unchanged"]
     
     logger.info(f"Auditor Node: {len(to_audit_stories)} stories to audit, {len(unchanged_stories)} unchanged stories.")
     
+    # AUDIT 1.3 — No-op path: nothing to audit ⇒ NO LLM call. The previous verdict is
+    #             kept (validation_status) and a result is synthesized from a hardcoded
+    #             7-point checklist, so "passed_checks" can be reported here without any
+    #             audit actually having run (documented behaviour, not changed).
     if not to_audit_stories:
         logger.info("Auditor Node: All user stories are unchanged. Skipping LLM execution and keeping existing validation status.")
         is_valid = req_state.get("validation_status") == "valid"
@@ -1549,6 +1808,12 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         input_variables=["structured_requirements", "current_version"]
     )
     
+    # AUDIT 2.1 — Prompt chain for the compliance audit. DISCREPANCY (documented, not
+    #             changed): this uses a raw `prompt | llm | parser` chain instead of the
+    #             shared invoke_llm_structured helper (GATHERING 3.2 / INTENT 2.6), so
+    #             the auditor has NO raw-JSON retry and no reasoning-content recovery —
+    #             its only safety net is the AUDIT 2.6 fallback. The prompt file
+    #             (prompts/auditor.md) is not annotated: its text reaches the model.
     chain = prompt | llm | parser
     
     try:
@@ -1559,6 +1824,9 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         })
         
         # Merge new questions with existing unresolved questions targeting unchanged user stories
+        # AUDIT 2.2 — Question reconciliation: unresolved questions that target
+        #             UNCHANGED stories survive the re-audit; the freshly produced ones
+        #             are appended, so asking again never loses earlier roadblocks.
         new_questions = result.get("clarification_questions", [])
         unchanged_story_codes = {s.get("ticket_code") for s in unchanged_stories}
         existing_questions = req_state.get("clarification_questions", [])
@@ -1572,6 +1840,9 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         result["clarification_questions"] = combined_questions
         
         # Determine overall validity
+        # AUDIT 2.3 — Validity rule: the verdict is derived SOLELY from "no
+        #             clarification questions remain", so a model that reports
+        #             findings without raising questions still passes (documented).
         is_valid = len(combined_questions) == 0
         result["is_valid"] = is_valid
         
@@ -1588,6 +1859,10 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             q_texts = "\n".join([f"• {q.get('question_text')}" for q in combined_questions if isinstance(q, dict)])
             auditor_msg = f"⚠️ **Compliance Audit Alert (Auditor Agent):**\nTechnical gaps or missing security constraints were detected in your specifications against our checklist.\n\n**Pending Clarifications:**\n{q_texts or 'None specified'}"
 
+        # AUDIT 2.4 — Auditor chat turn (conversation_messages, role="auditor",
+        #             intent="AUDIT"): pass or the bulleted clarification list. The
+        #             questions themselves stay in memory until the staged merge is
+        #             confirmed (CONFIRMATION flow) — AUDIT 3.x answers them afterwards.
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="auditor",
@@ -1602,6 +1877,13 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Error parsing structured response in auditor_node: {str(e)}")
+        # AUDIT 2.6 — Parse-error fallback (the only recovery the raw chain has):
+        #             the audit is reported as INVALID with failed_checks
+        #             ["AUDIT_PARSE_ERROR"] and one system-error question. NOTE
+        #             (documented, not changed): `target_user_story_id` is the sentinel
+        #             string "ALL", not a story UUID — the repository's
+        #             _resolve_story_id (AUDIT 4.4) cannot resolve it, so the linkage
+        #             degrades to NULL.
         fallback_audit = {
             "is_valid": False,
             "audit_version_reviewed": current_version,
@@ -1626,6 +1908,21 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             "audit_result": fallback_audit
         }
 
+# ARCHITECT 2.0 — Architect node (graph position: ROUTING 1.2 for
+#             target_agent="architect", ROUTING 4.1 for a COMMAND, or the on-demand
+#             ARCHITECT 1.2 request). Turns the validated requirement board into the
+#             official PRD document + the Architecture Flows diagram.
+#             Reads:  project_id, structured_requirements, current_version,
+#                     version_history_summaries, db_session(†)
+#             Writes: requirement_state (generated_prd, generated_diagrams,
+#                     current_workflow_state) + prd_markdown/mermaid_diagram
+#             DB: requirement_states read; prd_sections + prd_section_versions (5.1);
+#                 prd_versions + version_number (6.0); conversation_messages (7.0).
+#                 The requirement rows themselves are still only STAGED for
+#                 confirmation (CONFIRMATION flow).
+#             Sub-flow: 2.x guards → 3.x deterministic fill → 4.x diagram →
+#                       5.x section sync → 6.x version ledger → 7.x message.
+#             (†) db_session is undeclared in AgentState (analysis §9 item 6).
 async def architect_node(state: AgentState) -> Dict[str, Any]:
     """
     Transforms audited requirements metadata into clean Markdown PRDs with embedded Mermaid diagrams.
@@ -1653,6 +1950,13 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         # an opaque HTTP 500 ("PRD Generation Failed — No Document Saved").
         # The stored requirement_code / title are preserved as well instead of
         # being reset onto a hardcoded ``REQ-001``.
+        # ARCHITECT 2.1 — Draft intake: rebuilt requirement groups keep their stored
+        #             `id` (required by the RequirementDetail response schema — dropping
+        #             it used to fail FastAPI validation with an opaque 500) and their
+        #             persisted code/title, while locked stories are filtered out of the
+        #             generated document. A flat board without requirement rows becomes
+        #             ONE group only when stories exist (never a hardcoded REQ-001 on an
+        #             empty board).
         incoming_reqs = passed_structured.get("requirements")
         if isinstance(incoming_reqs, list) and any(isinstance(r, dict) for r in incoming_reqs):
             rebuilt_reqs = []
@@ -1717,6 +2021,12 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     existing_prd = req_state.get("generated_prd")
     existing_diagrams = req_state.get("generated_diagrams")
 
+    # ARCHITECT 2.2 — Reuse guard (no LLM at all): when nothing changed AND a stored
+    #             PRD exists with a stored diagram AND that PRD already follows the
+    #             official template (2.2.1) or is sectioned markdown (2.2.2), the
+    #             existing documents are returned untouched. Legacy documents (old
+    #             hand-rolled section list) deliberately FAIL this test so they get
+    #             migrated to the template instead of being served forever.
     if (
         not to_build_stories
         and existing_prd
@@ -1739,6 +2049,11 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         isinstance(r, dict) and r.get("user_stories") for r in requirements
     )
 
+    # ARCHITECT 2.3 — FAIL LOUD: an empty dataset must never reach the LLM (it would
+    #             only hallucinate a PRD). Raises so /api/process-requirements maps it
+    #             to HTTP 500 and nothing is persisted. Stories may live flat in
+    #             user_stories OR nested inside requirements; a stored legacy PRD does
+    #             not excuse an empty dataset (it is never reused — see 2.2).
     if not unlocked_stories and not nested:
         # FAIL LOUDLY: invoking the LLM with an empty story set would only
         # produce a hallucinated PRD. Raise so /api/process-requirements maps
@@ -1760,8 +2075,18 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     # result is PDF-exact and compiles every time. No free-form LLM text is
     # spliced into the structure, so exports can no longer fail on model
     # escaping mistakes (dropped row terminators, unbalanced braces, ...).
+    # ARCHITECT 3.0 — DETERMINISTIC TEMPLATE FILL (the reason exports cannot break):
+    #             the official Krungsri template body (3.1) is filled field-by-field
+    #             from the project's own AI-gathered / AI-validated data. The skeleton
+    #             — every table, merged cell and \newpage marker — is always the
+    #             untouched official template, and NO free-form LLM text is spliced into
+    #             the structure, so PDF-exact compilation is guaranteed.
     from app.prd_filler import fill_template_body
 
+    # ARCHITECT 3.2 — Dataset assembly: nested boards contribute `requirements`
+    #             (with their stories/ACs), flat boards contribute `user_stories` +
+    #             `acceptance_criteria`; scope_in is derived from the story titles.
+    #             This is exactly the same dataset the diagram prompt (4.1) receives.
     stories_flat: List[Dict[str, Any]] = []
     if nested:
         for r in requirements:
@@ -1784,6 +2109,9 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
+    # ARCHITECT 3.3 — The fill itself (3.1 helper): cover page, stakeholders, version
+    #             history, reviews, business overview, scope tables, technical appendix
+    #             and glossary, from `data` + the version summary.
     generated_prd = fill_template_body(
         project_id=project_id,
         project_name=req_state.get("project_name", "") or "",
@@ -1800,6 +2128,10 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     # mirrors the freshly generated document. When the model fails or returns
     # unusable output the previously stored diagram is kept instead, so the
     # PRD result is never lost over a diagram hiccup.
+    # ARCHITECT 4.0 — Diagram refresh (the ONLY LLM call in this node): 4.1 asks for
+    #             raw Mermaid using the same dataset; 4.2 sanitizes it; 4.3 keeps the
+    #             previously stored diagram when the model fails or returns something
+    #             that is not a flowchart — a diagram hiccup can never lose the PRD.
     fresh_diagram = await _generate_flow_diagram(project_id, req_state, data)
     req_state["generated_diagrams"] = fresh_diagram or req_state.get("generated_diagrams", "")
     req_state["current_workflow_state"] = "architect_node"
@@ -1809,6 +2141,13 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     # sections are PRESERVED verbatim — regeneration only touches unlocked,
     # AI-generatable parts. The stitched markdown of ALL parts (AI + human)
     # becomes the current generated_prd so human content survives every run.
+    # ARCHITECT 5.0 — PART-LEVEL PRD SYNC (5.1): the freshly filled document is merged
+    #             into prd_sections — human-owned (ai_generatable=False) and LOCKED
+    #             sections are preserved verbatim, so regeneration only touches
+    #             unlocked AI parts. The stitched markdown of ALL parts (AI + human)
+    #             becomes the current generated_prd, which is what keeps human edits
+    #             alive across every regeneration.
+    #             5.2 — fail-soft: section bookkeeping must never fail PRD generation.
     if db_session:
         try:
             from app.prd_section_service import sync_sections_from_prd
@@ -1831,6 +2170,11 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     # to the previous snapshot — so the Version ledger never collapses. The
     # per-section change records prove which parts changed and which were
     # locked_preserved by the lock contract.
+    # ARCHITECT 6.0 — Version ledger (VERSIONING flow → PROJECT 8.2.3 / CONFIRM 3.3.7
+    #             all record here): every Generate PRD appends an immutable
+    #             prd_versions snapshot and advances version_number — even when the
+    #             merged document is byte-identical because every changed section was
+    #             locked — so the ledger never collapses. 6.1 — fail-soft (logged).
     if db_session:
         try:
             from app.version_service import record_prd_version
@@ -1846,6 +2190,9 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         except Exception as version_err:
             logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
 
+    # ARCHITECT 7.0 — Architect chat turn (conversation_messages, role="architect",
+    #             intent="PRD_GENERATION"), and ARCHITECT 8.0 — the return contract
+    #             consumed by the pipeline → ARCHITECT 1.5 (store + PRD tab switch).
     architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
     await ConversationMessageRepository.save_message(
         project_id=project_id,
@@ -1855,12 +2202,30 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         intent="PRD_GENERATION"
     )
     
+    # ARCHITECT 8.0 — Return contract back to the pipeline: the updated state (with
+    #             generated_prd already re-stitched in 5.1), the PRD markdown and the
+    #             Mermaid diagram. The pipeline answers HTTP 200 with these fields and
+    #             the UI applies them in ARCHITECT 1.5.
     return {
         "requirement_state": req_state,
         "prd_markdown": req_state["generated_prd"],
         "mermaid_diagram": req_state["generated_diagrams"]
     }
 
+# ==========================================
+# ROUTING 1.1 / 1.2 — Graph entry dispatch.
+# 1.1 START of prd_workflow is a CONDITIONAL edge: every invocation enters
+#     through route_on_demand below (wired at ROUTING 1.3), so an explicit
+#     target_agent never pays for the classifier.
+# 1.2 route_on_demand(state) → node name:
+#       target_agent == "auditor"                      → auditor_node      (AUDITOR flow)
+#       target_agent == "architect"                    → architect_node    (ARCHITECT flow)
+#       target_agent == "delete_requirement"           → delete_requirement_node
+#         OR detected_intent == "DELETE_REQUIREMENT"
+#       otherwise                                      → router_node       (ROUTING 2.x)
+#     Keys read: target_agent, detected_intent (both declared in AgentState 74-92).
+#     The DELETE_REQUIREMENT check is belt-and-braces: the pipeline already maps
+#     that intent onto target_agent in INTENT 1.4.
 # ==========================================
 # ON-DEMAND ROUTING ROUTINE
 # ==========================================
@@ -1887,6 +2252,15 @@ def route_on_demand(state: AgentState) -> str:
         logger.info("Routing to router_node before Gatherer.")
         return "router_node"
 
+# ROUTING 4.1 — Post-router dispatch on the classification in
+#             state["workflow_routing"] (written by ROUTING 2.0):
+#               REQUIREMENT → requirement_matcher_node (then 4.2 → gatherer)
+#               COMMAND     → auditor_node | architect_node | END
+#                             (END when ROUTING 2.4 matched no keyword, or when the
+#                              incoming target_agent was neither — see the
+#                              discrepancy note at ROUTING 2.4)
+#               CHAT | QUESTION → END (the router node already produced the reply,
+#                                  persisted by the caller as `agent_message`)
 def route_from_router(state: AgentState) -> str:
     """
     Routes based on workflow classification from workflow_router_node.
@@ -1905,6 +2279,10 @@ def route_from_router(state: AgentState) -> str:
     else:  # CHAT or QUESTION
         return END
 
+# ROUTING 4.2 — Matcher outcome gate: only the requirement_state's own
+#             `validation_status` is consulted ("invalid" = the matcher asked a
+#             clarification question), so the gatherer never runs on an unresolved
+#             ambiguity; otherwise the run continues into the GATHERING flow.
 def route_from_matcher(state: AgentState) -> str:
     """
     Routes based on requirement matcher validation status.
@@ -1915,6 +2293,17 @@ def route_from_matcher(state: AgentState) -> str:
     return "gatherer_node"
 
 # ==========================================
+# ROUTING 1.0 — Graph topology (whole picture):
+#   START --route_on_demand(1.2)--> router_node | auditor_node | architect_node
+#                                    | delete_requirement_node
+#   router_node --route_from_router(4.1)--> requirement_matcher_node
+#                                    | auditor_node | architect_node | END
+#   requirement_matcher_node --route_from_matcher(4.2)--> gatherer_node | END
+#   gatherer_node / auditor_node / architect_node / delete_requirement_node --> END
+#   i.e. a SINGLE-PASS graph: no node loops back, every path terminates (4.5).
+#   Node → flow: router (ROUTING 2.x), matcher (MATCHING flow), gatherer
+#   (GATHERING flow), auditor (AUDITOR flow), architect (ARCHITECT flow),
+#   delete_requirement (DELETE flow).
 # GRAPH COMPILATION
 # ==========================================
 workflow = StateGraph(AgentState)
@@ -1928,6 +2317,9 @@ workflow.add_node("architect_node", architect_node)
 workflow.add_node("delete_requirement_node", delete_requirement_node)
 
 # Set up conditional routing from START based on target_agent
+# ROUTING 1.3 — Entry edge: the on-demand agents bypass the classifier entirely
+#             (no LLM classification cost, and an empty raw_input cannot degrade
+#             into a CHAT/QUESTION answer). Everything else enters router_node.
 workflow.add_conditional_edges(
     START,
     route_on_demand,
@@ -1940,6 +2332,7 @@ workflow.add_conditional_edges(
 )
 
 # Route from router_node based on workflow classification
+# ROUTING 4.3 — Post-router dispatch table (see route_from_router 4.1).
 workflow.add_conditional_edges(
     "router_node",
     route_from_router,
@@ -1952,6 +2345,9 @@ workflow.add_conditional_edges(
 )
 
 # Route from requirement_matcher_node to gatherer_node or END (if ambiguous / low confidence)
+# ROUTING 4.4 — Matcher gate: an ambiguous/low-confidence match (validation_status
+#             == "invalid", set by the matcher) ends the run with the clarification
+#             question instead of letting the gatherer rewrite the wrong story.
 workflow.add_conditional_edges(
     "requirement_matcher_node",
     route_from_matcher,
@@ -1967,6 +2363,10 @@ workflow.add_edge("auditor_node", END)
 workflow.add_edge("architect_node", END)
 workflow.add_edge("delete_requirement_node", END)
 
+# ROUTING 4.5 — Terminal edges + compile: every worker node returns to END, so one
+#             invocation performs exactly ONE unit of work (classify-answer,
+#             audit, PRD, delete or gather→merge). Multi-step behaviour is driven
+#             by the CALLER issuing further requests, not by graph loops.
 # Export compiled graph workflow
 prd_workflow = workflow.compile()
 logger.info("StateGraph compiled successfully with requirement matcher agent and workflow router.")

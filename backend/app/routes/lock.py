@@ -220,6 +220,10 @@ async def get_artifact_lock_status(
 # PENDING ACTIONS API
 # ==========================================
 
+# CONFIRM 3.1 — READ: staged actions (CONFIRM 2.1 / 1.7). Auth: AUTH 7.5 ownership.
+#             Only rows still WAITING_CONFIRMATION are returned (repository 5.2); the
+#             response carries `full=True` proposed_changes so the panel can render
+#             the draft without a second call.
 @router.get("/api/pending-actions/{project_id}", response_model=List[PendingActionResponse], status_code=status.HTTP_200_OK)
 async def get_pending_actions(
     project_id: str,
@@ -240,6 +244,11 @@ async def get_pending_actions(
     return actions
 
 
+# CONFIRM 3.2 — READ-ONLY impact preview for one staged action (CONFIRM 2.2 / 1.5).
+#             Auth: AUTH 7.5. Branches: 400 invalid ids → 404 action not in this
+#             project → ImpactService.analyze_pending_action (CONFIRM 4.x).
+#             Writes nothing (note: the action is located via the project's pending
+#             list, so an action id from another project is invisible → 404).
 @router.get("/api/pending-actions/{action_id}/impact", response_model=ImpactAnalysisResponse, status_code=status.HTTP_200_OK)
 async def get_action_impact(
     action_id: str,
@@ -284,6 +293,22 @@ async def get_action_impact(
     return analysis
 
 
+# CONFIRM 3.3 — THE ONLY PATH THAT PERSISTS AI OUTPUT (CONFIRM 2.3 / 1.2). Everything
+#             the agents produced before this point is a pending-action draft.
+#             Branch map:
+#               3.3.1 UUID format 400
+#               3.3.2 project artifact lock gate → 409 (locked) / 404 (unresolvable)
+#               3.3.3 action lookup within this project → 404
+#               3.3.4 empty proposed_changes → action deleted + 400 (nothing to apply)
+#               3.3.5 RequirementStateRepository.save_or_update ← THE WRITE
+#                     (PROJECT 8.2.2: requirement_states + requirements / epics /
+#                      user_stories / acceptance_criteria / audit_results /
+#                      clarification_questions / prd_documents)
+#               3.3.6 document-extraction bookkeeping (only INSERT_CHUNKED_REQUIREMENTS)
+#               3.3.7 version ledger row (pinned version, fail-soft)
+#               3.3.8 pending action deleted (the row IS the state; it is not "applied")
+#               3.3.9 SSE "merge_confirmed" → clients refresh
+#               3.3.10 response {status, requirement_state}
 @router.post("/api/confirm-action/{action_id}", response_model=ConfirmActionResponse, status_code=status.HTTP_200_OK)
 async def confirm_action(
     action_id: str,
@@ -313,6 +338,9 @@ async def confirm_action(
         UUID(project_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
+    # CONFIRM 3.3.2 — Lock gate (coarse, project-level): a locked project refuses the
+    #               merge with 409; an unresolvable project id becomes 404. This is
+    #               what stops an AI merge from overwriting a frozen baseline.
     try:
         lock_info = await LockService.get_lock_status("project", project_id, session, project_id=project_id)
         LockService.raise_if_locked("project", project_id, lock_info)
@@ -336,12 +364,21 @@ async def confirm_action(
 
     # 3. Apply proposed changes to the database
     logger.info(f"[MERGE CONFIRM] Persisting merged state for project {project_id}...")
+    # CONFIRM 3.3.5 — THE WRITE (the single point where a staged draft becomes real
+    #               data). Reuses the PROJECT 8.2.2 repository step: create-if-missing,
+    #               else partial update that rebuilds the child tables from the lists
+    #               supplied in the draft. Committed by the request's get_db on success.
     persisted_state = await RequirementStateRepository.save_or_update(project_id, proposed_changes, session)
 
     # 3b. Document-extraction merges (INSERT_CHUNKED_REQUIREMENTS): flip the
     # source document's extraction flag and append the audit-log entry. The
     # draft was created by POST .../documents/{id}/process; THIS is the only
     # point at which document-derived requirements ever reach the DB.
+    # CONFIRM 3.3.6 — Document-extraction bookkeeping (only for drafts staged by the
+    #               DOCUMENT EXTRACTION flow, identified by `_document_ref` in the
+    #               draft): flip uploaded_documents.extraction_status to
+    #               "extraction_applied" and append an artifact_event_logs entry.
+    #               Fail-soft: a logging failure never blocks the confirmed merge.
     document_ref = proposed_changes.get("_document_ref") or {}
     if action.get("action_type") == "INSERT_CHUNKED_REQUIREMENTS" and document_ref.get("document_id"):
         from app.repositories import ArtifactEventLogRepository, DocumentRepository
@@ -380,6 +417,13 @@ async def confirm_action(
         # already advanced exactly once (e.g. document-extraction drafts store
         # version_number + 1) — otherwise take the next free ledger number.
         # Never collides, never double-bumps.
+        # CONFIRM 3.3.7 — Version ledger (VERSIONING flow): every confirmed merge gets
+        #               its own immutable prd_versions row. `pinned_version` is the max
+        #               of the draft's own version and the next free ledger number, so
+        #               a draft that already bumped (document extraction) cannot
+        #               double-bump. record_prd_version re-writes
+        #               requirement_states.version_number, hence the re-read below.
+        #               Fail-soft: a ledger failure is logged, the merge stays applied.
         pinned_version = max(
             int(persisted_state.get("version_number") or 1),
             int((latest_ledger or {}).get("version_number") or 0) + 1,
@@ -409,9 +453,14 @@ async def confirm_action(
     except Exception as ledger_err:  # NEVER block a confirmed merge on ledger logging
         logger.warning(f"[MERGE CONFIRM] Failed to log merge into the version ledger: {ledger_err}")
 
+    # CONFIRM 3.3.8 — The action row is DELETED, never marked "applied": the pending
+    #               action carries the only copy of the draft, and its absence is what
+    #               tells the UI the gate is closed (3.4 does the same on Cancel).
     # 4. Delete the pending action
     await PendingActionRepository.delete(action_id, project_id, session)
 
+    # CONFIRM 3.3.9 — Real-time fan-out: other clients (and this one, debounced)
+    #               re-read the project state (EVENTS flow).
     await event_manager.publish(project_id, "merge_confirmed", {
         "project_id": project_id,
         "action_id": action_id,
@@ -424,6 +473,10 @@ async def confirm_action(
     }
 
 
+# CONFIRM 3.4 — Discard path (CONFIRM 2.4 / 1.4): delete the staged action and nothing
+#             else — the persisted project is untouched, so no lock check is needed
+#             (there is nothing to overwrite). SSE "action_cancelled" closes the gate
+#             on every connected client.
 @router.post("/api/cancel-action/{action_id}", response_model=ActionStatusResponse, status_code=status.HTTP_200_OK)
 async def cancel_action(
     action_id: str,

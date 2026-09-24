@@ -58,6 +58,9 @@ def _as_story_list(value: Any) -> List[Dict[str, Any]]:
     return [s for s in value if isinstance(s, dict)] if isinstance(value, list) else []
 
 
+# CONFIRM 4.5 — Shape helper: flattens a state payload (persisted OR draft) into
+#             {requirement_code: {…stories…}} so 4.2/4.3 can diff like-for-like
+#             regardless of whether the story list is nested per requirement or flat.
 def _flatten_state_requirements(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """{requirement_code: requirement-dict} from a requirement-state shape.
 
@@ -85,6 +88,9 @@ def _flatten_state_requirements(state: Dict[str, Any]) -> Dict[str, Dict[str, An
     return requirements
 
 
+# CONFIRM 4.2 — Requirement-level diff (current vs proposed): created / updated /
+#             removed groups with the fields that changed; returns the affected
+#             REQ-codes used by 4.4.
 def diff_requirements(
     current: Dict[str, Dict[str, Any]],
     proposed: Dict[str, Dict[str, Any]],
@@ -134,6 +140,9 @@ def diff_requirements(
     return changes, affected
 
 
+# CONFIRM 4.3 — Story-level diff: created / updated / removed user stories with their
+#             acceptance-criteria deltas (criteria_added / criteria_removed); returns
+#             the affected US-codes used by 4.4.
 def diff_stories(
     current: Dict[str, Dict[str, Any]],
     proposed: Dict[str, Dict[str, Any]],
@@ -235,6 +244,10 @@ def diff_stories(
     return changes, affected
 
 
+# CONFIRM 4.4 — Downstream impact (DB READ ONLY): scans the stored prd_sections and
+#             prd_documents for the affected codes, flags locked sections, and reports
+#             codes that would become DANGLING when a requirement/story is removed —
+#             the warning surface of the confirmation gate.
 async def analyze_downstream(
     project_id: str,
     session: AsyncSession,
@@ -298,10 +311,25 @@ async def analyze_downstream(
     return impacted_sections, impacted_diagrams
 
 
+# CONFIRM 4.x — Impact analysis (READ-ONLY sub-flow behind CONFIRM 3.2). It diffs the
+# staged draft against the persisted state and derives what is affected downstream:
+#   4.1 analyze_pending_action — orchestrator (this class)
+#   4.2 diff_requirements      — requirement groups added/changed/removed + codes
+#   4.3 diff_stories           — user stories + acceptance-criteria deltas + codes
+#   4.4 analyze_downstream     — prd_sections / prd_documents that reference those
+#                                codes (locked sections flagged, removed codes →
+#                                dangling references)
+#   4.5 _flatten_state_requirements (+ _norm_* / _as_story_list) — shape helpers
+# Nothing here writes: it exists so the user can judge the merge before CONFIRM 3.3.
 class ImpactService:
     """Builds the Requirement Impact Analysis for one pending action."""
 
     @staticmethod
+    # CONFIRM 4.1 — Orchestrator: load the CURRENT persisted state (PROJECT 2.3.2) as
+    #               the "version before", diff it against `proposed_changes`
+    #               (4.2 + 4.3), then ask 4.4 which PRD sections/diagrams reference the
+    #               affected codes. Returns the summary counters + per-item changes +
+    #               impacted artifacts consumed by CONFIRM 1.6.
     async def analyze_pending_action(
         action: Dict[str, Any],
         project_id: str,

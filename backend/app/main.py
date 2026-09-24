@@ -168,6 +168,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 #   - events:      /api/events, /api/project/{id}/events, /api/project/{id}/sse (SSE push stream)
 #   - documents:   /api/project/{id}/documents upload/list/get + DRAFT-only process endpoint
 #   - traceability:/api/project/{id}/traceability (derived matrix)
+# AUTH 1.7.0 — Router mount: this single include registers EVERY /api/auth/* route
+#              documented below (AUTH 1.7 login, 2.3 me, 3.3 config, 4.4 logout,
+#              5.1 change-password, 6.3 register). Anonymous here on purpose —
+#              per-route dependencies (AUTH 7.1) do the enforcement.
 app.include_router(auth.router, tags=["Authentication"])
 app.include_router(chat.router, tags=["System"])
 app.include_router(projects.router, tags=["Projects"])

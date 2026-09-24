@@ -7,6 +7,10 @@
 // The sidebar collapses to a 68px icon rail, so both states have a compact
 // rendering (icon-only, tooltips on the right) and a full one. All session
 // state comes from useAuth; this component is presentation + the two callbacks.
+// AUTH 1.1  — signed-out branch: the "Sign in" button (entry point of LOGIN).
+// AUTH 1.6  — signed-in branch: avatar + name/role chip, i.e. the visible
+//             authenticated state produced by AUTH 1.5 / AUTH 2.3.
+// AUTH 4.1  — the "Log out" buttons in both branches.
 import { LogIn, LogOut, ShieldCheck } from 'lucide-react';
 import type { AuthUserPayload } from '../api/types';
 import { authInitials } from '../hooks/useAuth';
@@ -32,6 +36,10 @@ export function AuthPanel({
   if (!user) {
     return (
       <div className="p-2 border-t border-outline">
+        {/* AUTH 1.1 — Sign-in trigger (real frontend entry point of the LOGIN flow):
+            onClick={onOpenAuth} → Dashboard.setIsAuthModalOpen(true) → <AuthModal/>.
+            Note: this SPA has NO dedicated login page/route — the signed-out state
+            is the same Dashboard with an empty, server-scoped sidebar. */}
         <Tooltip label="Sign in" side="right" className="w-full">
           <button
             type="button"
@@ -63,6 +71,9 @@ export function AuthPanel({
             {initials}
           </div>
         </Tooltip>
+        {/* AUTH 4.1 — Sign-out trigger (collapsed rail): onLogout = useAuth.logout
+            → api.authLogout (AUTH 4.2) → clearSession (AUTH 4.3) → AUTH 1.6
+            reverts to the signed-out branch above. */}
         <Tooltip label="Log out" side="right">
           <button
             type="button"
@@ -96,6 +107,8 @@ export function AuthPanel({
             <span className="truncate" title={`${user.role} · ${user.email}`}>{user.role}</span>
           </div>
         </div>
+        {/* AUTH 4.1 — Same sign-out trigger, expanded-sidebar rendering
+            (see the collapsed variant above for the full chain). */}
         <Tooltip label="Log out" side="left">
           <button
             type="button"

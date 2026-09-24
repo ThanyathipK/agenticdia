@@ -64,6 +64,10 @@ const TAB_ITEMS: ReadonlyArray<{ id: WorkspaceTab; label: string; icon: typeof F
 ];
 
 export default function Dashboard() {
+  // AUTH 1.3 — Frontend session owner instantiated once for the whole app
+  //            (src/hooks/useAuth.ts). It provides the LOGIN callbacks wired to
+  //            AUTH 1.1.1 below and the signed-in user every authenticated UI
+  //            branch reads (AUTH 1.6).
   // useAuth must resolve BEFORE useProjectState: the project list is scoped to
   // the signed-in user (empty until login, that user's projects after).
   const {
@@ -76,6 +80,10 @@ export default function Dashboard() {
     isAuthModalOpen,
     setIsAuthModalOpen,
   } = useAuth();
+  // AUTH 1.6 — Authenticated application state: because AUTH 1.5 flipped
+  //            authUser, this hook re-scopes the project list to that user
+  //            (`GET /api/project …`). Client-side gating only — every one of
+  //            those requests is re-authorized server-side by AUTH 7.4.
   const state = useProjectState(!!authUser, authUser?.id ?? null);
   const {
     projectId,
@@ -271,6 +279,9 @@ export default function Dashboard() {
         </div>
 
         <div className="px-2">
+          {/* AUTH 1.6 — Signed-out visitors are pushed into the LOGIN entry
+              point (AUTH 1.1) instead of the create-project modal; project
+              creation itself is authorized server-side in AUTH 7.4. */}
           <Tooltip label={authUser ? 'New Project' : 'Sign in to create a project'} side="right" className="w-full">
             <button
               className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] font-semibold text-on-surface hover:bg-primary/10 hover:text-primary transition-colors ${collapsed ? 'justify-center' : ''}`}
@@ -331,6 +342,9 @@ export default function Dashboard() {
           {authUser && isSearchOpen && expanded && (
             <div className="relative flex items-center mt-1">
               <Search className="absolute left-2.5 w-3.5 h-3.5 text-on-surface-variant pointer-events-none" />
+              {/* PROJECT 3.1 — Sidebar search UI entry: each keystroke feeds the
+                  debounced hook effect (PROJECT 3.2 → api 3.3 → route 3.4) which
+                  replaces `projects`; rows then render `match_snippet`. */}
               <input
                 ref={searchInputRef}
                 type="text"
@@ -381,6 +395,10 @@ export default function Dashboard() {
               No projects or messages matching &quot;{projectSearchQuery.trim()}&quot;
             </div>
           )}
+          {/* PROJECT 1.1 — Sidebar project list (UI layer of PROJECT 1.x).
+              Data comes from PROJECT 1.5 (`projects`); each row is a selection
+              trigger (PROJECT 2.1), a pin button (PROJECT 7.1) and a context
+              menu (rename PROJECT 5.1 / delete PROJECT 6.1). */}
           {visibleProjects.map((p, index) => {
             const isActive = projectId === p.id;
             // Group boundaries: the first pinned chat opens the "Pinned"
@@ -455,6 +473,9 @@ export default function Dashboard() {
                 ) : (
                   <button
                     onClick={() => {
+                      // PROJECT 2.1 — Selection trigger: switching the active
+                      // project id re-fires the state load (PROJECT 2.2 → 2.4)
+                      // because useProjectSync's effect depends on projectId.
                       setProjectId(p.id);
                       // Selecting a project from the sidebar always lands the
                       // user back in the chat/PRD workspace, even if they were
@@ -484,6 +505,8 @@ export default function Dashboard() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
+                                // PROJECT 7.1 (UI trigger) — sidebar pin button:
+                                // handler 7.1 → api 7.2 → route 7.3 → repo 7.3.1.
                                 handleTogglePin(p.id);
                               }}
                               className={`p-1 rounded-lg transition-colors ${p.is_pinned ? 'text-primary hover:bg-primary/10' : 'text-slate-400 hover:text-primary hover:bg-primary/10'}`}
@@ -549,6 +572,8 @@ export default function Dashboard() {
             <button
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
               onClick={() => {
+                // PROJECT 7.1 (context-menu trigger) — same chain as the sidebar
+                // pin button: 7.1 → api 7.2 → route 7.3 → repo 7.3.1.
                 handleTogglePin(projectContextMenu.projectId);
               }}
             >
@@ -599,6 +624,8 @@ export default function Dashboard() {
             BOTTOM-LEFT. It is the last child of the sidebar column and the
             project list above it is `flex-1`, so it stays glued to the bottom
             while the list scrolls. */}
+        {/* AUTH 1.1 / AUTH 1.6 — Signed out: the "Sign in" trigger. Signed in:
+            the user chip whose Log out button starts AUTH 4.1. */}
         <AuthPanel
           user={authUser}
           isAuthenticating={isAuthenticating}
@@ -631,6 +658,9 @@ export default function Dashboard() {
           content area swaps; the sidebar and its shared project state stay
           mounted so both views always agree. */}
       {activeView === 'dashboard' ? (
+        // PROJECT 1.5 / 7.4.1 / 7.5.1 — Projects overview table: consumes the SAME
+        // project list state, so flag (7.4.x), workflow status (7.5.x) and row
+        // open (PROJECT 2.1) all write through the hooks documented above.
         <ProjectsDashboard state={state} />
       ) : (
       <div id="split-container" className="flex-1 flex flex-col lg:flex-row overflow-hidden" ref={splitContainerRef}>
@@ -737,7 +767,9 @@ export default function Dashboard() {
 
           {/* RIGHT VIEW WINDOW */}
           <div id="printable-document" className="flex-1 min-w-0 overflow-y-auto p-4 md:p-8 lg:p-12 custom-scrollbar">
-{/* Confirmation Panel Area */}
+{/* CONFIRM 1.0 / 1.1 — Human-in-the-loop gate mount: one ConfirmationPanel per staged
+    action. onConfirm drops the card and re-reads the authoritative project state +
+    lock list; onCancel just closes it (nothing was written). */}
             {pendingActions.map(action => (
                 <ConfirmationPanel 
                     key={action.id} 
@@ -795,6 +827,10 @@ export default function Dashboard() {
                   </div>
                 </div>
 
+                {/* CLARIFY 1.1 — Dashboard clarification panel: unresolved questions
+                    (filtered only for DISPLAY) with position-keyed inputs (1.4) and the
+                    shared submit handler (1.3). Despite the button label, the backend
+                    does not re-run the auditor here — see CLARIFY 3.0. */}
                 <form onSubmit={handleSubmitClarifications} className="space-y-4 relative z-10">
                   {auditResult.clarification_questions
                     .map((q, idx) => ({ q, idx }))
@@ -812,6 +848,8 @@ export default function Dashboard() {
                         <p className="text-sm font-medium text-on-surface break-words">
                           {q.question_text}
                         </p>
+                        {/* CLARIFY 1.4 — Position-keyed answer input (`q-<index>` over the
+                            FULL stored list, matching CLARIFY 3.4). */}
                         <input
                           type="text"
                           required
@@ -961,6 +999,8 @@ export default function Dashboard() {
       </div>
       )}
 
+      {/* PROJECT 4.1 — Create UI trigger: opens NewProjectModal, whose submit is
+          handleCreateProject (PROJECT 4.2 → api 4.3 → route 4.4). */}
       {/* NEW PROJECT MODAL (styled replacement for native prompt()) */}
       <NewProjectModal
         isOpen={isCreateModalOpen}
@@ -968,6 +1008,9 @@ export default function Dashboard() {
         onClose={() => setIsCreateModalOpen(false)}
       />
 
+      {/* PROJECT 6.1 — Delete UI trigger: ConfirmModal submit is
+          handleDeleteProject (6.1 → api 6.2 → route 6.3); a false result keeps
+          the modal open when the server refuses. */}
       {/* DELETE PROJECT CONFIRM MODAL (styled replacement for native confirm()) */}
       <ConfirmModal
         isOpen={!!projectPendingDelete}
@@ -980,9 +1023,12 @@ export default function Dashboard() {
         onClose={() => setProjectPendingDelete(null)}
       />
 
-      {/* AUTH MODAL — sign in (POST /api/auth/login) / create account
-          (POST /api/auth/register, only when the backend allows it). On success
-          useAuth stores the JWT, so the sidebar chip flips to the user's name. */}
+      {/* AUTH 1.1.1 — AuthModal mount point (isOpen = isAuthModalOpen set by
+          AUTH 1.1). On success useAuth stores the JWT in AUTH 1.5, so the
+          sidebar chip flips to the user's name (AUTH 1.6).
+          AUTH MODAL — sign in (POST /api/auth/login, AUTH 1.7) / create account
+          (POST /api/auth/register, AUTH 6.3, only when the backend allows it —
+          AUTH 3.3). */}
       <AuthModal
         isOpen={isAuthModalOpen}
         signupEnabled={signupEnabled}

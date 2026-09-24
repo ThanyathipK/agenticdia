@@ -65,6 +65,11 @@ function ChangeBadge({ kind, label }: { kind: string; label?: string }) {
  * (requirements / user stories / acceptance criteria) and what is affected (PRD
  * sections and diagrams that reference the affected `REQ-`/`US-` codes).
  */
+// CONFIRM 1.6 — Impact renderer (consumed by the panel body): shows the change
+//              counters, per-item changes and impacted PRD sections/diagrams from
+//              CONFIRM 2.2 / 4.x, with `state` distinguishing loading / ready / error
+//              and `draft` providing the fallback counts when the preview is
+//              unavailable. Presentational only — nothing here writes.
 function ImpactAnalysisSection({
   impact,
   state,
@@ -212,6 +217,13 @@ function ImpactAnalysisSection({
   );
 }
 
+  // CONFIRM 1.0 — Confirmation panel = the UI of the human-in-the-loop gate. It
+  //              renders ONE staged action (CONFIRM 1.7) with: Save (1.2 → 2.3),
+  //              Cancel (1.4 → 2.4) and the read-only impact preview (1.5 → 1.6).
+  //              Nothing on this card has been persisted yet; the header text says so.
+  // CONFIRM 1.1 — Component entry: `action` is the staged draft (proposed_changes =
+  //              the full merged requirement state), `onConfirm`/`onCancel` are the
+  //              Dashboard callbacks that refresh project state afterwards.
 export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, onConfirm, onCancel }) => {
   const [isWorking, setIsWorking] = useState<boolean>(false);
 
@@ -227,10 +239,16 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
     return { requirements: requirements.length, stories, versionNumber };
   }, [action.proposed_changes]);
 
+  // CONFIRM 1.2 — Save handler: calls the write endpoint and hands the persisted
+  //              state back to the parent (which drops the action from the list and
+  //              re-loads project state + locks). `isWorking` guards double submits.
   const handleConfirm = async () => {
     if (isWorking) return;
     setIsWorking(true);
     try {
+      // CONFIRM 2.3 — API boundary: POST /api/confirm-action/{id}?project_id=…
+      //               (CONFIRM 3.3). Errors (409 locked / 404 gone / 400 empty) surface
+      //               as a toast; the draft stays staged.
       const result = await api.confirmAction(action.id, action.project_id);
       onConfirm(result);
     } catch (error) {
@@ -240,10 +258,13 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
     }
   };
 
+  // CONFIRM 1.4 — Cancel handler: discards the staged draft (CONFIRM 2.4 → 3.4).
+  //              The persisted project is untouched, so the parent only closes the card.
   const handleCancel = async () => {
     if (isWorking) return;
     setIsWorking(true);
     try {
+      // CONFIRM 2.4 — API boundary: POST /api/cancel-action/{id}?project_id=…
       await api.cancelAction(action.id, action.project_id);
       onCancel();
     } catch (error) {
@@ -253,6 +274,9 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
     }
   };
 
+  // CONFIRM 1.5 — Impact prefetch (once per action, non-blocking): the read-only diff
+  //              (CONFIRM 2.2 → 3.2 → 4.x). A failure merely switches the section to
+  //              its fallback summary (draft counts) — Save/Cancel stay usable.
   // ---- Requirement Impact Analysis (READ-ONLY) -------------------------------
   // What this merge changes and which downstream artifacts are affected.
   // Fetched once per action; a failure NEVER blocks Save/Cancel.
@@ -263,6 +287,7 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
     let cancelled = false;
     setImpact(null);
     setImpactState('loading');
+    // CONFIRM 2.2 — API boundary: GET /api/pending-actions/{id}/impact?project_id=…
     api.getActionImpact(action.id, action.project_id)
       .then(result => {
         if (!cancelled) {

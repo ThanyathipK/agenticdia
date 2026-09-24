@@ -182,6 +182,10 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
   const [auditResult, setAuditResult] = useState<AuditResult>(INITIAL_AUDIT_RESULT);
   const [prdMarkdown, setPrdMarkdown] = useState<string>(INITIAL_PRD_MARKDOWN);
   const [prdMarkdownDisplay, setPrdMarkdownDisplay] = useState<string>(INITIAL_PRD_MARKDOWN);
+  // PRD-SECTION 1.1 — Parts load (trigger: project open via useProjectSync). The response
+  //             carries the nine parts in document order; `editingSectionId` (declared
+  //             just below) is what stops an incoming SSE-driven document from
+  //             overwriting the part the user is currently typing in (EVENTS flow).
   const [sections, setSections] = useState<PRDSection[]>([]);
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
   const [editBuffer, setEditBuffer] = useState<string>('');
@@ -299,6 +303,9 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
 
   // (Chat auto-scroll moved into ChatPanel — see the note in useChat.ts.)
 
+  // PRD-SECTION 1.3 — Part save handler. Optimistically replaces the part locally, then
+  //             PATCHes ONLY that part with the edit base so the server can three-way
+  //             merge (PRD-SECTION 3.5).
   const handleSaveSection = async (sectionId: string, newContent: string, baseContent?: string) => {
     // 1. Update the local sections state
     const updatedSections = sections.map(s =>
@@ -369,6 +376,10 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     setEditingSectionId(null);
   };
 
+  // PRD-SECTION 1.2 — Part metadata load (locks + review status + ownership flags +
+  //             per-part version). Reads the SAME list endpoint as 1.1 (PRD-SECTION
+  //             2.1); purely cosmetic bookkeeping, so a failure is ignored and never
+  //             blocks project loading.
   const loadSectionLocks = async (projId: string) => {
     try {
       const payload = await api.getPrdSections(projId);
@@ -389,6 +400,9 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     }
   };
 
+  // VERSION 1.1 — Ledger load (trigger: project open / after restore / after any
+  //             snapshot-creating action). Failure is non-fatal: the timeline simply
+  //             keeps its previous contents (the PRD panel is unaffected).
   const loadVersionHistory = async (projId: string) => {
     try {
       const payload = await api.getPrdVersions(projId);
@@ -404,6 +418,12 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
   // rewritten) and locked parts keep their current content. On success the
   // store document, preview copy, current version and ledger all refresh.
   // Resolves to true only on success so ConfirmModal closes on success.
+  // VERSION 1.5 — Restore handler (VERSION 2.5 → 3.6). APPEND-ONLY semantics are
+  //             visible here: the preview/document are set to the RESTORED content while
+  //             `currentVersion` moves to the NEW number, and the ledger + section
+  //             locks are reloaded so the timeline shows the appended row. Locked parts
+  //             keep their current content (the backend enforces the lock contract).
+  //             Resolves true only on success so the ConfirmModal closes.
   const handleRestoreVersion = async (versionNumber: number): Promise<boolean> => {
     if (!projectId) return false;
     setSyncStatus(`Restoring version ${versionNumber}...`);
@@ -424,6 +444,10 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     }
   };
 
+  // PRD-SECTION 1.4 — Lock toggle. Optimistic: the local lock flag flips first, then
+  //             the server lock/unlock call reconciles (PRD-SECTION 2.4/2.5) and a
+  //             failure rolls the flip back. Locking a part is what excludes it from
+  //             AI regeneration (ARCHITECT 5.1) and from part edits (4.4).
   const handleToggleSectionLock = async (sectionId: string) => {
     if (!projectId) return;
     const current = sectionLocks[sectionId];

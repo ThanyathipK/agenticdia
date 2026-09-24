@@ -41,6 +41,15 @@ from app.repositories import SemanticMemoryRepository
 logger = logging.getLogger("app.semantic_memory")
 
 
+# CHAT 3.x / 4.x — Semantic memory layer (Operation A): distilled project facts
+# embedded and stored per project so later prompts can recall them.
+#   RECALL  (read):  CHAT 3.1 recall → 3.1.1 embed_texts (LM Studio /embeddings)
+#                    → 3.1.2 repository.get_recent → 3.1.3 score_memory/cosine
+#                    → 3.1.4 mark_recalled, then 3.2 build_memory_block
+#   REMEMBER (write): CHAT 4.1 extract_and_remember → 4.1.1 extract_facts (LLM)
+#                    → 4.1.2 remember_facts (embed + dedupe) → 4.1.2.1 save_memory
+# Everything is FAIL-OPEN by design: memory failures must never break a chat turn.
+# Currently exercised only by the standalone /api/chat path (CHAT 5.x, no UI caller).
 class SemanticMemoryError(Exception):
     """Base class for semantic-memory failures (service/domain layer)."""
 
@@ -54,6 +63,11 @@ class MemoryEmbeddingUnavailableError(SemanticMemoryError):
 # ==========================================
 
 
+# CHAT 3.1.1 — Embedding call (shared by recall and remember_facts): POST
+#              {LM_STUDIO_URL}/embeddings with the configured embedding model;
+#              vectors are unit-normalised so the cosine blend below is stable.
+#              Raises MemoryEmbeddingUnavailableError → callers degrade to "no
+#              memory" instead of failing the request.
 async def embed_texts(
     texts: List[str],
     client_factory: Optional[type] = None,
@@ -141,6 +155,8 @@ def _normalize(vec: List[float]) -> List[float]:
     return [v / norm for v in vec]
 
 
+# CHAT 3.1.3 (helper) — Cosine similarity used for relevance scoring (3.1.3) and
+#                      duplicate detection when remembering (4.1.2).
 def cosine_similarity(a: List[float], b: List[float]) -> float:
     """
     Cosine similarity between two vectors (pure function).
@@ -205,6 +221,9 @@ def _clean_facts(raw: Any) -> List[str]:
     return facts
 
 
+# CHAT 4.1.1 — Fact distillation (LLM): one structured call per finished turn
+#              (ExtractedFacts schema) via call_lm_studio (CHAT 6.1) — the same
+#              local gateway as chat; failures propagate to the fail-open wrapper.
 async def extract_facts(
     user_message: str,
     assistant_reply: str,
@@ -239,6 +258,9 @@ async def extract_facts(
 # ==========================================
 
 
+# CHAT 4.1.2 — Dedupe + write: embed the new facts, skip any whose cosine against
+#              an existing memory (or an earlier fact in the same batch) reaches
+#              MEMORY_DEDUPE_SIMILARITY, then persist the survivors (4.1.2.1).
 async def remember_facts(
     project_id: str,
     facts: List[str],
@@ -298,6 +320,10 @@ async def remember_facts(
     return saved
 
 
+# CHAT 4.1 — Fail-open write wrapper (the only entry the routes call): gates on
+#            MEMORY_ENABLED/MEMORY_FACT_EXTRACTION_ENABLED, runs 4.1.1 → 4.1.2 and
+#            returns the count of NEW facts, or 0 on any failure (logged, never
+#            raised) so a chat turn can never break because memory failed.
 async def extract_and_remember(
     project_id: str,
     user_message: str,
@@ -331,6 +357,8 @@ async def extract_and_remember(
 # ==========================================
 
 
+# CHAT 3.1.3 (helper) — Recency decay (half-life configurable): the second term of
+#                      the blended score in score_memory below.
 def _recency_factor(created_at_iso: str, now: Optional[datetime] = None) -> float:
     """Exponential recency decay: 1.0 now -> 0.5 after one half-life."""
     try:
@@ -344,6 +372,10 @@ def _recency_factor(created_at_iso: str, now: Optional[datetime] = None) -> floa
     return 0.5 ** (age_days / max(settings.MEMORY_RECENCY_HALF_LIFE_DAYS, 0.001))
 
 
+# CHAT 3.1.3 — Candidate scoring (pure): relevance weight × cosine + (1 − weight) ×
+#              recency, so a highly relevant older memory can still outrank a fresh
+#              but unrelated one. Recall then rejects zero-cosine candidates
+#              outright, which keeps unrelated queries memory-free.
 def score_memory(
     query_vector: List[float],
     memory: Dict[str, Any],
@@ -363,6 +395,11 @@ def score_memory(
     )
 
 
+# CHAT 3.1 — Recall (read path): embed the query (3.1.1) → load the candidate
+#            window (3.1.2) → score (3.1.3) → drop zero-cosine hits → top-k →
+#            best-effort usage telemetry (3.1.4). Returns [] on ANY failure
+#            (embeddings down, DB error, nothing stored) so prompt assembly can
+#            proceed without memory rather than erroring the chat turn.
 async def recall(
     project_id: str,
     query: str,
@@ -417,6 +454,10 @@ async def recall(
         return []
 
 
+# CHAT 3.2 — Prompt assembly: render recalled memories as a bullet block capped at
+#            MEMORY_CONTEXT_MAX_TOKENS via count_tokens (budget hygiene, same
+#            discipline as the chat context limit). "" when there is nothing to
+#            inject, so callers append it unconditionally.
 def build_memory_block(memories: List[Dict[str, Any]]) -> str:
     """
     Render recalled memories as a compact prompt block, hard-capped at

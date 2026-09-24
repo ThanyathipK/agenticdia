@@ -181,6 +181,10 @@ export function useProjectState(
   isAuthenticated: boolean = false,
   authUserId: string | null = null,
 ): ProjectState {
+  // PROJECT 1.x entry (frontend) — the whole PROJECT flow group is provided by
+  // useProjects here and re-exposed through this hook's public surface:
+  //   AUTH 1.6 (signed in) → PROJECT 1.2 list load → PROJECT 1.5 selection.
+  // The state-load half (PROJECT 2.x) is wired at PROJECT 2.1 below.
   const projectsApi = useProjects(isAuthenticated, authUserId);
   const ui = useWorkspaceUi();
   const store = useRequirementStore(projectsApi.projectId);
@@ -194,6 +198,11 @@ export function useProjectState(
     () => {},
   );
 
+  // PROJECT 2.1 — Trigger: `projectsApi.projectId` (set by PROJECT 1.5 when the
+  //              list loads, or by a sidebar/dashboard click) is handed to
+  //              useProjectSync, whose effect fires loadProjectState → PROJECT 2.2.
+  //              The SSE half of useProjectSync belongs to the EVENTS flow; the
+  //              callbacks below only forward document_extraction_* frames.
   const { loadProjectState } = useProjectSync(
     store,
     projectsApi.projectId,

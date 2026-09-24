@@ -6,6 +6,11 @@ from uuid import UUID
 # 1. BASE DB TRANSACTION SCHEMAS
 # ==========================================
 
+# PROJECT 4.4.0 / 5.3.0 — Shared request schema for create AND rename, so both
+# routes inherit identical name rules: trimmed at the boundary (matching the
+# trim+lower comparison in ProjectRepository.name_exists, PROJECT 4.4.1), blank
+# rejected, and capped at 40 characters AFTER trimming. Violations surface as
+# FastAPI 422 via the app-wide RequestValidationError handler.
 class ProjectCreate(BaseModel):
     """Schema for introducing new banking systems under compliance review."""
     name: str = Field(..., description="Name of core banking system or microservice (max 40 characters).")
@@ -98,6 +103,11 @@ class MermaidDiagramResult(BaseModel):
 # 4. REQUIREMENT INTENT DETECTION SCHEMA
 # ==========================================
 
+# INTENT 5.1 — Response contract of the detector (INTENT 2.x) and of the
+#             /api/intent-detector endpoint (INTENT 4.1). `intent` is described by
+#             a free-text enum (not a Literal), so the runtime vocabulary lives in
+#             the VALID_INTENTS list (INTENT 2.0.1) and in prompts/intent.md — the
+#             three copies are not structurally linked.
 class RequirementIntentDetectionResult(BaseModel):
     intent: str = Field(
         ..., 
@@ -112,6 +122,10 @@ class RequirementIntentDetectionResult(BaseModel):
 # 5. WORKFLOW ROUTING SCHEMA
 # ==========================================
 
+# ROUTING 5.2 — Response contract of the classifier (ROUTING 3.x) and of
+#             /api/workflow-router (ROUTING 5.1). Like INTENT 5.1, the enum is
+#             described as free text, so the enforced vocabulary lives in the
+#             VALID_WORKFLOWS list (ROUTING 3.3.1) and in prompts/router.md.
 class WorkflowRoutingResult(BaseModel):
     workflow: str = Field(..., description="Classified workflow type: CHAT, QUESTION, COMMAND, or REQUIREMENT")
     confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
@@ -121,6 +135,11 @@ class WorkflowRoutingResult(BaseModel):
 # 6. REQUIREMENT MATCHER SCHEMA
 # ==========================================
 
+# MATCHING 5.2 — Response contract of the matcher (MATCHING 2.x) and of
+#             /api/requirement-matcher (MATCHING 5.1). `action` and `status` are
+#             enforced at runtime by MATCHING 2.3.2 (presence) and normalized to
+#             upper-case in 2.4; the allowed values live in prompts/matcher.md, not
+#             in a Literal here.
 class RequirementMatcherResult(BaseModel):
     matched_requirement_id: Optional[str] = Field(None, description="The matched requirement/ticket code (e.g. US-001) if applicable, or null.")
     confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0")
@@ -685,6 +704,9 @@ class ProcessRequirementsResponse(BaseModel):
 # The full converted markdown is ALWAYS persisted; token limits apply solely to
 # the explicit, user-confirmed extraction path (see routes/documents.py).
 
+# DOC-UPLOAD 5.1 — Upload/list response shape (2.1, 2.2). extra="allow" is what lets the
+#             route append the 3.3 needs-OCR `message` onto a `failed` record without a
+#             second schema.
 class UploadedDocumentResponse(BaseModel):
     """A single uploaded-document record, as serialized by ``serialize_document``.
 
@@ -708,6 +730,7 @@ class UploadedDocumentResponse(BaseModel):
     updated_at: str = Field("", description="ISO8601 last-update timestamp.")
 
 
+# DOC-UPLOAD 5.2 — Preview response shape (2.3): the FULL markdown plus metadata.
 class DocumentMarkdownResponse(BaseModel):
     """Full canonical markdown + metadata returned by the detail/markdown endpoint."""
     model_config = ConfigDict(extra="allow")
@@ -740,6 +763,8 @@ class DocumentProcessResponse(BaseModel):
     document_id: str = Field(..., description="Source document UUID string.")
 
 
+# DOC-UPLOAD 5.3 — Delete confirmation shape (2.4). Requirements already extracted and
+#             confirmed from the removed document are NOT affected.
 class DocumentDeleteResponse(BaseModel):
     """Confirmation returned by ``DELETE .../documents/{document_id}``.
 

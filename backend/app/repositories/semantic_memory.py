@@ -21,6 +21,13 @@ from app.repositories.base import as_uuid, serialize_semantic_memory
 logger = logging.getLogger(__name__)
 
 
+# CHAT semantic-memory repository map — pure persistence for semantic_memories
+# (all embedding/scoring/LLM logic stays in app/semantic_memory.py, CHAT 3.x/4.x):
+#   3.1.2 — get_recent      (candidate window for recall AND for dedupe)
+#   3.1.4 — mark_recalled   (best-effort recall telemetry)
+#   4.1.2.1 — save_memory   (INSERT one embedded fact)
+# Session ownership mirrors ConversationMessageRepository (CHAT 7.x): optional
+# caller session, else a dedicated AsyncSessionLocal with commit/rollback.
 class SemanticMemoryRepository:
     """
     Persistence for project-scoped semantic memories.
@@ -31,6 +38,8 @@ class SemanticMemoryRepository:
     session with commit/rollback.
     """
 
+    # CHAT 4.1.2.1 — INSERT one distilled fact + its embedding (rejects blank content).
+    #                Called by remember_facts only, and only for non-duplicate facts.
     @staticmethod
     async def save_memory(
         project_id: str,
@@ -72,6 +81,8 @@ class SemanticMemoryRepository:
                 await db_session.rollback()
                 raise
 
+    # CHAT 3.1.2 — SELECT the most recent N memories (bounded candidate window):
+    #              the recall scoring set (3.1.3) and the dedupe baseline (4.1.2).
     @staticmethod
     async def get_recent(
         project_id: str,
@@ -96,6 +107,9 @@ class SemanticMemoryRepository:
         async with AsyncSessionLocal() as db_session:
             return await _fetch(db_session)
 
+    # CHAT 3.1.4 — UPDATE recall telemetry (recall_count / last_recalled_at) for the
+    #              memories that were actually injected; wrapped in try/except by the
+    #              caller, since telemetry must never break recall.
     @staticmethod
     async def mark_recalled(
         memory_ids: List[str],

@@ -52,11 +52,23 @@ export interface UseProjectsResult {
   setProjectSearchQuery: Dispatch<SetStateAction<string>>;
 }
 
+// PROJECT flow index (frontend side of the project lifecycle). Each entry maps
+// to a backend route/repository step; the whole hook is gated by AUTH 1.6.
+//   PROJECT 1.2 — mount/auth effect  → api.listProjects    (list,   route 1.4)
+//   PROJECT 2.1 — projectId selection → useProjectSync      (open,   route 2.3)
+//   PROJECT 3.2 — debounced search   → api.searchProjects   (search, route 3.4)
+//   PROJECT 4.2 — handleCreateProject                       (create, route 4.4)
+//   PROJECT 5.1 — handleRenameProject                       (rename, route 5.3)
+//   PROJECT 6.1 — handleDeleteProject                       (delete, route 6.3)
+//   PROJECT 7.1 / 7.4.1 / 7.5.1 — pin / flag / status       (routes 7.3/7.4.3/7.5.3)
 export function useProjects(isAuthenticated: boolean, authUserId: string | null): UseProjectsResult {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [pendingActions, setPendingActions] = useState<PendingActionPayload[]>([]);
 
+  // PROJECT 1.2 — Mount/auth effect: the sidebar's project list load. Trigger is
+  //              the AUTH 1.6 signed-in state; the guard below clears the list on
+  //              sign-out so the previous user's projects never linger on screen.
   // Load the project list ONLY while signed in. The backend enforces the same
   // boundary (GET /api/projects requires a Bearer token and scopes to the JWT
   // subject), so before login the sidebar is empty by construction and after
@@ -69,16 +81,28 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
       setProjectId(null);
       return () => { isMounted = false; };
     }
+    // PROJECT 1.2.1 — Fetch with bounded retry (8 × 1 s, then a failure toast):
+    //                at SPA mount the API may still be booting (lifespan runs
+    //                migrations + the LM Studio probe before serving).
     const fetchProjects = async (retries = 8, delay = 1000) => {
       try {
+        // PROJECT 1.3 — API boundary → GET /api/projects (route PROJECT 1.4 →
+        //               PROJECT 1.4.1 repository read).
         const projs = await api.listProjects();
         if (isMounted) {
+          // PROJECT 1.5 — Response applied to UI state: the sidebar list, plus
+          //              auto-selection of a project. Setting projectId is what
+          //              fires the state load (PROJECT 2.1); an already-selected
+          //              project is kept if it still exists.
           setProjects(projs);
           if (projs.length > 0) {
             setProjectId(prev => (prev && projs.some(p => p.id === prev)) ? prev : projs[0].id);
           }
         }
       } catch (error) {
+        // PROJECT 1.2.1 (retry / terminal branch) — retry while budget remains
+        // (asyncio-free: these are plain setTimeout retries), otherwise surface
+        // the failure toast and leave the list empty.
         if (retries > 0 && isMounted) {
           setTimeout(() => fetchProjects(retries - 1, delay), delay);
         } else {
@@ -110,8 +134,16 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   // message content (GET /api/projects/search). Clearing the query restores
   // the full list. A monotonic sequence guard drops stale responses so a slow
   // earlier request can never overwrite fresher results.
+  // PROJECT 3.2 (state) — Monotonic sequence guard for the debounced search: a
+  // slow earlier request can never overwrite fresher results; `searching` tracks
+  // whether a search actually replaced the list (so the clear-branch restore in
+  // PROJECT 3.4 leaves the mount-time load untouched).
   const searchStateRef = useRef<{ searching: boolean; seq: number }>({ searching: false, seq: 0 });
 
+  // PROJECT 3.2 — Debounced sidebar search (250 ms) → PROJECT 3.3 → route 3.4.
+  //              Runs only for a signed-in user (the server scopes results to
+  //              the JWT subject anyway). Clearing the query restores the full
+  //              list via PROJECT 3.4 → PROJECT 1.3.
   useEffect(() => {
     const query = projectSearchQuery.trim();
 
@@ -125,6 +157,8 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
       if (!searchStateRef.current.searching) return;
       searchStateRef.current.searching = false;
       const seq = ++searchStateRef.current.seq;
+      // PROJECT 3.4 — Query emptied: restore the unfiltered list (PROJECT 1.3);
+      // failure keeps whatever is loaded (the next keystroke retries).
       api.listProjects()
         .then((projs) => {
           if (searchStateRef.current.seq === seq) setProjects(projs);
@@ -138,6 +172,8 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
     const timer = setTimeout(() => {
       const seq = ++searchStateRef.current.seq;
       searchStateRef.current.searching = true;
+      // PROJECT 3.3 — API boundary → GET /api/projects/search (route PROJECT 3.4
+      //               → PROJECT 3.4.1 repository search with per-project snippets).
       api.searchProjects(query)
         .then((results) => {
           if (searchStateRef.current.seq === seq) setProjects(results);
@@ -161,9 +197,14 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   // Handle project rename. Failures — including the backend's 409
   // duplicate-name conflict — surface the server's own detail message in the
   // toast so the user knows exactly which name is already taken.
+  // PROJECT 5.1 — Rename handler (UI: sidebar context menu). Layer chain:
+  //              PROJECT 5.1 → PROJECT 5.2 (api.renameProject) → route 5.3 →
+  //              repository 5.3.2 → projects UPDATE. A 409 duplicate answers with
+  //              the server's own detail, shown verbatim in the toast.
   const handleRenameProject = async (projectId: string, newName: string) => {
     if (!newName.trim()) return;
     try {
+      // PROJECT 5.2 — API boundary → PUT /api/projects/{id} (route PROJECT 5.3).
       await api.renameProject(projectId, newName);
       setProjects(prev => prev.map(p => (p.id === projectId ? { ...p, name: newName.trim() } : p)));
       setRenameProjectId(null);
@@ -176,11 +217,18 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   // Handle project delete (submit from the styled ConfirmModal). Resolves to
   // true on success so the modal knows whether to close; failures are
   // surfaced through the toast handler.
+  // PROJECT 6.1 — Delete handler (UI: styled ConfirmModal). Chain: 6.1 → 6.2
+  //              (api.deleteProject) → route 6.3 → repository 6.3.1 (lock gate +
+  //              event log) → projects DELETE (FK CASCADE). Resolves false so the
+  //              modal stays open when the server refuses.
   const handleDeleteProject = async (projIdToDelete: string): Promise<boolean> => {
     try {
+      // PROJECT 6.2 — API boundary → DELETE /api/projects/{id} (route PROJECT 6.3).
       await api.deleteProject(projIdToDelete);
       setProjects(prev => prev.filter(p => p.id !== projIdToDelete));
       // If the deleted project was the active one, switch to the first remaining project
+      // PROJECT 6.4 — UI follow-up: switch the active project to the first
+      // remaining one (or to none) so the workspace never points at a deleted id.
       if (projIdToDelete === projectId && projects.length > 1) {
         const remaining = projects.filter(p => p.id !== projIdToDelete);
         setProjectId(remaining[0].id);
@@ -200,12 +248,20 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   // error message — typically the backend's 409 "name already exists" detail —
   // that the modal renders inline next to the input. No toast here: the modal
   // is the presentation layer for create failures.
+  // PROJECT 4.2 — Create handler (UI: New Project modal). Client-side guards
+  //              (empty / > 40 chars) mirror the ProjectCreate schema; the
+  //              server's 409 duplicate detail is returned for inline display.
+  //              Chain: 4.2 → 4.3 (api.createProject) → route 4.4 → repository
+  //              4.4.2 (projects + requirement_states INSERT) → 4.5 list refresh.
   const handleCreateProject = async (name: string): Promise<string | null> => {
     const trimmed = name.trim();
     if (!trimmed) return 'Project name must not be empty.';
     if (trimmed.length > 40) return 'Project name must be 40 characters or fewer.';
     try {
+      // PROJECT 4.3 — API boundary → POST /api/projects (route PROJECT 4.4).
       await api.createProject(trimmed);
+      // PROJECT 4.5 — Re-read the list so the new project (and its server-side
+      //              ordering/owner scoping) is authoritative; then the modal closes.
       setProjects(await api.listProjects());
       return null;
     } catch (err) {
@@ -214,6 +270,11 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   };
 
   // Handle project pin/unpin — pins the chat to the top of the sidebar.
+  // PROJECT 7.1 — Pin/unpin handler (UI: sidebar pin + context menu). Optimistic:
+  //              the local row flips first, then the server response reconciles,
+  //              and any failure rolls the flip back with a toast.
+  //              Chain: 7.1 → 7.2 (api.toggleProjectPin) → route 7.3 → repository
+  //              7.3.1 (no lock gate by design — metadata, not content).
   const handleTogglePin = async (projectIdToPin: string) => {
     const target = projects.find(p => p.id === projectIdToPin);
     const nextPinned = !(target && target.is_pinned);
@@ -222,6 +283,7 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
       prev.map(p => (p.id === projectIdToPin ? { ...p, is_pinned: nextPinned } : p))
     );
     try {
+      // PROJECT 7.2 — API boundary → PUT /api/projects/{id}/pin (route PROJECT 7.3).
       const updated = await api.toggleProjectPin(projectIdToPin, nextPinned);
       setProjects(prev => prev.map(p => (p.id === projectIdToPin ? { ...p, is_pinned: updated.is_pinned } : p)));
     } catch (err) {
@@ -236,6 +298,11 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   // Handle project flag/unflag — dashboard-only ★ marker. Deliberately
   // independent of pinning: flagging marks the project for attention in the
   // projects overview table and never affects the sidebar's pinned ordering.
+  // PROJECT 7.4.1 — Flag/unflag handler (UI: dashboard ★ marker). Same optimistic
+  //                pattern as pinning; deliberately independent of pin so the
+  //                sidebar's pinned-first ordering is never affected.
+  //                Chain: 7.4.1 → 7.4.2 (api.toggleProjectFlag) → route 7.4.3 →
+  //                repository 7.4.4.
   const handleToggleFlag = async (projectIdToFlag: string) => {
     const target = projects.find(p => p.id === projectIdToFlag);
     const nextFlagged = !(target && target.is_flagged);
@@ -244,6 +311,7 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
       prev.map(p => (p.id === projectIdToFlag ? { ...p, is_flagged: nextFlagged } : p))
     );
     try {
+      // PROJECT 7.4.2 — API boundary → PUT /api/projects/{id}/flag (route 7.4.3).
       const updated = await api.toggleProjectFlag(projectIdToFlag, nextFlagged);
       setProjects(prev => prev.map(p => (p.id === projectIdToFlag ? { ...p, is_flagged: updated.is_flagged } : p)));
     } catch (err) {
@@ -258,12 +326,18 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   // Handle project workflow status change (dashboard status badge dropdown).
   // Same optimistic pattern as pinning: apply locally for snappy UI, reconcile
   // with the server, and roll back on failure with a toast.
+  // PROJECT 7.5.1 — Workflow-status handler (UI: dashboard status dropdown).
+  //                Optimistic like the pin/flag handlers, but the rollback also
+  //                restores the previous status value.
+  //                Chain: 7.5.1 → 7.5.2 (api.updateProjectStatus) → route 7.5.3
+  //                (allowed-status validation) → repository 7.5.4.
   const handleUpdateProjectStatus = async (projectIdToUpdate: string, newStatus: ProjectStatus) => {
     const previousStatus = projects.find(p => p.id === projectIdToUpdate)?.status;
     setProjects(prev =>
       prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: newStatus } : p))
     );
     try {
+      // PROJECT 7.5.2 — API boundary → PUT /api/projects/{id}/status (route 7.5.3).
       const updated = await api.updateProjectStatus(projectIdToUpdate, newStatus);
       setProjects(prev =>
         prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: updated.status, updated_at: updated.updated_at } : p))

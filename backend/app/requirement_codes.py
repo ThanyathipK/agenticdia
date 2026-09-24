@@ -13,6 +13,14 @@ Nothing in the codebase should hardcode a literal code such as ``"REQ-001"``:
   every caller (agents, routes, document import, repositories) derives the same
   answer.
 """
+# GATHERING 7.x — Requirement-code helpers used across this flow:
+#   7.1 format_requirement_code — canonical REQ-NNN rendering
+#   7.2 normalize_requirement_code — "req_1"/"REQ-1" → REQ-001 ("" when invalid); used
+#       by GATHERING 3.6/3.7 and by every repository that stores requirement codes
+#   7.3 default_requirement_code — deterministic code for the requirement at index N
+#       (index 0 == the first code of the project); used by GATHERING 1.5/3.5
+#   7.4 next_requirement_code — code after the highest used one; used by GATHERING
+#       3.6/3.7 and by the document-extraction draft builder
 import re
 from typing import Any, Iterable
 
@@ -27,6 +35,7 @@ FIRST_REQUIREMENT_NUMBER = 1
 _REQUIREMENT_CODE_RE = re.compile(r"^(?:REQ[-_ ]?)(\d+)$", re.IGNORECASE)
 
 
+# GATHERING 7.1 — Canonical rendering (the only place the REQ prefix is formatted).
 def format_requirement_code(number: int) -> str:
     """Render a requirement number as its canonical ``REQ-NNN`` code."""
     return f"{REQUIREMENT_CODE_PREFIX}-{number:03d}"
@@ -39,12 +48,16 @@ FIRST_REQUIREMENT_CODE = format_requirement_code(FIRST_REQUIREMENT_NUMBER)
 UNASSIGNED_REQUIREMENT_CODE = format_requirement_code(FIRST_REQUIREMENT_NUMBER - 1)
 
 
+# GATHERING 7.2 — Lenient inbound normalization: any LLM/legacy spelling collapses to
+#             the canonical form (or "" when it is not a requirement code at all).
 def normalize_requirement_code(code: Any) -> str:
     """Canonicalize an LLM/DB requirement code to ``REQ-NNN`` (``''`` if invalid)."""
     match = _REQUIREMENT_CODE_RE.match(str(code or "").strip())
     return format_requirement_code(int(match.group(1))) if match else ""
 
 
+# GATHERING 7.3 — Index-based default: index 0 IS the first code of the project, which
+#             is why no caller hardcodes "REQ-001" (GATHERING 1.5/3.5 rely on this).
 def default_requirement_code(index: int = 0) -> str:
     """Deterministic code for the requirement at 0-based ``index``.
 
@@ -54,6 +67,9 @@ def default_requirement_code(index: int = 0) -> str:
     return format_requirement_code(FIRST_REQUIREMENT_NUMBER + index)
 
 
+# GATHERING 7.4 — Sequence advance: highest used code + 1 (an empty set yields the
+#             first code), used when the LLM recycled a code (GATHERING 3.6) or a story
+#             needs a parent group that does not exist yet (GATHERING 4.2).
 def next_requirement_code(used_codes: Iterable[Any]) -> str:
     """Return the code immediately after the highest already-used code.
 

@@ -15,12 +15,23 @@ from app.repositories.base import as_uuid, serialize_conversation_message
 logger = logging.getLogger(__name__)
 
 
+# CHAT 7.x — Shared conversation transcript persistence (conversation_messages).
+# Call sites across flows:
+#   7.1 save_message             ← CHAT 2.3.3 (pipeline assistant turn),
+#                                  CHAT 5.3 / 5.5 (/api/chat turns), and every
+#                                  agent node in the GATHERING/AUDITOR flows
+#   7.2 get_conversation_history ← CHAT 2.3.1 (chat context), PROJECT 2.3.4
+#                                  (state response), CHAT 5.2 and the agent prompts
+# Session ownership: callers may pass the request-scoped session (participating in
+# the caller's transaction) or omit it, in which case the repository opens its own
+# AsyncSessionLocal with commit/rollback.
 class ConversationMessageRepository:
     """
     Handles conversation message persistence in a dedicated table.
     Independent from requirement_states storage.
     """
 
+    # CHAT 7.1 — INSERT one turn; returns {} for a blank message (no row, no error).
     @staticmethod
     async def save_message(
         project_id: str,
@@ -60,6 +71,8 @@ class ConversationMessageRepository:
                 await db_session.rollback()
                 raise
 
+    # CHAT 7.2 — SELECT the full transcript oldest-first (the ORDER BY created_at
+    # asc is what keeps prompt context and the restored UI timeline consistent).
     @staticmethod
     async def get_conversation_history(project_id: str, session: Optional[AsyncSession] = None) -> List[Dict[str, Any]]:
         pid = as_uuid(project_id)

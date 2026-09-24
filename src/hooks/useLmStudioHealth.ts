@@ -32,6 +32,9 @@ export interface LmStudioHealth extends LmStudioHealthState {
   checkLmStudioHealth: () => Promise<void>;
 }
 
+// CHAT 6.3 — UI half of the LLM readiness check: polls GET /api/health (which
+// proxies a TTL-cached LM Studio /models probe, CHAT 6.2) every 20 s, on mount and
+// on tab focus, so an offline gateway shows a banner instead of opaque 503s.
 const HEALTH_POLL_INTERVAL_MS = 20_000;
 
 const INITIAL_STATE: LmStudioHealthState = {

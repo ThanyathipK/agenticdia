@@ -32,9 +32,22 @@ from app.requirement_codes import UNASSIGNED_REQUIREMENT_CODE, default_requireme
 logger = logging.getLogger(__name__)
 
 
+# PROJECT state persistence map — the single read/write entry point for a project's
+# aggregated requirement board. Steps:
+#   2.3.2 / 2.3.3.2 — get_by_project_id / save_or_update ← GET  /api/project/{id}
+#                     (PROJECT 2.3.2 read, PROJECT 2.3.3.2 first-open bookkeeping)
+#   8.2.2           — save_or_update                      ← PUT  /api/project/{id}
+#   (reused)        — save_or_update                      ← CONFIRMATION flow
+#                     (confirm_action is the AI write path; see §7.8 of the analysis)
+# DB: requirement_states + epics / requirements / user_stories / acceptance_criteria
+#     / audit_results / clarification_questions / prd_documents.
 class RequirementStateRepository:
     """Dedicated persistence repository for the project RequirementState."""
 
+    # PROJECT 2.3.2 — READ: SELECT requirement_states WHERE project_id (None when
+    # the project has no state yet) and rebuild the flattened board from the
+    # normalized child tables. Read-only: no locks, no writes; the session is
+    # supplied by the request (get_db) for transactional consistency.
     @staticmethod
     async def get_by_project_id(project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
         """
@@ -140,6 +153,11 @@ class RequirementStateRepository:
             if model.requirements and isinstance(model.requirements, dict) and "epic_name" in model.requirements:
                 epic_name = model.requirements["epic_name"]
 
+        # CLARIFY 4.1 — Read path of the clarification questions the UI renders: the
+        #             project-state load (PROJECT 2.3.2) pulls them through the
+        #             dedicated repository (4.2) and flattens them into
+        #             requirement_state.clarification_questions, which is what the
+        #             CLARIFY 1.1/1.2 forms list and CLARIFY 3.4 later indexes.
         cqs = await ClarificationQuestionRepository.get_by_project(str(project_id), session)
 
         # The preview must ALWAYS surface the latest PRD version, so resolve the
@@ -181,6 +199,10 @@ class RequirementStateRepository:
             "updated_at": model.__dict__.get("updated_at").isoformat() if model.__dict__.get("updated_at") else None
         }
 
+    # PROJECT 8.2.2 (and 2.3.3.2, plus the CONFIRMATION flow's confirm_action) —
+    # WRITE: create-if-missing, else partial update. Never clears a JSON blob whose
+    # list was not supplied, so an unrelated partial update cannot wipe the board.
+    # The caller owns the transaction; the request's get_db commits at the end.
     @staticmethod
     async def save_or_update(project_id: str, updates: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         """
@@ -198,6 +220,10 @@ class RequirementStateRepository:
         result = await session.execute(stmt)
         model = result.scalar_one_or_none()
 
+        # PROJECT 8.2.2.1 — Create branch: first write for this project (INSERT
+        # requirement_states with empty collections). The route decides whether any
+        # requirements travel with it — the PROJECT 2.3.3.2 init sends none on
+        # purpose, so the board stays empty and numbering starts at REQ-001.
         if not model:
             model = RequirementStateModel(
                 project_id=project_id,
@@ -216,6 +242,10 @@ class RequirementStateRepository:
             )
             session.add(model)
             await session.flush()
+        # PROJECT 8.2.2.2 — Existing row: partial update — only the top-level fields
+        # present in `updates` are assigned, and each JSON blob that is about to be
+        # re-derived is cleared just before the child tables are rebuilt below (this
+        # is what stops deleted requirements/stories from surviving a re-save).
         else:
             if "project_name" in updates and updates["project_name"] is not None:
                 model.project_name = updates["project_name"]

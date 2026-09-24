@@ -1,13 +1,15 @@
 // DocumentLibrary — uploaded-document knowledge base panel.
 //
-// - Per-document "Process / Extract requirements" action runs the explicit,
+// DOC-UPLOAD 1.4/1.5/1.6 — the knowledge-base UI of FLOW 14 (state lives in useDocuments):
+// - Per-document "Process / Extract requirements" action (FLOW 15) runs the explicit,
 //   DRAFT-ONLY extraction: it shows mode/chunk progress and, when ready, hands
 //   the merged draft to the existing pending-action Confirmation UI. Nothing is
 //   written until the user confirms that preview.
 // - Per-document "Remove" action permanently deletes the stored document (and
-//   any DRAFT merge-preview staged from it) after a destructive-style confirm.
+//   any DRAFT merge-preview staged from it, server-side 2.4.2) after a destructive-style
+//   confirm.
 // - Markdown preview uses the shared MarkdownRenderer.
-// - Note: new documents are uploaded from the ChatPanel paperclip attach — this
+// - Note: new documents are uploaded from the ChatPanel paperclip attach (1.1) — this
 //   panel only lists/processes/removes/previews documents in the knowledge base.
 import React, { useState } from 'react';
 import { FileText, Loader2, Sparkles, Trash2 } from 'lucide-react';
@@ -33,6 +35,9 @@ const formatBytes = (bytes: number): string => {
   return `${(bytes / Math.pow(1024, idx)).toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 };
 
+// DOC-UPLOAD 1.4 — Extraction chip: the three knowledge-base states a row can be in.
+//             'knowledge only' is the norm right after upload (extraction_status
+//             'not_extracted', DOC-UPLOAD 4.1) — proof that upload alone writes nothing.
 const extractionChip = (status: string): { label: string; className: string } => {
   switch (status) {
     case 'extraction_applied':
@@ -48,6 +53,9 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<UploadedDocumentPayload | null>(null);
 
+  // DOC-UPLOAD 1.5 — Preview handler: reads the FULL stored markdown (DOC-UPLOAD 2.3) and
+  //             renders it with the shared MarkdownRenderer. This is the only way to see a
+  //             document's converted content — the list response omits the body (4.2/3.7).
   const openPreview = async (doc: UploadedDocumentPayload): Promise<void> => {
     if (!projectId) return;
     setIsLoadingPreview(true);
@@ -88,7 +96,10 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
         )}
       </section>
 
-      {/* DOCUMENT LIST */}
+      {/* DOCUMENT LIST — DOC-UPLOAD 1.4: filename opens the markdown preview (1.5), the chip
+          shows extraction state, and the Process button is disabled unless the document is
+          `processed` (a needs-OCR `failed` row can never be extracted — matches the backend
+          guard in FLOW 15's process endpoint). */}
       <section className="space-y-2">
         {!docs.isLoadingDocuments && docs.documents.length === 0 && (
           <p className="text-xs text-on-surface-variant px-1">No documents uploaded yet.</p>
@@ -182,7 +193,11 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
         </section>
       )}
 
-      {/* REMOVE CONFIRMATION — destructive, requires explicit confirmation */}
+      {/* REMOVE CONFIRMATION — destructive, requires explicit confirmation.
+          DOC-UPLOAD 1.6 — Remove goes through ConfirmModal; on success the local markdown
+          preview is dropped too (the stored body is gone with the document). Requirements
+          already extracted from it are explicitly NOT affected — stated in the modal copy,
+          matching the backend contract at DOC-UPLOAD 2.4. */}
       <ConfirmModal
         isOpen={deleteTarget !== null}
         title="Remove document?"

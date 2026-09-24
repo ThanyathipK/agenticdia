@@ -24,6 +24,9 @@ logger = logging.getLogger("app.routes.chat")
 router = APIRouter()
 
 
+# CHAT 6.2.1 — Backend readiness route: GET /api/health. Always answers 200 (the
+#             app itself is alive); the LM Studio state travels in the payload
+#             fields, so the UI can degrade instead of erroring.
 @router.get("/api/health", response_model=HealthResponse, status_code=status.HTTP_200_OK)
 async def get_health_status() -> HealthResponse:
     """
@@ -39,6 +42,7 @@ async def get_health_status() -> HealthResponse:
         HealthResponse: Application identity, configured inference gateway and
         context-window budget, plus live LM Studio readiness information.
     """
+    # CHAT 6.2 — LM Studio probe (TTL-cached server-side, see llm_client).
     lm_health = await check_lm_studio_health()
     return {
         "status": "online",
@@ -55,10 +59,26 @@ async def get_health_status() -> HealthResponse:
     }
 
 
+# CHAT 5.1 — Standalone conversation endpoint (POST /api/chat). This is the
+#            MEMORY-AWARE twin of the chat branch (CHAT 2.3): it recalls semantic
+#            memories, calls LM Studio directly and writes memories back.
+#
+#            DISCREPANCY (documented, not changed): the SPA never calls it — the
+#            client exposes no method for /api/chat (the composer goes through
+#            api.processRequirements, CHAT 1.3) — so the semantic-memory path
+#            below is currently unreachable from the product UI and only
+#            exercised by API clients / tests.
+#
+#            Guards, in order: rate limit (429) → AUTH 7.1 identity → AUTH 7.4
+#            project ownership → non-empty messages (400) → context budget (413).
 @router.post("/api/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 async def post_chat_query(
     request: ChatSessionRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
+    # CHAT 5.1 (defect note) — `AsyncSession` is used in this annotation but is NOT
+    # imported in this module. It survives only because Python 3.14 defers
+    # annotation evaluation (PEP 649); on Python <= 3.13 this line raises NameError
+    # at import time. Reported in the analysis; deliberately NOT fixed here.
     session: AsyncSession = Depends(get_db),
     _rate_limit: None = Depends(
         rate_limit_dependency(
@@ -85,16 +105,21 @@ async def post_chat_query(
         HTTPException: 400 if the message list is empty; 413 if the combined
             message history exceeds ``MAX_CONTEXT_TOKENS``.
     """
+    # CHAT 5.1.1 — Validation branch: an empty conversation is a client error.
     if not request.messages:
         raise HTTPException(status_code=400, detail="Conversation message list cannot be empty.")
 
     # AUTHZ: a project-bound chat may only read/write the caller's own project
     # (conversation rows are persisted below whenever project_id is set).
     if request.project_id:
+        # CHAT 5.1.2 — AUTHZ: a project-bound chat may only touch its owner's data
+        #             (both the memory read and the message writes below are
+        #             project-scoped), so ownership is verified up front (AUTH 7.4).
         await verify_project_access(str(request.project_id), current_user, session)
 
     # Finding #39: enforce MAX_CONTEXT_TOKENS on incoming payload before any
     # token budget is consumed by the LLM gateway.
+    # CHAT 5.1.3 — Budget gate: reject the payload before any LLM tokens are spent.
     validate_messages_budget(request.messages)
 
     # --- Semantic memory recall (fail-open) --------------------------------
@@ -102,10 +127,17 @@ async def post_chat_query(
     # this project (scored on the CURRENT user message) and inject them as a
     # hard-capped block into the system prompt. Any failure degrades to the
     # pre-memory behaviour — chat never breaks because memory is down.
+    # CHAT 5.2 — Semantic-memory recall (fail-open): scored on the CURRENT user
+    #            message and injected as a hard-capped prompt block. The nested
+    #            try/except is belt-and-braces because recall itself never raises.
     memory_block = ""
     if request.project_id and settings.MEMORY_ENABLED:
         current_message = request.messages[-1].content
         try:
+            # CHAT 5.2.1 — Read path (CHAT 3.1): embed the query, score the
+            #             candidate window, drop zero-cosine hits, mark usage.
+            # CHAT 5.2.2 — Render path (CHAT 3.2): token-capped bullet block; ""
+            #             when nothing is relevant, so the append below is safe.
             memories = await recall(str(request.project_id), current_message)
             memory_block = build_memory_block(memories)
         except Exception as mem_err:  # belt & braces: recall is already fail-open
@@ -126,6 +158,9 @@ async def post_chat_query(
     formatted_messages = [{"role": "system", "content": system_instruction}]
     for msg in request.messages:
         formatted_messages.append({"role": msg.role, "content": msg.content})
+        # CHAT 5.3 — Repository WRITE per incoming turn (conversation_messages,
+        #            workflow_state="chat"); the same table the pipeline branch
+        #            writes to (CHAT 2.3.3), so both chat paths share one transcript.
         if request.project_id:
             await ConversationMessageRepository.save_message(
                 project_id=str(request.project_id),
@@ -137,6 +172,9 @@ async def post_chat_query(
 
     logger.info("Initiating conversational analyst run.")
     try:
+        # CHAT 5.4 — LLM transport (CHAT 6.1): direct LM Studio call, no LangGraph.
+        #            Failures map onto the API contract below: unparsable JSON 422,
+        #            gateway down 503, other gateway errors 502.
         response = await call_lm_studio(formatted_messages)
     except LMStudioOutputParsingError as err:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(err))
@@ -146,6 +184,7 @@ async def post_chat_query(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(err))
     reply_text = response.get("text", "")
 
+    # CHAT 5.5 — Repository WRITE of the assistant turn (skipped for an empty reply).
     if request.project_id and reply_text:
         await ConversationMessageRepository.save_message(
             project_id=str(request.project_id),
@@ -162,6 +201,10 @@ async def post_chat_query(
             (m.content for m in reversed(request.messages) if m.role == "user"),
             "",
         )
+        # CHAT 5.6 — Semantic-memory WRITE path (CHAT 4.1): distill durable facts
+        #            from this finished turn and store them for future recalls.
+        #            Fail-open — extract_and_remember returns 0 instead of raising,
+        #            so the already-delivered reply can never be rolled back.
         if last_user_message and settings.MEMORY_FACT_EXTRACTION_ENABLED:
             await extract_and_remember(
                 project_id=str(request.project_id),
@@ -169,6 +212,8 @@ async def post_chat_query(
                 assistant_reply=reply_text,
             )
         # Notify SSE subscribers so other connected clients refresh their conversation view.
+        # CHAT 5.7 — Real-time fan-out, mirroring the pipeline branch's SSE frame
+        #            (CHAT 2.3.4) so both chat paths look identical to clients.
         await event_manager.publish(str(request.project_id), "chat_reply", {
             "project_id": str(request.project_id),
             "role": "assistant",

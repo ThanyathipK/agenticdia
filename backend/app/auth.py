@@ -29,6 +29,25 @@ from app.repositories.user import UserRepository, normalize_email
 logger = logging.getLogger("app.auth")
 
 # ---------------------------------------------------------------------------
+# AUTH flow index (the matching tags live across src/ and backend/app/)
+# ---------------------------------------------------------------------------
+#   AUTH 1.x  LOGIN             AuthPanel 1.1 → AuthModal 1.1.1/1.2 →
+#                                useAuth 1.3/1.3.1 → api client 1.4 →
+#                                route 1.7 → authenticate_user 1.7.1 (repo
+#                                1.7.1.1, provisioning 1.7.1.2, bcrypt 1.7.1.3)
+#                                → JWT 1.7.3 → response 1.7.4 → persist 1.5
+#                                (setAuthToken 1.5.1) → UI state 1.6
+#   AUTH 2.x  SESSION RESTORE   GET  /api/auth/me        (2.1 → 2.2 → 2.3 → 2.4)
+#   AUTH 3.x  CAPABILITIES      GET  /api/auth/config    (3.1 → 3.2 → 3.3 → 3.4)
+#   AUTH 4.x  LOGOUT            AuthPanel 4.1 → useAuth.logout → 4.2 → 4.3 → 4.4
+#   AUTH 5.x  CHANGE PASSWORD   POST /api/auth/change-password (service 5.1/5.2;
+#                                no frontend caller — see the note at AUTH 5.1)
+#   AUTH 6.x  REGISTER          useAuth 6.1 → api 6.2 → route 6.3.1…6.3.6 → 6.4
+#   AUTH 7.x  AUTHORIZATION     get_current_user 7.1 (verify_token 7.1.1, repo
+#                                7.1.2, projection 7.1.3) · flexible 7.2 (+7.2.1)
+#                                · optional 7.3 · project ownership 7.4 →
+#                                require_project_owner 7.5/7.6
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -37,6 +56,10 @@ logger = logging.getLogger("app.auth")
 DEV_JWT_SECRET = "dev-secret-change-in-production-2026-agenticdia"
 
 
+# AUTH 1.7.3 / AUTH 7.1.1 — Signing-key resolution, shared by JWT issuance
+#                            (create_access_token) and verification (verify_token).
+#                            Placeholder or weak secrets are warned about loudly
+#                            rather than silently accepted.
 def _resolve_jwt_secret() -> str:
     """
     Resolve the JWT signing secret from settings (backend/.env).
@@ -72,6 +95,9 @@ def _resolve_jwt_secret() -> str:
     return configured
 
 
+# AUTH 1.7.3 — The key create_access_token signs with; AUTH 7.1.1 verifies with
+#              this same value, so rotating it invalidates every stored session
+#              (the client then clears it in AUTH 2.4).
 JWT_SECRET_KEY = _resolve_jwt_secret()
 JWT_ALGORITHM = "HS256"
 # backend/.env exposes the TTL as JWT_EXPIRATION_MINUTES (the previously-read
@@ -91,6 +117,10 @@ security_scheme = HTTPBearer()
 # ---------------------------------------------------------------------------
 
 
+# AUTH 1.7.1.3 — Bcrypt verification step of the LOGIN flow (called by AUTH 1.7.1);
+#                reused as AUTH 5.2.2 (old-password check on change-password).
+#                Returns False — never raises — for an empty or malformed stored
+#                hash so a bad row produces a 401 instead of a 500.
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plaintext password against a bcrypt hash.
 
@@ -108,11 +138,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+# AUTH 6.3.5 (hashing step) — bcrypt hashing for registration (route AUTH 6.3);
+#                reused as AUTH 5.2.3 (new hash on change-password). Cost factor
+#                comes from pwd_context above (bcrypt__rounds=12).
 def get_password_hash(password: str) -> str:
     """Hash a plaintext password using bcrypt."""
     return pwd_context.hash(password)
 
 
+# AUTH 1.7.1.2 — "Password not provisioned" branch of the LOGIN flow: a users row
+#                with an empty hash (the pre-0013 seeded shape) is reported as a
+#                provisioning problem (401 + actionable operator log) instead of a
+#                wrong-password attempt.
 def password_hash_is_usable(hashed_password: Optional[str]) -> bool:
     """Return True when *hashed_password* is a non-empty stored hash.
 
@@ -124,6 +161,13 @@ def password_hash_is_usable(hashed_password: Optional[str]) -> bool:
     return bool((hashed_password or "").strip())
 
 
+# AUTH 5.2 — Service layer for POST /api/auth/change-password (route AUTH 5.1).
+#            No frontend caller exists (see the AUTH 5.1 discrepancy note).
+#              AUTH 5.2.1 — repository READ: UserRepository.get_by_id → 400 when
+#                           the row is gone (app.repositories.user)
+#              AUTH 5.2.2 — verify_password (AUTH 1.7.1.3) on the OLD password
+#              AUTH 5.2.3 — get_password_hash + UserRepository.set_password_hash
+#                           + commit → users table UPDATE
 async def change_password(
     user_id: str,
     old_password: str,
@@ -143,6 +187,8 @@ async def change_password(
         HTTPException 400: If the user does not exist or the old
             password is incorrect.
     """
+    # AUTH 5.2.1 — Repository READ (users table) via UserRepository.get_by_id;
+    #              a non-UUID id or missing row becomes a 400 below.
     user = await UserRepository.get_by_id(user_id, session)
 
     if user is None:
@@ -151,6 +197,7 @@ async def change_password(
             detail="User not found",
         )
 
+    # AUTH 5.2.2 — Bcrypt check of the OLD password (AUTH 1.7.1.3 helper) → 400.
     if not verify_password(old_password, user.password_hash):
         logger.warning(
             "Failed password change (wrong old password) for user %s", user_id
@@ -160,11 +207,22 @@ async def change_password(
             detail="Old password is incorrect",
         )
 
+    # AUTH 5.2.3 — WRITE: re-hash (AUTH 6.3.5 helper), repository UPDATE +
+    #              commit (users.password_hash).
     await UserRepository.set_password_hash(user, get_password_hash(new_password), session)
     await session.commit()
     logger.info("Password changed for user: %s", user.email)
 
 
+# AUTH 1.7.1 — SERVICE layer of the LOGIN flow: the single credential-verification
+#              path behind POST /api/auth/login (route AUTH 1.7) and the only
+#              place that decides 200-vs-401 for a login attempt.
+#                AUTH 1.7.1.1 — repository READ (email → users row, AUTH 7.1.2
+#                               shares the same helper module)
+#                AUTH 1.7.1.2 — provisioning branch
+#                AUTH 1.7.1.3 — bcrypt branch
+#              All three failure branches return the identical 401 "Invalid
+#              credentials" so the endpoint cannot be used to enumerate accounts.
 async def authenticate_user(
     email: str,
     password: str,
@@ -186,9 +244,13 @@ async def authenticate_user(
             provisioned, or the password does not verify.
     """
     normalized = normalize_email(email)
+    # AUTH 1.7.1.1 — Repository READ: the ONLY database access in the LOGIN flow
+    #                (users table, case-insensitive email match).
     user = await UserRepository.get_by_email(normalized, session)
 
     if user is None:
+        # AUTH 1.7.1.1 — Unknown account: same 401 body as a wrong password
+        #                (below) so login cannot be used to probe for emails.
         logger.warning("Login attempt for non-existent user: %s", normalized)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -197,6 +259,8 @@ async def authenticate_user(
         )
 
     if not password_hash_is_usable(user.password_hash):
+        # AUTH 1.7.1.2 — No hash provisioned: 401 for the caller, actionable
+        #                advice for the operator (see the logger.error below).
         logger.error(
             "Account %s has no password hash provisioned in the database. "
             "Set SYSTEM_USER_PASSWORD in backend/.env (the startup seeder "
@@ -211,6 +275,8 @@ async def authenticate_user(
         )
 
     if not verify_password(password, user.password_hash):
+        # AUTH 1.7.1.3 — Wrong password: identical 401, and the account is NOT
+        #                locked (no attempt counter/lockout exists in this flow).
         logger.warning("Failed login attempt for user: %s", user.email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -245,6 +311,11 @@ class AuthenticatedUser(BaseModel):
         from_attributes = True
 
 
+# AUTH 1.7.3 — JWT creation for the LOGIN flow (called by route AUTH 1.7 only).
+#              Claims: sub (user id) / email / role + exp + iat; signed HS256 with
+#              JWT_SECRET_KEY (resolver above) and TTL ACCESS_TOKEN_EXPIRE_MINUTES.
+#              No server-side session row and no jti, so the token cannot be
+#              revoked — the reason AUTH 4.x logout is client-side only.
 def create_access_token(
     user_id: str,
     email: str,
@@ -274,6 +345,11 @@ def create_access_token(
 # ---------------------------------------------------------------------------
 
 
+# AUTH 7.1.1 — JWT verification gate for every authenticated request: decodes and
+#              validates signature + expiry (401 "Could not validate credentials")
+#              and requires sub/email/role (401 "Invalid token payload"). Shared by
+#              AUTH 7.1, 7.2 and 7.3. Claims are never trusted for identity —
+#              AUTH 7.1.2 re-reads the users table afterwards.
 def verify_token(token: str) -> TokenData:
     """Verify and decode a JWT token, returning the TokenData payload."""
     try:
@@ -302,6 +378,9 @@ def verify_token(token: str) -> TokenData:
 # ---------------------------------------------------------------------------
 
 
+# AUTH 7.1.3 — Row → public identity projection, shared by AUTH 7.1, 7.2 and 7.3.
+#              Single conversion point so password_hash (and future sensitive
+#              columns) can never leak into the route handlers.
 def to_authenticated_user(user: UserModel) -> AuthenticatedUser:
     """Project a :class:`UserModel` row onto the public auth identity.
 
@@ -316,6 +395,12 @@ def to_authenticated_user(user: UserModel) -> AuthenticatedUser:
     )
 
 
+# AUTH 7.1 — AUTHORIZATION dependency for every Bearer-protected route. This is
+#            where an authenticated request "begins" from the backend's point of
+#            view: AUTH 2.3 (auth/me) and every project route depend on it. Chain:
+#              7.1.1 verify_token → 7.1.2 repository READ (users) → 7.1.3 projection
+#            Note: no is_active/disabled-account check exists yet (the users table
+#            has no such column), so revocation currently means deleting the row.
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     session: AsyncSession = Depends(get_db),
@@ -336,10 +421,17 @@ async def get_current_user(
     disabled-account check is performed here. Re-add one (plus a migration)
     if account suspension is introduced.
     """
+    # AUTH 7.1.1 — Signature/expiry gate (shared helper). Raises 401 before any
+    #              database work, so a garbage/expired token costs no query.
     token_data = verify_token(credentials.credentials)
 
+    # AUTH 7.1.2 — Repository READ: the DB is the source of truth, so the
+    #              token's own claims are never trusted for identity.
     user = await UserRepository.get_by_id(token_data.user_id, session)
 
+    # AUTH 7.1.2 (error branch) — Signature valid but the row is gone (deleted
+    #              account, or a token signed with another environment's secret):
+    #              401 so the client clears its stale session in AUTH 2.4.
     if user is None:
         logger.warning(
             "Rejected token for unknown user id: %s", token_data.user_id
@@ -350,6 +442,8 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # AUTH 7.1.3 — Projection handed to the route handler: identity only, never
+    #              password_hash.
     return to_authenticated_user(user)
 
 
@@ -358,6 +452,9 @@ async def get_current_user(
 # ---------------------------------------------------------------------------
 
 
+# AUTH 7.3 — OPTIONAL variant (no 401): routes that work anonymously and merely
+#            personalize when a token is present. Reuses the same 7.1.x steps, but
+#            a bad token yields None instead of an error.
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
     session: AsyncSession = Depends(get_db),
@@ -378,6 +475,7 @@ async def get_current_user_optional(
     if user is None:
         return None
 
+    # AUTH 7.3 — Success path: same projection as AUTH 7.1.3.
     return to_authenticated_user(user)
 
 
@@ -416,6 +514,12 @@ class UserMinimalResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# AUTH 7.4 — PROJECT-OWNERSHIP gate. Called directly by routes whose project id
+#            arrives in the request BODY (a FastAPI dependency cannot read it) and
+#            wrapped by AUTH 7.5 / 7.6 for path- or query-scoped routes.
+#              AUTH 7.4.1 — malformed id → 404 (never 400, so ids are not probed)
+#              AUTH 7.4.2 — repository READ: SELECT projects WHERE id=…
+#              AUTH 7.4.3 — missing row → 404; different owner → 403
 async def verify_project_access(
     project_id: str,
     current_user: AuthenticatedUser,
@@ -430,6 +534,7 @@ async def verify_project_access(
     from the request BODY (which a FastAPI ``Depends`` cannot reach) call this
     directly; path/query-scoped routes use :func:`require_project_owner`.
     """
+    # AUTH 7.4.1 — Malformed/absent project id → 404 before touching the DB.
     try:
         project_key = as_uuid(project_id)
     except (AttributeError, TypeError, ValueError):
@@ -438,11 +543,15 @@ async def verify_project_access(
             detail="Project not found",
         )
 
+    # AUTH 7.4.2 — Repository READ: the projects table (ownership column user_id).
     result = await session.execute(
         select(ProjectModel).where(ProjectModel.id == project_key)
     )
     project = result.scalar_one_or_none()
 
+    # AUTH 7.4.3 — 404 for an unknown project, 403 for someone else's: the two are
+    #              distinct so a client can tell "gone" from "not yours", but neither
+    #              reveals the other owner's existence beyond the 403 itself.
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -456,6 +565,8 @@ async def verify_project_access(
         )
 
 
+# AUTH 7.5 — Path/query-scoped wrapper: AUTH 7.1 authentication + AUTH 7.4
+#            ownership in one `Depends`, returning the caller for handler use.
 async def require_project_owner(
     project_id: str,
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -470,6 +581,9 @@ async def require_project_owner(
     return current_user
 
 
+# AUTH 7.2.1 — Shared token→user resolution for the header and query variants of
+#              AUTH 7.2: reuses AUTH 7.1.1 (verify_token), AUTH 7.1.2 (repository
+#              READ) and AUTH 7.1.3 (projection); 401 when the row is gone.
 async def _resolve_user_from_raw_token(
     raw_token: str, session: AsyncSession
 ) -> AuthenticatedUser:
@@ -486,6 +600,10 @@ async def _resolve_user_from_raw_token(
     return to_authenticated_user(user)
 
 
+# AUTH 7.2 — FLEXIBLE variant used by the SSE stream: accepts the JWT either as a
+#            Bearer header (default) or as ?token=…, because the browser
+#            EventSource API cannot set headers. Authorization semantics identical
+#            to AUTH 7.1; only the token source differs.
 async def get_current_user_flexible(
     token: Optional[str] = Query(
         default=None,
@@ -513,6 +631,8 @@ async def get_current_user_flexible(
     )
 
 
+# AUTH 7.6 — SSE-scoped ownership wrapper: AUTH 7.2 authentication + AUTH 7.4
+#            ownership, so the push stream is authorized exactly like REST routes.
 async def require_project_owner_flexible(
     project_id: str,
     current_user: AuthenticatedUser = Depends(get_current_user_flexible),

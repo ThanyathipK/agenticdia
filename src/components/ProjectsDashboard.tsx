@@ -284,6 +284,9 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
     setPrdCountLoaded(false);
     (async () => {
       const states = await Promise.all(
+        // PROJECT 2.6 — Fan-out read: the "PRD generated" KPI issues one
+        // GET /api/project/{id} (PROJECT 2.2/2.3) per table row, tolerating
+        // individual failures so a single unreadable project cannot blank the KPI.
         ids.map((id) => api.getProjectState(id).catch(() => null)),
       );
       if (cancelled) return;
@@ -349,12 +352,17 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
   }, [totalPages]);
 
   // Open a project from the table: select it and jump back into the workspace.
+  // PROJECT 2.1 — Dashboard row open: same selection trigger as the sidebar
+  //              (setProjectId → useProjectSync effect → PROJECT 2.2).
   const handleOpenProject = (id: string) => {
     setProjectId(id);
     setActiveView('workspace');
   };
 
   // ---- Per-row status menu (user-editable workflow status) -------------------
+  // PROJECT 7.5.1 / 7.4.1 — Per-row metadata menu (UI triggers): the status
+  // dropdown calls handleUpdateProjectStatus (7.5.1 → api 7.5.2 → route 7.5.3)
+  // and the ★ button calls handleToggleFlag (7.4.1 → api 7.4.2 → route 7.4.3).
   const [statusMenuFor, setStatusMenuFor] = useState<string | null>(null);
 
   useEffect(() => {

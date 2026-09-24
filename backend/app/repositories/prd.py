@@ -133,6 +133,13 @@ class PRDDocumentRepository:
         return False
 
 
+# VERSION 4.x — Immutable PRD-version ledger (prd_versions table). APPEND-ONLY:
+#   there is no UPDATE/DELETE path — history is never rewritten.
+#   4.1 create                ← VERSION 3.6 (every AI/manual/revert/restore snapshot)
+#   4.2 get_previous          ← VERSION 3.8 (default diff base)
+#   4.3 get_by_project        ← VERSION 2.1 (newest-first timeline)
+#   4.4 get_by_version_number ← VERSION 2.4 and the restore (2.5) lookup
+#   4.5 get_latest            ← VERSION 2.3, PROJECT 8.2.3 and CONFIRM 3.3.7 (pinned version)
 class PRDVersionRepository:
     """
     Dedicated immutable PRD version repository.
@@ -142,6 +149,10 @@ class PRDVersionRepository:
     """
 
     @staticmethod
+    # VERSION 4.1 — INSERT one snapshot. Version numbering: `max(existing)+1` by
+        #             default, or the caller's PINNED number (used by CONFIRM 3.3.7 so a
+        #             merge that already advanced the requirement version does not
+        #             double-bump). There is deliberately NO "same content" short-circuit.
     async def create(
         project_id: str,
         data: Dict[str, Any],
@@ -182,6 +193,9 @@ class PRDVersionRepository:
         return serialize_prd_version(version)
 
     @staticmethod
+    # VERSION 4.2 — The snapshot IMMEDIATELY before a version number (highest number
+    #             below it, or None). This is the default base for VERSION 3.8's diff and
+    #             therefore for every "what changed in vN?" question in the UI.
     async def get_previous(project_id: str, before_version: int, session: AsyncSession) -> Optional[Dict[str, Any]]:
         """The version IMMEDIATELY before ``before_version`` (or None when none).
 
@@ -203,6 +217,8 @@ class PRDVersionRepository:
         return serialize_prd_version(v) if v else None
 
     @staticmethod
+    # VERSION 4.3 — SELECT the project's snapshots NEWEST FIRST (the timeline order
+    #             VERSION 2.1 promises to the UI).
     async def get_by_project(project_id: str, session: AsyncSession) -> List[Dict[str, Any]]:
         pid = as_uuid(project_id)
         stmt = select(PRDVersionModel).where(PRDVersionModel.project_id == pid).order_by(PRDVersionModel.version_number.desc())
@@ -211,6 +227,8 @@ class PRDVersionRepository:
         return [serialize_prd_version(v) for v in records]
 
     @staticmethod
+    # VERSION 4.4 — SELECT one snapshot by number (None when absent) — the lookup the
+    #             diff (3.8) and the restore (2.5) both start from.
     async def get_by_version_number(project_id: str, version_number: int, session: AsyncSession) -> Optional[Dict[str, Any]]:
         pid = as_uuid(project_id)
         stmt = select(PRDVersionModel).where(
@@ -224,6 +242,9 @@ class PRDVersionRepository:
         return None
 
     @staticmethod
+    # VERSION 4.5 — SELECT the newest snapshot. The two callers use it for VERSION
+    #             BOOKKEEPING rather than display: 3.6 compares the new document against
+    #             it, and CONFIRM 3.3.7 reads its number to pin the next ledger row.
     async def get_latest(project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
         pid = as_uuid(project_id)
         stmt = select(PRDVersionModel).where(PRDVersionModel.project_id == pid).order_by(PRDVersionModel.version_number.desc()).limit(1)

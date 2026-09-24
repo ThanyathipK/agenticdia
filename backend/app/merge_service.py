@@ -78,6 +78,8 @@ def text_similarity(a: Optional[str], b: Optional[str]) -> float:
     return difflib.SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio()
 
 
+# GATHERING 6.1.1 — Fuzzy title comparison used by 6.1 (and by the change detectors):
+#               similarity above FUZZY_TITLE_THRESHOLD counts as the same story.
 def titles_match(a: Optional[str], b: Optional[str], threshold: float = FUZZY_TITLE_THRESHOLD) -> bool:
     """True when two story titles are similar enough to be the same story."""
     return text_similarity(a, b) >= threshold
@@ -91,6 +93,9 @@ def _normalize_ac_text(ac: Any) -> str:
     return " ".join(s.split())
 
 
+# GATHERING 6.3 — Acceptance-criteria union for a matched story: criteria are ADDED or
+#             updated, never wholesale replaced, so a re-gather cannot delete ACs the
+#             model simply forgot to repeat.
 def merge_acceptance_criteria(
     old_ac: Optional[List[Any]],
     new_ac: Optional[List[Any]],
@@ -155,6 +160,9 @@ def merge_acceptance_criteria(
 # ==========================================
 # FIELD-LEVEL INCREMENTAL MERGE
 # ==========================================
+# GATHERING 6.2 — Field-level merge for a matched story: incoming EMPTY values keep the
+#             persisted data (never blank out a story), and the result records
+#             `fields_changed` for the merge report / change summary (4.4.1).
 def merge_story_fields(
     matched: Dict[str, Any],
     inc: Dict[str, Any],
@@ -193,6 +201,11 @@ def merge_story_fields(
 # ==========================================
 # PROTECTED-STORY HELPERS
 # ==========================================
+# GATHERING 6.4 — Protected-id set (built from GATHERING 1.3's locked story UUIDs and
+#             ticket codes): a pending update on a protected story is skipped and a
+#             pending archive becomes `change_type="conflict"` with status staying
+#             active — the mechanism behind the "⚠️ locked story(ies) … stayed active"
+#             line in 4.4.1.
 def build_protected_set(protected_ids: Optional[List[str]]) -> Set[str]:
     """
     Normalizes the ``protected_ids`` allow-list (story UUIDs and/or ticket
@@ -223,6 +236,10 @@ def is_protected_story(story: Dict[str, Any], protected_set: Set[str]) -> bool:
 # ==========================================
 # STORY IDENTITY MATCHING
 # ==========================================
+# GATHERING 6.1 — Identity resolution for one incoming story (the heart of "update the
+#             right story"): progressive matching by story UUID → ticket code →
+#             normalized title → fuzzy title (6.1.1), and None when nothing matches
+#             (the story is then treated as NEW, i.e. created).
 def _match_incoming_story(
     inc: Dict[str, Any],
     existing_by_id: Dict[str, Dict[str, Any]],
@@ -266,6 +283,10 @@ def _match_incoming_story(
 # ==========================================
 # CORE MERGE LOGIC
 # ==========================================
+# GATHERING 6.0 — THE merge entry point (called once per gather from GATHERING 4.1,
+#             and by the document-extraction and impact paths). Incremental
+#             reconciliation rules live in the docstring below: unchanged / updated /
+#             created / archived / conflict, with protected ids never mutated.
 def merge_user_stories_with_report(
     existing_stories: List[Dict[str, Any]],
     new_incoming_stories: List[Dict[str, Any]],
@@ -531,6 +552,9 @@ def merge_user_stories(
     return merged_stories
 
 
+# GATHERING 6.5 — Projection helper: flattens the active stories' acceptance criteria
+#             into the board-level `acceptance_criteria` list (used by the gatherer's
+#             draft short-circuit 1.5.1 and by the final state assembly in 4.2).
 def collect_acceptance_criteria(stories: List[Dict[str, Any]]) -> List[Any]:
     """Flattens the ``acceptance_criteria`` of every story into a single list."""
     all_ac: List[Any] = []
@@ -539,6 +563,10 @@ def collect_acceptance_criteria(stories: List[Dict[str, Any]]) -> List[Any]:
     return all_ac
 
 
+# GATHERING 6.6 — Shared prompt-context formatter for the backlog: the SAME rendering
+#             is used by the gatherer prompt (2.6), the semantic detector (5.2), the
+#             intent detector (INTENT 2.2) and the matcher (MATCHING 2.2), so every
+#             agent describes the stories identically.
 def format_story_context_lines(stories: List[Dict[str, Any]]) -> List[str]:
     """Render user stories as the canonical multi-line context block.
 
@@ -560,6 +588,9 @@ def format_story_context_lines(stories: List[Dict[str, Any]]) -> List[str]:
 # ==========================================
 # POST-MERGE HELPERS (shared by gatherer_node)
 # ==========================================
+# GATHERING 6.7 — Active-only filter used by the document-extraction draft builder and
+#             the UI projections (archived stories stay in the board payload but are
+#             not offered as current work).
 def filter_active_stories(stories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Returns only the stories whose status is ``"active"`` (default if unset)."""
     return [s for s in stories if s.get("status", "active") == "active"]

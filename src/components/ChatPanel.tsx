@@ -52,13 +52,22 @@ export function ChatPanel({ state }: { state: ProjectState }) {
 
   // Clip-icon attach: uploads straight into the project knowledge base
   // (same KNOWLEDGE-ONLY contract as the DocumentLibrary upload control).
+  // DOC-UPLOAD 1.1 — Upload ENTRY POINT of the whole flow: the paperclip is the ONLY way a
+  //             document enters a project. It calls 1.2 directly; extraction stays a
+  //             separate, explicit action (FLOW 15).
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // DOC-UPLOAD 1.1.1 — Guarded click: no project ⇒ no upload (the button is also disabled
+  //                 while uploading/streaming).
   const handleClipClick = (): void => {
     if (!projectId) return;
     fileInputRef.current?.click();
   };
 
+  // DOC-UPLOAD 1.1.2 — Pick handler: clears the input first so the SAME file can be attached
+  //                 again later, then hands the File to 1.2 (which owns the POST + status
+  //                 branching). No local state is mutated here — the list reload in 1.3 is
+  //                 what makes the new row appear.
   const handleFilePicked = async (
     event: ChangeEvent<HTMLInputElement>,
   ): Promise<void> => {
@@ -193,6 +202,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
           the action buttons stack into two rows and the composer grows taller. */}
       <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-6 custom-scrollbar pb-44 sm:pb-32">
         {messages.length === 0 && (
+          // CHAT 1.1 — Empty-state suggestion chips: `onPick` feeds the same
+          // handler as the composer (CHAT 1.2), so a suggested prompt is just a
+          // prefilled user turn.
           <ChatEmptyState
             disabled={!projectId || isLoading || isProcessing}
             disabledReason={agentActionHint}
@@ -258,7 +270,11 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                     </p>
                   </div>
 
-                  {/* Dynamic Pending Clarifications Form Embedded inside the timeline */}
+                  {/* AUDIT 5.3.1 — Embedded clarification form: rendered from the
+                      bubble's `auditResultSnapshot` (AUDIT 5.3) so the user can answer
+                      the auditor's questions inline. Answers are submitted through the
+                      CLARIFICATION flow (FLOW 10), which resolves them server-side
+                      (AUDIT 3.x / CONFIRM depends on where the question row lives). */}
                   {msg.isPendingClarifications && msg.auditResultSnapshot?.clarification_questions && (
                     <motion.div 
                       initial={{ opacity: 0, scale: 0.95 }}
@@ -274,6 +290,10 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                         <h3 className="font-bold text-xs text-on-surface">Clarification Required</h3>
                       </div>
 
+                      {/* CLARIFY 1.2 — ChatPanel embedded form: same handler (1.3) as the
+                          dashboard panel; the questions come from the audit BUBBLE's
+                          snapshot (AUDIT 5.3.1), while the answers land in the shared
+                          store (1.4). */}
                       <form
                         onSubmit={handleSubmitClarifications}
                         className="space-y-3 relative z-10"
@@ -362,6 +382,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
         {/* Agent Actions Row — buttons stack on very narrow panels instead of
             overflowing; the min-width keeps each label on one line. */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* AUDIT 5.0 (UI trigger) — "Validate Requirements" button: on-demand
+              auditor run (empty raw_input + target_agent=auditor). Disabled via
+              agentActionsDisabled when there is nothing to audit. */}
           <button
             onClick={handleValidateRequirements}
             disabled={agentActionsDisabled}
@@ -371,6 +394,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             <CheckCircle2 className="w-3.5 h-3.5 text-primary" />
             <span>Validate Requirements</span>
           </button>
+          {/* ARCHITECT 1.0 (UI trigger) — "Generate PRD" button: on-demand architect
+              run (empty raw_input + target_agent=architect). Disabled via
+              agentActionsDisabled when there is nothing to compile. */}
           <button
             onClick={handleGeneratePRD}
             disabled={agentActionsDisabled}
@@ -408,6 +434,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
               )}
             </button>
           </Tooltip>
+          {/* DOC-UPLOAD 1.1 — hidden file input; `accept` mirrors the backend allow-list (3.1) */}
           <input
             ref={fileInputRef}
             type="file"
@@ -415,6 +442,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             className="hidden"
             onChange={(e) => void handleFilePicked(e)}
           />
+          {/* CHAT 1.1 — Composer (real entry point of the CHAT flow): the textarea
+              is bound to rawInput in useChat; Enter/Send calls handleSendMessage
+              (CHAT 1.2) → api.processRequirements (CHAT 1.3). */}
           <textarea
             ref={composerRef}
             rows={1}
@@ -424,6 +454,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             onKeyDown={(e) => {
               // Enter sends; Shift+Enter inserts a newline. The isComposing
               // guard keeps IME composition (e.g. Thai keyboard) from sending.
+              // CHAT 1.1 (composer send) — Enter sends, Shift+Enter inserts a
+              // newline, and the isComposing guard keeps IME composition (e.g. a
+              // Thai keyboard) from submitting mid-word.
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 handleSendMessage();
@@ -444,6 +477,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
               </button>
             </Tooltip>
           ) : (
+            // CHAT 1.1 (send button) — same entry point as Enter; stays disabled
+            // while the composer is blank and swaps to Stop while a run is active
+            // (the Stop path is the CANCELLATION flow).
             <Tooltip label="Send message" side="top">
               <button
                 onClick={() => handleSendMessage()}

@@ -35,6 +35,10 @@ interface AuthModalProps {
   onClose: () => void;
 }
 
+// AUTH 1.1.1 — Dialog entry point (LOGIN): rendered by Dashboard with
+//              isOpen={isAuthModalOpen}. Two modes share one card: 'signin'
+//              (AUTH 1.2) and 'signup' (AUTH 6.x, only offered when the
+//              backend reports signup_enabled — see AUTH 3.x).
 export function AuthModal({
   isOpen,
   signupEnabled,
@@ -85,13 +89,25 @@ export function AuthModal({
     (!isSignUp || (fullName.trim().length > 0 && password.length >= MIN_PASSWORD_LENGTH)) &&
     !isAuthenticating;
 
+  // AUTH 1.2 — Frontend submit handler (layer: Frontend → hook).
+  //            It calls the handler injected as a prop — onSignIn = useAuth().login
+  //            (AUTH 1.3.1) or onSignUp = useAuth().register (AUTH 6.1). The hook
+  //            resolves to null on success or to a user-facing error string, which
+  //            is rendered inline (no alert()).
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
     setError(null);
+    // AUTH 1.2.1 — Sign-in branch: Frontend → useAuth.login → api.authLogin
+    //              → POST /api/auth/login (AUTH 1.4 → AUTH 1.7).
+    // AUTH 1.2.2 — Sign-up branch: Frontend → useAuth.register → api.authRegister
+    //              → POST /api/auth/register (AUTH 6.2 → AUTH 6.3), then login.
     const failure = isSignUp
       ? await onSignUp(email, password, fullName, role)
       : await onSignIn(email, password);
+    // AUTH 1.5 — On success (failure === null) the token is ALREADY persisted by
+    //             useAuth (axios header + localStorage + state), so closing the
+    //             modal reveals the authenticated sidebar (AUTH 1.6).
     if (failure) setError(failure);
     else onClose();
   };

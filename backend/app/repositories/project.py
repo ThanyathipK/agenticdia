@@ -19,6 +19,9 @@ DEFAULT_SYSTEM_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 
 def _make_snippet(message: str, query: str, window: int = 60) -> str:
+    # PROJECT 3.4.2 — Snippet builder for the search hit shown in the sidebar row:
+    #                 windowed around the first case-insensitive match, ellipsized
+    #                 at the trimmed edges, "" when there is nothing to show.
     """Build a compact excerpt of a conversation message centered on the first
     case-insensitive occurrence of ``query``.
 
@@ -42,14 +45,30 @@ def _make_snippet(message: str, query: str, window: int = 60) -> str:
     return f"{prefix}{text[start:end].strip()}{suffix}"
 
 
+# PROJECT repository map — the projects-table access point for the whole flow.
+# Call sites (routes in app/routes/projects.py unless noted):
+#   1.4.1  list_all       ← get_projects                 (SELECT, owner-scoped)
+#   3.4.1  search         ← search_projects              (name OR messages ILIKE)
+#   4.4.1  name_exists    ← create_project / update_project (global, not per-owner)
+#   4.4.2  create_project ← create_project               (INSERT projects + state)
+#   2.3.3.1 get_by_id     ← state init branch / PRD export / traceability
+#   5.3.2  update         ← update_project               (lock-gated UPDATE)
+#   6.3.1  delete         ← delete_project               (lock-gated DELETE + event log)
+#   7.3.1  toggle_pinned  ← pin_project                  (UPDATE, no lock gate)
+#   7.4.4  toggle_flagged ← flag_project                 (UPDATE, no lock gate)
+#   7.5.4  update_status  ← set_project_status           (UPDATE, no lock gate)
 class ProjectRepository:
     """Handles project-level operations."""
 
+    # PROJECT 1.4.1 (helper) — Sidebar ordering: pinned first, then most recently
+    # updated. Applied by list_all and search so both share the same order.
     @staticmethod
     def _sort_projects(projects: List[ProjectModel]) -> None:
         """Sidebar ordering: pinned projects float to the top, then most recently updated first."""
         projects.sort(key=lambda p: (not (p.is_pinned or False), -(p.updated_at or p.created_at).timestamp() if (p.updated_at or p.created_at) else 0))
 
+    # PROJECT 1.4.1 — SELECT projects (WHERE user_id = :owner when scoped), sorted
+    # and serialized. DB READ ONLY: no writes, no lock checks.
     @staticmethod
     async def list_all(
         session: AsyncSession,
@@ -70,6 +89,9 @@ class ProjectRepository:
         ProjectRepository._sort_projects(projects)
         return [serialize_project(p) for p in projects]
 
+    # PROJECT 3.4.1 — Search read: outer-joins conversation_messages and matches
+    # projects.name OR message text (ILIKE, owner-scoped), then de-duplicates per
+    # project and attaches one _make_snippet (PROJECT 3.4.2) per match. READ ONLY.
     @staticmethod
     async def search(
         session: AsyncSession,
@@ -128,6 +150,10 @@ class ProjectRepository:
             for p in projects
         ]
 
+    # PROJECT 4.4.1 / 5.3.1 — Duplicate-name probe: COUNT over trim(lower(name)).
+    # The count is NOT user-scoped (no owner filter is applied here or by the
+    # callers), so names are unique across the whole workspace and a 409 can
+    # disclose another tenant's project name (analysis §9 item 3; unchanged).
     @staticmethod
     async def name_exists(
         name: str,
@@ -163,6 +189,11 @@ class ProjectRepository:
         result = await session.execute(stmt)
         return bool((result.scalar_one() or 0) > 0)
 
+    # PROJECT 4.4.2 — WRITE path of create: INSERT projects, then INSERT the empty
+    # requirement_states row (bookkeeping only) in the same session/transaction.
+    # Falls back to DEFAULT_SYSTEM_USER_ID when no owner is supplied — a legacy
+    # path that would violate the projects.user_id FK if that seeded user is
+    # absent (see analysis §9).
     @staticmethod
     async def create_project(project_data: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
         user_id = project_data.get("user_id")
@@ -193,6 +224,9 @@ class ProjectRepository:
         await session.refresh(project)
         return {"id": str(project.id), "name": project.name}
 
+    # PROJECT 2.3.3.1 / export / traceability — plain owner-agnostic READ of one
+    # project by id (callers that need the owner boundary use `update`/`delete`,
+    # which apply the user_id filter, or the AUTH 7.4 gate upstream).
     @staticmethod
     async def get_by_id(project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
         pid = as_uuid(project_id)
@@ -203,6 +237,10 @@ class ProjectRepository:
             return serialize_project(p)
         return None
 
+    # PROJECT 5.3.2 — WRITE path of rename/field update: owner-scoped SELECT (a
+    # non-owner simply gets None → route 404), then the artifact-lock gate
+    # (LockService.raise_if_locked_model) before any assignment, then UPDATE of the
+    # supplied fields + flush/refresh.
     @staticmethod
     async def update(
         project_id: str,
@@ -242,6 +280,9 @@ class ProjectRepository:
             return serialize_project(p)
         return None
 
+    # PROJECT 7.5.4 — UPDATE of projects.status only. Deliberately NOT lock-gated:
+    # locking protects document content, not review bookkeeping (same rationale as
+    # toggle_pinned / toggle_flagged).
     @staticmethod
     async def update_status(
         project_id: str,
@@ -279,6 +320,8 @@ class ProjectRepository:
         await session.refresh(p)
         return serialize_project(p)
 
+    # PROJECT 7.3.1 — UPDATE of projects.is_pinned only (owner-scoped, no lock
+    # gate). Returns None when the project is missing or owned by someone else.
     @staticmethod
     async def toggle_pinned(
         project_id: str,
@@ -311,6 +354,8 @@ class ProjectRepository:
         await session.refresh(p)
         return serialize_project(p)
 
+    # PROJECT 7.4.4 — UPDATE of projects.is_flagged only (owner-scoped, no lock
+    # gate). Never touches is_pinned, so sidebar ordering is unaffected.
     @staticmethod
     async def toggle_flagged(
         project_id: str,
@@ -347,6 +392,10 @@ class ProjectRepository:
         await session.refresh(p)
         return serialize_project(p)
 
+    # PROJECT 6.3.1 — DELETE path: owner-scoped SELECT → artifact-lock gate →
+    # session.delete (FK CASCADE removes projects' children) → append an
+    # artifact_event_logs row. The event log is fail-open: a logging failure is
+    # warned about and the deletion still succeeds.
     @staticmethod
     async def delete(
         project_id: str,

@@ -77,6 +77,11 @@ export function useProjectSync(
     void refreshFromServerRef.current?.(true);
   });
 
+  // PROJECT 2.4 — Requirement-state load (opening a project). Layer chain:
+  //              2.1 trigger → 2.2 (api.getProjectState) → route 2.3 →
+  //              repository 2.3.2 / init branch 2.3.3 → 2.4 store mapping.
+  //              Reused verbatim by the SSE full refresh and the PRD preview
+  //              catch-up, so PROJECT 2.x is also the read path of EVENTS.
   const loadProjectState = async (projId: string, retries = 5, delay = 1000) => {
     // Fresh load — drop any queued PRD update / hold left over from a previous
     // project so the catch-up logic can never leak across projects.
@@ -90,8 +95,13 @@ export function useProjectSync(
     store.setLockedRequirements({});
 
     try {
+      // PROJECT 2.2 — API boundary → GET /api/project/{id} (route PROJECT 2.3).
       const payload = await api.getProjectState(projId);
       if (payload) {
+        // PROJECT 2.4 — Response applied to the UI store: structured
+        //              requirements/stories, lock maps, version number, audit
+        //              result, PRD markdown, Mermaid diagram, workflow node and
+        //              the embedded conversation history (via api/transforms).
         // Always load from Supabase — no frontend cache fallback.
         store.setStructuredRequirements(toStructuredRequirements(payload));
 
@@ -118,6 +128,9 @@ export function useProjectSync(
         // Load conversation history — always from Supabase, in chronological order
         store.setMessages(toChatMessages(payload));
 
+        // CONFIRM 1.7 — Pending-action load (initial project open, non-blocking): the
+        //              first paint already knows whether a draft is staged, so no extra
+        //              state fetch is needed. The SSE path refreshes it again (1.7.1).
         // Load pending human-in-the-loop merge actions (non-blocking). The live
         // sync below also refreshes them, but loading them here means the first
         // paint after opening a project is already complete — so the SSE stream
@@ -138,6 +151,9 @@ export function useProjectSync(
       }
     } catch (err) {
       if (retries > 0) {
+        // PROJECT 2.5 — Error branch: bounded retry (5 × 1 s) before degrading
+        // to the "working locally" warning. The server stays the only source of
+        // truth — there is deliberately no offline cache fallback.
         setTimeout(() => loadProjectState(projId, retries - 1, delay), delay);
       } else {
         handleWarning('Failed to load project state from the server. Working locally.', err);
@@ -151,6 +167,9 @@ export function useProjectSync(
   // Load project state whenever the selected project changes.
   useEffect(() => {
     if (projectId && projectId !== 'null') {
+      // PROJECT 2.1 — Trigger: the selected project changed (PROJECT 1.5
+      //              auto-select, sidebar row click, or dashboard row open)
+      //              → PROJECT 2.2. Effect depends on projectId only.
       loadProjectState(projectId);
     }
     // `loadProjectState` intentionally omitted: it is recreated every render and
@@ -239,6 +258,9 @@ export function useProjectSync(
             });
           }
 
+          // CONFIRM 1.7.1 — SSE-driven refresh: pending actions are re-read FIRST
+          //               because the PRD sync below needs to know whether a freshly
+          //               generated document is still staged for confirmation.
           // 4. Sync pending actions FIRST — the PRD sync below must know
           // whether a freshly generated document is still staged for
           // confirmation (see the hold computation).

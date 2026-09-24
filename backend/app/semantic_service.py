@@ -350,6 +350,10 @@ def _coerce_change_entry(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# GATHERING 5.1.1 — Explicit NO_CHANGE signal builder: used by the empty-message
+#               guard (5.1) and by the validators to express "no action needed" with
+#               a reason, instead of returning an empty list that callers would have
+#               to interpret.
 def build_no_change_recommendation(reason: str, confidence: float = DEFAULT_NO_CHANGE_CONFIDENCE) -> Dict[str, Any]:
     """The explicit "nothing meaningful changed" recommendation."""
     return {
@@ -360,6 +364,12 @@ def build_no_change_recommendation(reason: str, confidence: float = DEFAULT_NO_C
         "recommended_action": "NO_CHANGE",
     }
 
+# GATHERING 5.5.1 — Canonicalizer for the model's change list: per-entry coercion
+#               (`_coerce_change_entry`), conflict resolution
+#               (`_resolve_action_conflict`), target verification/downgrade
+#               (`_downgrade_unverifiable_change` + `resolve_target_story`) and
+#               de-duplication (`_dedupe_changes`). Output actions are always
+#               INSERT / UPDATE / ARCHIVE / NO_CHANGE (never NO_MEANINGFUL_CHANGE).
 def normalize_semantic_changes(
     raw_changes: Optional[Iterable[Any]],
     current_stories: Optional[Iterable[Dict[str, Any]]] = None,
@@ -496,6 +506,12 @@ def _dedupe_changes(changes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     return [by_key[key] for key in order]
 
+# GATHERING 5.0 — Semantic change detection service (the deterministic target finder
+#             that feeds GATHERING 2.2/2.3 and the merge recommendations). Chain:
+#             5.1 empty guard → 5.2 prompt (prompts/semantic.md) → 5.3 structured LLM
+#             call → 5.4 fail-loud on parse failure → 5.5 normalization/repair
+#             (5.5.1 + `_downgrade_unverifiable_change` / `_resolve_action_conflict` /
+#             `_dedupe_changes`). Pure service: no DB, no state writes.
 async def detect_semantic_changes(
     raw_input: str,
     current_stories: Optional[List[Dict[str, Any]]] = None,
@@ -515,6 +531,9 @@ async def detect_semantic_changes(
         len(stories),
     )
 
+    # GATHERING 5.1 — Empty-message guard: no LLM round-trip, but still an explicit
+    #             signal (5.1.1) instead of an ambiguous empty list, so callers can see
+    #             "nothing to compare" versus "nothing changed".
     if not str(raw_input or "").strip():
         # Nothing to compare: skip the LLM round-trip but still return an
         # explicit signal instead of an ambiguous empty list.
@@ -525,6 +544,9 @@ async def detect_semantic_changes(
     context_lines = format_story_context_lines(stories)
     current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
 
+    # GATHERING 5.2 — Prompt assembly from prompts/semantic.md: the backlog context
+    #             (shared formatter, GATHERING 6.6) plus the new message. The markdown
+    #             file is not annotated (its text is sent to the model verbatim).
     prompt_template = PromptTemplate(
         template=load_prompt("semantic"),
         input_variables=["current_context", "new_message", "format_instructions"]
@@ -540,6 +562,10 @@ async def detect_semantic_changes(
 
     # Prefer .with_structured_output(), falling back to raw JSON parse
     try:
+        # GATHERING 5.3 — Structured LLM call (llm_utils; LM Studio via llm_factory,
+        #             CHAT 6.1) returning SemanticChangeDetectionResult. The validator
+        #             above rejects payloads without a usable `changes` list so the
+        #             raw-JSON retry runs before 5.4.
         result = await invoke_llm_structured(
             llm,
             prompt_template,
@@ -554,6 +580,10 @@ async def detect_semantic_changes(
             validate=_is_valid_changes,
         )
         logger.info("Successfully obtained structured output for semantic changes.")
+    # GATHERING 5.4 — FAIL LOUD: a parse/LLM failure raises RuntimeError to the caller
+    #             (surfaced as HTTP 500). Defaulting to an "INSERT/NEW" recommendation
+    #             would masquerade as a legitimate new requirement and drive a wrong
+    #             workflow decision — the opposite of GATHERING 2.4's safe stop.
     except Exception as e2:
         logger.error(f"Semantic change detection parsing failed completely: {str(e2)}", exc_info=True)
         # FAIL LOUDLY instead of silently defaulting to a NEW_REQUIREMENT "INSERT"
@@ -562,6 +592,11 @@ async def detect_semantic_changes(
         # propagate the error to the caller (which surfaces it as HTTP 500).
         raise RuntimeError(f"Semantic change detection failed: {str(e2)}") from e2
 
+    # GATHERING 5.5 — Deterministic repair/validation pass (5.5.1): coerces every
+    #             entry to a canonical change_type/recommended_action, resolves
+    #             targets against the REAL backlog (unverifiable targets are
+    #             downgraded), resolves contradictory actions, de-duplicates and
+    #             computes the confidence the caller gates on (GATHERING 2.4).
     changes = normalize_semantic_changes(result.get("changes") or [], stories)
     logger.info(
         "Detected %d semantic change(s): %s",
@@ -583,14 +618,28 @@ async def detect_semantic_changes(
 
 
 
+# INTENT 2.0 — The detector: raw user text (+ optional story context) → one of five
+#             intents with a confidence and a reason. Layer chain:
+#               1.1/1.3, 3.1, 3.2, 4.1.3 (callers) → 2.1 guard → 2.2 context →
+#               2.3 prompt (prompts/intent.md) → 2.4 parser/format →
+#               2.6 shared structured LLM call (llm_utils) → 2.7 normalization;
+#               any failure falls back to the deterministic ladder 2.8.
+#             Pure service: no DB writes, no state mutation, no caching.
 async def detect_requirement_intent(raw_input: str, current_stories: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
     Uses LLM for semantic intent classification on user message.
     Returns a dict with: intent, confidence, reason.
     Supports intents: GENERAL_CHAT, CREATE_REQUIREMENT, UPDATE_REQUIREMENT, DELETE_REQUIREMENT, CLARIFY_REQUIREMENT.
     """
+    # INTENT 2.0.1 — Allowed vocabulary. DUPLICATION (documented, not changed):
+    #               this literal list duplicates the intent values described in
+    #               schemas.RequirementIntentDetectionResult (INTENT 5.1) and in
+    #               prompts/intent.md; nothing keeps the three in sync at runtime.
     VALID_INTENTS = ["GENERAL_CHAT", "CREATE_REQUIREMENT", "UPDATE_REQUIREMENT", "DELETE_REQUIREMENT", "CLARIFY_REQUIREMENT"]
     
+    # INTENT 2.1 — Input guard: blank input short-circuits to GENERAL_CHAT with full
+    #             confidence (which is why an empty PRD/Audit request classifies as
+    #             chat — hence the bypass rule documented at CHAT 2.3.0).
     if not raw_input or not str(raw_input).strip():
         return {
             "intent": "GENERAL_CHAT",
@@ -600,22 +649,40 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
         
     logger.info(f"Detecting requirement intent for message: '{raw_input[:100]}'")
     
+    # INTENT 2.2 — Context build: the canonical backlog rendering (shared helper,
+    #             same format as the gatherer/matcher prompts) or a placeholder when
+    #             the project has no stories yet. This is what lets the classifier
+    #             tell "update the transfer limit" (existing) from "add transfers".
     context_lines = format_story_context_lines(current_stories)
     current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
 
+    # INTENT 2.3 — Prompt assembly from prompts/intent.md (the intent taxonomy:
+    #             GENERAL_CHAT / CREATE / UPDATE / DELETE / CLARIFY + the "ask a
+    #             question ⇒ GENERAL_CHAT" rule). NOTE: no comment block is added to
+    #             that markdown file on purpose — its text is sent verbatim to the
+    #             model, so annotating it would change LLM behaviour.
     prompt_template = PromptTemplate(
         template=load_prompt("intent"),
         input_variables=["current_context", "user_message", "format_instructions"]
     )
     
+    # INTENT 2.4 — JSON contract: the pydantic model doubles as the schema handed to
+    #             the LLM (format instructions) and as the validation target in 2.6.
     pydantic_parser = JsonOutputParser(pydantic_object=RequirementIntentDetectionResult)
     format_instructions = pydantic_parser.get_format_instructions()
     
     # Prefer .with_structured_output(), falling back to raw JSON parse
+    # INTENT 2.5 — Acceptance test for the model's answer: the intent must be one of
+    #             INTENT 2.0.1 (case-insensitive), otherwise 2.6 retries and finally
+    #             raises into the 2.8 fallback ladder.
     def _is_valid_intent(result: Dict[str, Any]) -> bool:
         return str(result.get("intent", "")).strip().upper() in VALID_INTENTS
 
     try:
+        # INTENT 2.6 — Shared structured-output call (llm_utils.invoke_llm_structured):
+        #             it owns the raw-JSON → with_structured_output retry, the
+        #             markdown-fence stripping and the `reasoning_content` recovery.
+        #             Model/transport: llm_factory → LM Studio (CHAT 6.1).
         result = await invoke_llm_structured(
             llm,
             prompt_template,
@@ -629,6 +696,9 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
             format_instructions=format_instructions,
             validate=_is_valid_intent,
         )
+        # INTENT 2.7 — Normalization: upper-cased intent, numeric confidence (default
+        #             0.90 when the model omitted it), and `reason` preferred over the
+        #             schema's `reasoning` alias. Returned verbatim to the callers.
         intent = str(result.get("intent", "")).strip().upper()
         confidence = float(result.get("confidence", 0.90))
         reason = str(result.get("reason") or result.get("reasoning") or "")
@@ -638,10 +708,17 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
             "confidence": confidence,
             "reason": reason
         }
+    # INTENT 2.8 — LLM/parse failure: logged, then the deterministic keyword ladder
+    #             below classifies instead. This is what keeps the workflow usable
+    #             when the gateway is down (the pipeline still gets an intent).
     except Exception as e2:
         logger.error(f"Intent detection parsing failed completely: {str(e2)}")
 
     # Fallback: heuristic classification
+    # INTENT 2.8.1 — Fallback ladder (ordered, first match wins): greeting → question
+    #              → clarify/audit → delete → update → create → default GENERAL_CHAT
+    #              at 0.80. Deliberately conservative: anything unrecognised stays a
+    #              conversation rather than fabricating a requirement operation.
     lower_inp = raw_input.lower().strip()
     if lower_inp in ["hello", "hi", "thank you", "thanks", "good morning", "good afternoon", "good evening", "ok", "okay", "got it", "awesome", "great"]:
         return {
@@ -687,6 +764,11 @@ async def detect_requirement_intent(raw_input: str, current_stories: Optional[Li
         }
 
 
+# CHAT 2.3.2 — Service layer of the conversation branch. Reads its system prompt
+#             from prompts/general_chat.md, injects a compact project context
+#             (stories/ACs/PRD preview + last 10 turns) and answers with the shared
+#             LLM (via app/llm_factory). NEVER mutates project artifacts, and it
+#             never raises: the caller gets the canned fallback below instead.
 async def generate_general_chat_response(
     raw_input: str,
     project_context: Dict[str, Any],
@@ -763,20 +845,34 @@ async def generate_general_chat_response(
             HumanMessage(content=raw_input)
         ]
         
+        # CHAT 2.3.2 — LLM call: same shared ChatOpenAI client used by the agents
+        #             (no separate model/gateway), so the offline behaviour is
+        #             identical to every other flow (CHAT 6.x).
         response = await llm.ainvoke(messages)
         response_text = response.content if hasattr(response, "content") else str(response)
         logger.info(f"Generated general chat response ({len(response_text)} chars)")
         return response_text
     except Exception as e:
         logger.error(f"Failed to generate general chat response: {str(e)}")
+        # CHAT 2.3.2 — Fail-soft fallback: an LLM failure yields a friendly reply
+        #             instead of a 500, so a chat turn can never break the session.
         return f"I understand you're asking about: '{raw_input}'. However, I encountered an issue generating a detailed response. Please try rephrasing your question."
 
 
+# MATCHING 2.0 — The matcher service: message + intent + backlog → the target story
+#             (or an explicit "cannot tell"). Chain: 2.1 guard → 2.2 context →
+#             2.3 prompt (prompts/matcher.md) + parser → 2.4 LLM call →
+#             2.5.1–2.5.4 deterministic validation of the model's answer →
+#             2.6 fallback dict. Pure service: no DB writes, no caching.
+#             Return contract: {matched_requirement_id, confidence, reason, action,
+#             status, candidates} — consumed by MATCHING 1.x and 3.x.
 async def match_requirement(raw_input: str, detected_intent: str, current_stories: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
     Requirement Matcher Agent between Intent Detection and Gatherer.
     Determines which existing requirement(s) the user's message refers to before any modification occurs.
     """
+    # MATCHING 2.1 — Guard: no text → nothing to match; returns MATCHED/NEW with
+    #             confidence 1.0, i.e. "treat as brand new" (no clarification).
     if not raw_input or not str(raw_input).strip():
         return {
             "matched_requirement_id": None,
@@ -791,25 +887,39 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
 
     # Same canonical backlog rendering as the semantic-change/intent/gatherer
     # prompts (previously this function kept its own copy-pasted format).
+    # MATCHING 2.2 — Context build: the canonical backlog rendering (shared helper;
+    #             identical format to the intent/gatherer prompts), filtered to real
+    #             dict rows. Provides the ticket codes the model must choose from.
     context_lines = format_story_context_lines(
         [s for s in (current_stories or []) if isinstance(s, dict)]
     )
     current_context = "\n".join(context_lines) if context_lines else "No existing user stories in this project."
 
+    # MATCHING 2.3 — Prompt assembly from prompts/matcher.md, parameterised by the
+    #             already-detected intent so CREATE messages are not forced to name
+    #             an existing story. Not annotated (prompt text reaches the model).
     prompt_template = PromptTemplate(
         template=load_prompt("matcher"),
         input_variables=["current_context", "detected_intent", "user_message", "format_instructions"]
     )
 
+    # MATCHING 2.3.1 — JSON contract + format instructions (RequirementMatcherResult,
+    #               MATCHING 5.2).
     pydantic_parser = JsonOutputParser(pydantic_object=RequirementMatcherResult)
     format_instructions = pydantic_parser.get_format_instructions()
 
     # Prefer .with_structured_output(), falling back to raw JSON parse
+    # MATCHING 2.3.2 — Acceptance test (structural): an answer without both an
+    #               action and a status is not actionable, so 2.4 retries and
+    #               finally falls through to 2.6.
     def _is_valid_match(result: Dict[str, Any]) -> bool:
         """A match must carry a status and an action to be actionable."""
         return bool(_clean_str(result.get("action"))) and bool(_clean_str(result.get("status")))
 
     try:
+        # MATCHING 2.4 — Shared structured-output call: raw-JSON attempt first, then
+        #             with_structured_output (llm_utils). Model: llm_factory → LM
+        #             Studio (CHAT 6.1). Output normalized right below.
         result = await invoke_llm_structured(
             llm,
             prompt_template,
@@ -833,6 +943,12 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
         # Verify the reported target against the real backlog: a hallucinated or
         # mis-typed ticket code must not drive a mutation (same guardrail as the
         # semantic-change layer).
+        # MATCHING 2.5.1 — Anti-hallucination guard (the decisive step): the returned
+        #               ticket code is validated against the real backlog via
+        #               resolve_target_story. A code that does not exist downgrades
+        #               the result to LOW_CONFIDENCE/NEW with the confidence capped at
+        #               UNRESOLVED_TARGET_CONFIDENCE, which forces the clarification
+        #               branch in MATCHING 1.5 instead of mutating the wrong story.
         matched_id = normalize_target_reference(result.get("matched_requirement_id"))
         if matched_id:
             resolved = resolve_target_story(matched_id, current_stories)
@@ -851,6 +967,9 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
                     f"{_clean_str(result.get('reason'))} Target '{matched_id}' does not exist in the "
                     "current backlog. Please confirm the ticket code."
                 ).strip()
+        # MATCHING 2.5.2 — UPDATE/DELETE without a resolvable target is not
+        #               actionable: downgrade to NEW + LOW_CONFIDENCE (never guess an
+        #               existing story to modify or delete).
         elif str(result["action"]) in ("UPDATE", "DELETE") and current_stories:
             # UPDATE/DELETE without a resolvable target is not actionable.
             logger.warning("Requirement matcher returned action %s without a valid target.", result["action"])
@@ -862,6 +981,9 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
                 "please confirm the ticket code."
             ).strip()
 
+        # MATCHING 2.5.3 — Candidate list hygiene: every candidate is resolved to a
+        #               real ticket code (or normalized) and an empty list becomes
+        #               None, so MATCHING 1.5 never renders an empty "could refer to".
         candidates = result.get("candidates")
         if isinstance(candidates, list):
             result["candidates"] = [
@@ -869,11 +991,18 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
                 for c in candidates if _clean_str(c)
             ] or None
 
+        # MATCHING 2.5.4 — Confidence floor: a MATCHED verdict below 0.75 is relabelled
+        #               LOW_CONFIDENCE so MATCHING 1.5's single threshold rule holds
+        #               regardless of which status the model reported.
         if result["confidence"] < 0.75 and result["status"] == "MATCHED":
             result["status"] = "LOW_CONFIDENCE"
             result["reason"] = f"Confidence {result['confidence']} is below threshold (0.75). Clarification required."
         logger.info(f"Requirement matcher result: {result}")
         return result
+    # MATCHING 2.6 — Parse failure fallback: returns MATCHED/NEW at 0.80 (i.e. "treat
+    #             as a new requirement") rather than MATCHING 1.5's clarification, so
+    #             an unreachable model degrades to additive extraction instead of
+    #             blocking the user with a question the model could not have answered.
     except Exception as e2:
         logger.error(f"Requirement matcher parsing failed completely: {str(e2)}")
 
@@ -888,6 +1017,11 @@ async def match_requirement(raw_input: str, detected_intent: str, current_storie
 
 
 
+# ROUTING 3.0 — Workflow classifier (the LLM half of ROUTING 2.x). One of four
+#             workflows (CHAT | QUESTION | COMMAND | REQUIREMENT) + confidence +
+#             reason. Chain: 3.1 guard → 3.2 prompt (prompts/router.md) →
+#             3.3 parser/validator → 3.4 shared structured call → 3.5 heuristic
+#             ladder on any failure. Pure service: no DB, no state, no caching.
 async def classify_workflow(raw_input: str) -> Dict[str, Any]:
     """
     Lightweight Workflow Router layer before the Gatherer Agent.
@@ -904,6 +1038,10 @@ async def classify_workflow(raw_input: str) -> Dict[str, Any]:
         "reason": "The user is asking for an explanation rather than modifying project requirements."
     }
     """
+    # ROUTING 3.1 — Guard: blank input → CHAT with full confidence (never reaches
+    #             an agent). Note this is the OPPOSITE default to ROUTING 2.1's
+    #             REQUIREMENT fallback: an empty message answers as chat, but an
+    #             unparsable classification retries the requirement path.
     if not raw_input or not str(raw_input).strip():
         return {
             "workflow": "CHAT",
@@ -914,21 +1052,34 @@ async def classify_workflow(raw_input: str) -> Dict[str, Any]:
     clean_input = str(raw_input).strip()
     logger.info(f"Routing workflow classification for input: '{clean_input[:100]}'")
 
+    # ROUTING 3.2 — Prompt assembly from prompts/router.md (workflow taxonomy:
+    #             CHAT / QUESTION / COMMAND / REQUIREMENT). As with INTENT 2.3, no
+    #             annotation is added to that markdown file: its text is sent to the
+    #             model verbatim, so comments there would change LLM behaviour.
     prompt_template = PromptTemplate(
         template=load_prompt("router"),
         input_variables=["user_message", "format_instructions"]
     )
 
+    # ROUTING 3.3 — JSON contract + format instructions for the prompt.
     pydantic_parser = JsonOutputParser(pydantic_object=WorkflowRoutingResult)
     format_instructions = pydantic_parser.get_format_instructions()
 
     # Prefer .with_structured_output(), falling back to raw JSON parse
+    # ROUTING 3.3.1 — Allowed workflow vocabulary. DUPLICATION (documented, not
+    #               changed): same three-way split as INTENT 2.0.1 — this list, the
+    #               schema description (ROUTING 5.2) and prompts/router.md.
     VALID_WORKFLOWS = ["CHAT", "QUESTION", "COMMAND", "REQUIREMENT"]
 
+    # ROUTING 3.3.2 — Acceptance test: the workflow must be in 3.3.1 (case-
+    #               insensitive), else 3.4 retries and finally raises into 3.5.
     def _is_valid_workflow(result: Dict[str, Any]) -> bool:
         return str(result.get("workflow", "")).strip().upper() in VALID_WORKFLOWS
 
     try:
+        # ROUTING 3.4 — Shared structured-output call (llm_utils.invoke_llm_structured:
+        #             raw-JSON first, then with_structured_output, fence stripping and
+        #             reasoning-content recovery). Transport: LM Studio (CHAT 6.1).
         result = await invoke_llm_structured(
             llm,
             prompt_template,
@@ -947,10 +1098,18 @@ async def classify_workflow(raw_input: str) -> Dict[str, Any]:
         result["reason"] = str(result.get("reason", ""))
         logger.info(f"Workflow router classified input via LLM: {result}")
         return result
+    # ROUTING 3.5 — LLM/parse failure: logged, then the keyword ladder below
+    #             classifies deterministically so the graph still makes progress
+    #             when the gateway is offline.
     except Exception as e2:
         logger.error(f"Workflow router raw parsing failed: {str(e2)}")
 
     # Heuristic Fallback
+    # ROUTING 3.5.1 — Fallback ladder (ordered): greeting → question → COMMAND
+    #              keywords ("run auditor", "generate prd", "generate diagram",
+    #              "export docx", "audit requirements") → default REQUIREMENT at
+    #              0.85. The default differs from INTENT 2.8.1's chat default: this
+    #              ladder assumes a requirement rather than a conversation.
     lower_inp = clean_input.lower()
     if lower_inp in ["hello", "hi", "thank you", "thanks", "good morning", "good afternoon", "good evening"]:
         return {

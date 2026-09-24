@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 #   - the cover/front-matter block before the first heading gets id "title"
 #   - 'contents' is born locked: it is derived structure nobody edits
 #   - 'reviews' is human-only (signatures/dates) — the AI never generates it
+# PRD-SECTION 3.1 — The nine canonical lockable parts (the contract shared with the
+#             frontend splitter/stitcher and with the locks UI): key, title, order and
+#             the two ownership flags — `content_source` (template | ai | human) and
+#             `ai_generatable` (False = human-owned, never rewritten by regeneration).
+#             `contents` ships locked by default so the generated table of contents is
+#             not disturbed.
 CANONICAL_PRD_SECTIONS: List[Dict[str, Any]] = [
     {"section_key": "title", "title": "Cover & Document Information", "section_order": 1,
      "content_source": "template", "ai_generatable": True, "is_locked": False},
@@ -61,9 +67,15 @@ CANONICAL_PRD_SECTIONS: List[Dict[str, Any]] = [
 
 CANONICAL_KEYS = {c["section_key"] for c in CANONICAL_PRD_SECTIONS}
 
+# PRD-SECTION 3.1.1 — Accepted review_status values (validated at the route, PRD-SECTION
+#               2.2): a piecewise review tracker on each part, independent of locking.
 VALID_REVIEW_STATUSES = {"draft", "satisfied", "approved"}
 
 
+# PRD-SECTION 3.2 — Heading → stable section key. This is a 1:1 PORT of the frontend's
+#             keyword mapping (src/utils/markdown.ts::parsePRDToSections): both sides
+#             must agree or a manually saved part would land on a different key than the
+#             UI displays. Unmatched headings fall back to a slugified key.
 def _derive_section_key(title: str) -> str:
     """Derive a stable section key from a heading — a 1:1 port of the keyword
     mapping in ``src/utils/markdown.ts::parsePRDToSections``."""
@@ -95,6 +107,10 @@ def _derive_section_key(title: str) -> str:
     return key or "section"
 
 
+# PRD-SECTION 3.3 — Document splitter (parity with the frontend splitter): boundaries
+#             are `## ` and `### ` headings, the block before the first heading is the
+#             `title` (cover) part, and each part's content INCLUDES its heading line so
+#             3.4 stitching is lossless. Used by VERSION 3.1/3.2/3.8 and by 3.6 seeding.
 def split_markdown_sections(markdown: str) -> List[Dict[str, str]]:
     """Split a full PRD markdown document into its parts.
 
@@ -134,6 +150,10 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, str]]:
     return [p for p in parts if p["content"] != "" or p["section_key"] == "title"]
 
 
+# PRD-SECTION 3.4 — Document stitcher: canonical-order assembly of the stored parts,
+#             producing the single document that is persisted as generated_prd and as the
+#             ledger snapshot (3.7 → VERSION 3.6). Because it emits every part
+#             untouched, human and locked content survive every regeneration.
 def stitch_markdown(sections: List[Dict[str, Any]]) -> str:
     """Assemble the full PRD markdown from ordered section rows (same join
     rule as the frontend ``stitchSectionsToPRD``)."""
@@ -144,6 +164,14 @@ def stitch_markdown(sections: List[Dict[str, Any]]) -> str:
     return "\n\n".join((s.get("content") or "").strip() for s in ordered if s.get("content"))
 
 
+# PRD-SECTION 3.5 — THREE-WAY merge for a manual part edit (called by PRD-SECTION 2.2).
+#             Inputs: `base_content` (what the editor was seeded from), `current_content`
+#             (latest stored part — possibly advanced by an AI run during the edit) and
+#             `edited_content` (the user's buffer).
+#             Contract: the user's touched lines win, concurrent AI changes outside the
+#             edit window survive, AI insertions are always kept, user deletions stick.
+#             No base (legacy client) ⇒ verbatim store; base == current (the common case)
+#             ⇒ byte-identical to the edit, so a manual save can never wipe content.
 def merge_edited_section(
     base_content: Optional[str],
     current_content: Optional[str],
@@ -251,6 +279,10 @@ def merge_edited_section(
     return "\n".join(out)
 
 
+# ARCHITECT 2.2.2 — Alternative reuse-guard signal (2.2): recognises a document that is
+#               the stitched output of the canonical PRD parts (the shape the frontend's
+#               splitter/stitcher produces), so a document that does not carry the
+#               template marker but IS sectioned is still reused rather than regenerated.
 def prd_is_sectioned_markdown(document: str) -> bool:
     """True when a stored PRD is the stitched markdown of the canonical parts.
 
@@ -264,12 +296,20 @@ def prd_is_sectioned_markdown(document: str) -> bool:
     return len(keys & CANONICAL_KEYS) >= 7
 
 
+# PRD-SECTION 3.7 — Assemble the full document from the stored parts (4.1 → 3.4). This
+#             is the single source of truth used by a manual edit (2.2), a revert (2.3),
+#             the whole-document restore (VERSION 2.5) and the export path.
 async def assemble_document_markdown(project_id: str, session: AsyncSession) -> str:
     """Stitch the project's stored PRD sections into the full document."""
     sections = await PRDSectionRepository.get_by_project(project_id, session)
     return stitch_markdown(sections)
 
 
+# PRD-SECTION 3.6 — Seeder: guarantees the nine lockable parts exist. Called on FIRST
+#             ACCESS (PRD-SECTION 2.1) and by the whole-document restore (VERSION 2.5).
+#             Seeds from the project's current markdown PRD when there is one, otherwise
+#             from the official template skeleton; a no-op once parts exist. LaTeX
+#             sources are normalized first (pandoc; failure falls back to the template).
 async def ensure_sections_seeded(
     project_id: str,
     session: AsyncSession,
@@ -351,6 +391,13 @@ async def ensure_sections_seeded(
     return await PRDSectionRepository.get_by_project(project_id, session)
 
 
+# ARCHITECT 5.1 — Part-level merge (called from ARCHITECT 5.0). Ownership contract:
+#             missing sections are created; existing AI-generatable UNLOCKED sections are
+#             updated; human-owned (ai_generatable=False) and locked sections are NEVER
+#             touched; every real change appends a prd_section_versions row (append-only).
+#             Returns the stitched markdown of ALL parts (which the node stores as
+#             generated_prd), or None when the source cannot be normalized — in which
+#             case the caller keeps the previous document untouched (5.2).
 async def sync_sections_from_prd(
     project_id: str,
     prd_markdown: str,
