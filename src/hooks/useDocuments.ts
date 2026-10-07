@@ -112,8 +112,8 @@ export function useDocuments(deps: DocumentsDeps): UseDocumentsResult {
   // DOC-UPLOAD 1.2 — Upload handler. POSTs the file (DOC-UPLOAD 2.1), then branches on the
   //             returned status: `failed` (e.g. the 2.1.5 needs-OCR record) surfaces the
   //             server message as an amber notice and the row stays visible with status
-  //             'failed'; success clears the notice. Either way the list is re-read so the
-  //             new row (or failed row) appears immediately.
+  //             'failed'. The backend also appends the request and outcome to the durable
+  //             chat transcript, so SSE refresh restores them after reload.
   const handleUploadDocument = useCallback(async (file: File) => {
     if (!deps.projectId) return;
     setIsUploading(true);
@@ -123,7 +123,7 @@ export function useDocuments(deps: DocumentsDeps): UseDocumentsResult {
         // e.g. scanned PDF -> explicit needs-OCR message, never a silent stub.
         setLastDraftMessage(doc.message || 'Upload stored with status failed.');
       } else {
-        setLastDraftMessage(null);
+        setLastDraftMessage(`Document conversion completed: ${doc.original_filename}`);
       }
       await refreshDocuments();
     } catch (err) {

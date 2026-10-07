@@ -166,6 +166,7 @@ class ProcessRequirementsRequest(BaseModel):
 class ArtifactLockRequest(BaseModel):
     """Request body for locking/unlocking any artifact."""
     locked_by: Optional[str] = Field(default="user", description="Identifier of who is locking/unlocking the artifact.")
+    lock_reason: Optional[str] = Field(default=None, max_length=255, description="Optional reason for protecting the artifact.")
 
 
 class RequirementLockRequest(BaseModel):
@@ -304,6 +305,7 @@ class UserStoryDetail(BaseModel):
     is_locked: Optional[bool] = Field(False, description="Whether the story is locked.")
     locked_by: Optional[str] = Field(None, description="Locking actor.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Optional lock reason.")
 
 
 class BusinessGoalItem(BaseModel):
@@ -333,6 +335,10 @@ class AcceptanceCriterionItem(BaseModel):
     version: Optional[int] = Field(None, description="Criterion version.")
     last_modified_by: Optional[str] = Field(None, description="Actor that last modified.")
     change_type: Optional[str] = Field(None, description="Change classification.")
+    is_locked: Optional[bool] = Field(False, description="Whether locked against edits.")
+    locked_by: Optional[str] = Field(None, description="Locking actor.")
+    locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Optional lock reason.")
 
 
 class ClarificationQuestionDetail(BaseModel):
@@ -362,6 +368,7 @@ class RequirementDetail(BaseModel):
     is_locked: Optional[bool] = Field(False, description="Whether locked against edits.")
     locked_by: Optional[str] = Field(None, description="Locking actor.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp.")
+    lock_reason: Optional[str] = Field(None, description="Optional lock reason.")
     user_stories: Optional[List[UserStoryDetail]] = Field(default_factory=list, description="User stories under this requirement.")
 
 
@@ -488,6 +495,7 @@ class LockStatusResponse(BaseModel):
     is_locked: bool = Field(False, description="Whether the artifact is currently locked.")
     locked_by: Optional[str] = Field(None, description="Identifier of the current locking user/agent.")
     locked_at: Optional[str] = Field(None, description="ISO8601 lock timestamp, if locked.")
+    lock_reason: Optional[str] = Field(None, description="Optional reason supplied when locked.")
 
 
 class PendingActionResponse(BaseModel):
@@ -796,6 +804,13 @@ class PrdSectionUpdate(BaseModel):
         None, description="Optional new review status: 'draft' | 'satisfied' | 'approved'."
     )
     updated_by: str = Field("user", description="Identifier of who is editing the section.")
+    ai_generatable: bool = Field(
+        False,
+        description="Ownership of this part after the edit. A manual save defaults "
+        "to False (human-owned) so the Architect NEVER regenerates it — this is "
+        "what keeps manual edits alive across the next 'Generate PRD'. Pass True "
+        "to hand the part back to the AI.",
+    )
     change_summary: Optional[str] = Field(None, description="Optional human-readable change note stored with the version.")
 
 
@@ -958,4 +973,3 @@ class TraceabilityResponse(BaseModel):
     rows: List[TraceabilityRow] = Field(default_factory=list, description="One matrix row per requirement.")
     diagrams: List[TraceabilityDiagram] = Field(default_factory=list, description="Diagram artifacts considered for tracing.")
     coverage: TraceabilityCoverage = Field(default_factory=TraceabilityCoverage, description="Coverage/gap report.")
-

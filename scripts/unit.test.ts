@@ -388,6 +388,7 @@ test('toRequirementItem: applies every default for sparse payloads', () => {
     is_locked: false,
     locked_by: undefined,
     locked_at: undefined,
+    lock_reason: undefined,
   });
 });
 

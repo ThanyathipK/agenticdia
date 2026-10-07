@@ -2,20 +2,20 @@
 % Krungsri Nimble - Product Requirement Document (PRD) LaTeX Template
 % =============================================================================
 % This file is the authoritative document template and reproduces the layout
-% of template-krungsrinimble.pdf EXACTLY (cover, stakeholders, version history,
+% of template-krungsrinimble.pdf (cover, stakeholders, version history,
 % reviews, contents, and the four numbered sections including the complex
 % nested tables).  It is a fill-in-the-blank template: per-project values are
 % substituted where field markers appear below.
 %
-% Recommended engine: XeLaTeX or pdfLaTeX (compiles to A4, 7 pages, with the
+% Recommended engine: XeLaTeX or pdfLaTeX (compiles to US Letter, 7 pages, with the
 % "PRODUCT REQUIREMENT" running header and "KRUNGSRI NIMBLE CONFIDENTIAL"
 % running footer applied via fancyhdr).
 % =============================================================================
-\documentclass[12pt,a4paper]{article}
+\documentclass[12pt,letterpaper]{article}
 \usepackage[utf8]{inputenc}
-\usepackage[a4paper,top=2.2cm,bottom=2.2cm,left=2.4cm,right=2.4cm]{geometry}
+\usepackage[letterpaper,top=1in,bottom=1in,left=1in,right=1in,
+            headheight=15pt,headsep=0.325in,footskip=0.45in]{geometry}
 \usepackage[T1]{fontenc}
-\usepackage{lmodern}
 \usepackage{helvet}
 \renewcommand{\familydefault}{\sfdefault}
 
@@ -26,7 +26,7 @@
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{makecell}
-\renewcommand{\arraystretch}{1.35}
+\renewcommand{\arraystretch}{1.0}
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
 
@@ -34,44 +34,57 @@
 \usepackage{fancyhdr}
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small PRODUCT REQUIREMENT}
-\fancyfoot[L]{\small \thepage}
-\fancyfoot[C]{\small KRUNGSRI NIMBLE CONFIDENTIAL}
+\fancyhead[L]{\normalsize\sffamily PRODUCT REQUIREMENT}
+\fancyfoot[L]{\normalsize\sffamily \thepage}
+\fancyfoot[C]{\normalsize\sffamily KRUNGSRI NIMBLE CONFIDENTIAL}
 \renewcommand{\headrulewidth}{0pt}
 \renewcommand{\footrulewidth}{0pt}
 
-\definecolor{tblHeader}{HTML}{F8FAFC}
-\definecolor{tblBorder}{HTML}{CBD5E1}
+\definecolor{tblHeader}{HTML}{FFFFFF}
+\definecolor{tblBorder}{HTML}{808080}
+\arrayrulecolor{tblBorder}
 
 % Section numbering like the PDF (no automatic numbers on H2-style headings).
 \setcounter{secnumdepth}{0}
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{0pt}%
+  {0pt}{0.05cm}{\fontsize{16}{19}\sffamily\mdseries}}
+\makeatother
 
-\newcommand{\prdlbl}[1]{{\bfseries #1}}
+\newcommand{\prdlbl}[1]{{\mdseries #1}}
 \newcommand{\prdfield}[1]{#1}
+\newcommand{\coverfont}[1]{{\fontsize{16}{20}\sffamily #1}}
 
 \begin{document}
+\sffamily
 
 % =============================================================================
 % PAGE 1 -- COVER
 % =============================================================================
-\vspace*{6cm}
+\large\sffamily
+\vspace*{0.80cm}
 
 \begin{flushright}
-  {\fontsize{40}{46}\selectfont \bfseries Nimble by Krungsri}\\[2.2cm]
-  {\Large \bfseries KRUNGSRI NIMBLE}\\[0.4cm]
-  {\Large Product Requirement Document}\\[1.8cm]
+  {\sffamily\fontsize{28}{34}\selectfont\mdseries Nimble by Krungsri}
 \end{flushright}
 
-\begin{center}
-\begin{tabular}{L{4.5cm}L{9.5cm}}
-  \prdlbl{PMO No:}      & \prdfield{PMO\_NO} \\
-  \prdlbl{PMO Name:}    & \prdfield{PMO\_NAME} \\
-  \prdlbl{Version:}     & \prdfield{VERSION} \\
-  \prdlbl{Status:}      & \prdfield{STATUS} \\
-  \prdlbl{Last Update:} & \prdfield{LAST\_UPDATE} \\
-  \prdlbl{Author:}      & \prdfield{AUTHOR} \\
+\vspace{1.95cm}
+\noindent{\sffamily\fontsize{20}{24}\selectfont\bfseries KRUNGSRI NIMBLE}\\[0.65cm]
+\noindent{\sffamily\fontsize{20}{24}\selectfont\bfseries Product Requirement Document}\\[0.1cm]
+
+\par\noindent
+{\normalsize\sffamily
+\renewcommand{\arraystretch}{1.9}
+\begin{tabular}{@{}l@{\hspace{2.2cm}}l@{}}
+  \coverfont{\prdlbl{PMO No:}}      & \coverfont{\prdfield{PMO\_NO}} \\
+  \coverfont{\prdlbl{PMO Name:}}    & \coverfont{\prdfield{PMO\_NAME}} \\
+  \noalign{\vskip 1.27cm}
+  \coverfont{\prdlbl{Version:}}     & \coverfont{\prdfield{VERSION}} \\
+  \coverfont{\prdlbl{Status:}}      & \coverfont{\prdfield{STATUS}} \\
+  \coverfont{\prdlbl{Last Update:}} & \coverfont{\prdfield{LAST\_UPDATE}} \\
+  \coverfont{\prdlbl{Author:}}      & \coverfont{\prdfield{AUTHOR}} \\
 \end{tabular}
-\end{center}
+}
 
 \newpage
 
@@ -79,9 +92,12 @@
 % PAGE 2 -- STAKEHOLDERS / VERSION HISTORY / REVIEWS
 % =============================================================================
 \section*{Stakeholders}
-\begin{tabular}{|L{5.5cm}|L{8.5cm}|}
+\large\sffamily
+\vspace{0.50cm}
+\noindent
+\begin{tabular}{|L{6.08cm}|L{9.60cm}|}
   \hline
-  \rowcolor{tblHeader}\prdlbl{Role} & \prdlbl{Name} \\
+  \rowcolor{tblHeader}\multicolumn{1}{|c|}{\prdlbl{Role}} & \multicolumn{1}{c|}{\prdlbl{Name}} \\
   \hline
   Product Owner & \\
   Technical Product Owner & \\
@@ -94,21 +110,27 @@
   \hline
 \end{tabular}
 
-\vspace{1em}
+\vspace{0.75cm}
 \section*{Version History}
-\begin{tabular}{|L{2.5cm}|L{3.5cm}|L{3.5cm}|L{4.5cm}|}
+\vspace{0.35cm}
+\noindent
+\begin{tabular}{|L{3.70cm}|L{3.70cm}|L{3.70cm}|L{3.70cm}|}
   \hline
-  \rowcolor{tblHeader}\prdlbl{Version} & \prdlbl{Date} & \prdlbl{Author} & \prdlbl{Description} \\
+  \rowcolor{tblHeader}\multicolumn{1}{|c|}{\prdlbl{Version}} & \multicolumn{1}{c|}{\prdlbl{Date}} & \multicolumn{1}{c|}{\prdlbl{Author}} & \multicolumn{1}{c|}{\prdlbl{Description}} \\
   \hline
   V1.0 & & & \\
   \hline
+  & & & \\
+  \hline
 \end{tabular}
 
-\vspace{1em}
+\vspace{0.75cm}
 \section*{Reviews}
-\begin{tabular}{|L{4.5cm}|L{3.5cm}|L{3.5cm}|L{3.5cm}|}
+\vspace{0.35cm}
+\noindent
+\begin{tabular}{|L{3.70cm}|L{3.70cm}|L{3.70cm}|L{3.70cm}|}
   \hline
-  \rowcolor{tblHeader}\prdlbl{Role} & \prdlbl{Name} & \prdlbl{Signature} & \prdlbl{Date} \\
+  \rowcolor{tblHeader}\multicolumn{1}{|c|}{\prdlbl{Role}} & \multicolumn{1}{c|}{\prdlbl{Name}} & \multicolumn{1}{c|}{\prdlbl{Signature}} & \multicolumn{1}{c|}{\prdlbl{Date}} \\
   \hline
   Product Owner & & & \\
   Head of Product Management & & & \\
@@ -120,8 +142,13 @@
 % =============================================================================
 % PAGE 3 -- CONTENTS
 % =============================================================================
-\section*{Contents}
+\section*{\makebox[\linewidth][c]{Contents}}
+\large\sffamily
+\vspace{0.35cm}
 \begin{enumerate}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \setlength{\topsep}{0pt}
   \item Business \& Strategic Overview
   \item Product Scope \& Functional Requirements
   \item Technical \& Operational Considerations
@@ -133,12 +160,13 @@
 % =============================================================================
 % PAGE 4 -- 1. BUSINESS & STRATEGIC OVERVIEW
 % =============================================================================
-\section*{1. Business \& Strategic Overview}
-\begin{longtable}{|L{6cm}|L{10cm}|}
+\section*{\hspace*{1.27cm}1. Business \& Strategic Overview}
+\large\sffamily
+\begin{longtable}{|L{4.58cm}|L{11.10cm}|}
   \hline
-  Introduction \&\\ Executive Summary & \\
+  Introduction \&\newline Executive Summary & \\
   \hline
-  Problem Statement & 1. \\[0.15cm] 2. \\
+  Problem Statement & 1.\newline 2. \\
   \hline
   Business Objectives & 1. \\
   \hline
@@ -146,7 +174,7 @@
   \hline
   Success Metrics & 1. \\
   \hline
-  Target Audience \&\\ user Personas & 1. \\
+  Target Audience \&\newline user Personas & 1. \\
   \hline
 \end{longtable}
 
@@ -155,29 +183,32 @@
 % =============================================================================
 % PAGE 5 -- 2. PRODUCT SCOPE & FUNCTIONAL REQUIREMENTS (complex nested tables)
 % =============================================================================
-\section*{2. Product Scope \& Functional Requirements}
+\section*{\hspace*{0.64cm}2. Product Scope \& Functional Requirements}
 \bgroup
-\renewcommand{\arraystretch}{1.25}
-\begin{longtable}{|L{4cm}|L{4cm}|L{4cm}|L{4cm}|}
+\renewcommand{\arraystretch}{1.0}
+\large\sffamily
+\begin{longtable}{|L{3.08cm}|L{3.90cm}|L{3.90cm}|L{3.90cm}|}
   \hline
-  \multirow{3}{*}{\shortstack{User Story\\ Mapping \&\\ Functional\\ Requirements}}
-    & \multicolumn{3}{L{12cm}|}{Epic Name:} \\
+  \multirow{3}{*}{\shortstack[l]{User Story\\ Mapping \&\\ Functional\\ Requirements}}
+    & \multicolumn{3}{L{12.55cm}|}{\rule{0pt}{0.85cm}\normalsize\sffamily Epic Name:} \\
   \cline{2-4}
-    & \shortstack{\prdlbl{User Story (System}\\
-\prdlbl{Focus)}} & \shortstack{\prdlbl{Functional}\\
-\prdlbl{Requirement (FR)}} & \prdlbl{Acceptance Criteria} \\
+    & \normalsize\sffamily\shortstack{\prdlbl{User Story (System}\\
+\prdlbl{Focus)}} & \normalsize\sffamily\shortstack{\prdlbl{Functional}\\
+\prdlbl{Requirement (FR)}} & \normalsize\sffamily\prdlbl{Acceptance Criteria} \\
   \cline{2-4}
-    & & \shortstack{FR 1.1: The system\\
-must\ldots} & \shortstack{AC 1.1:\\
+    & & \rule{0pt}{2.1cm}\normalsize\sffamily\shortstack{FR 1.1: The system\\
+must\ldots} & \normalsize\sffamily\shortstack{AC 1.1:\\
 AC 1.2:} \\
   \hline
-  \shortstack{User Flow \&\\
+  \shortstack[l]{User Flow \&\\
 Wireframes}
-    & \multicolumn{3}{L{12cm}|}{} \\
+    & \multicolumn{3}{L{12.55cm}|}{\rule{0pt}{1.15cm}} \\
   \hline
-  \multirow{2}{*}{\shortstack{Scope\\ Definition (In\\ vs. Out)}}
-    & \multicolumn{3}{c}{\parbox{11.5cm}{%
-        \shortstack{\prdlbl{Scope In}\\
+  \noalign{\vskip 1cm}
+  \hline
+  \multirow{2}{*}{\shortstack[l]{Scope\\ Definition (In\\ vs. Out)}}
+    & \multicolumn{3}{L{12.55cm}|}{\parbox{12.15cm}{%
+        \rule{0pt}{4.2cm}\shortstack[l]{\prdlbl{Scope In}\\
 1.\\
 2.\\[0.15cm]
 \prdlbl{Scope out}\\
@@ -192,16 +223,17 @@ Wireframes}
 % =============================================================================
 % PAGE 6 -- 3. TECHNICAL & OPERATIONAL CONSIDERATIONS
 % =============================================================================
-\section*{3. Technical \& Operational Considerations}
-\begin{longtable}{|L{6cm}|L{10cm}|}
+\section*{\hspace*{0.64cm}3. Technical \& Operational Considerations}
+\large\sffamily
+\begin{longtable}{|L{3.08cm}|L{12.56cm}|}
   \hline
-  Non-Functional\\ Requirements & 1. Performance \& Latency \\
+  Non-Functional\newline Requirements & 1. Performance \& Latency \\
   \hline
-  Expected\\ TPS/Customer\\ volume & 1. \\
+  Expected\newline TPS/Customer\newline volume & 1. \\
   \hline
-  Growth\\ prediction\\ Y0Y\% & 1. \\
+  Growth\newline prediction\newline Y0Y\% & 1. \\
   \hline
-  Launch \&\\ Rollout Plan & 1. \\
+  Launch \&\newline Rollout Plan & 1. \\
   \hline
 \end{longtable}
 
@@ -210,12 +242,13 @@ Wireframes}
 % =============================================================================
 % PAGE 7 -- 4. APPENDIX
 % =============================================================================
-\section*{4. Appendix}
-\begin{longtable}{|L{3.4cm}|L{2.1cm}|L{10.4cm}|}
+\section*{\hspace*{0.64cm}4. Appendix}
+\large\sffamily
+\begin{longtable}{|L{3.08cm}|L{1.73cm}|L{10.40cm}|}
   \hline
-  Open\\ Questions \&\\ Risks & \multicolumn{2}{L{12.5cm}|}{1.} \\
+  Open\newline Questions \&\newline Risks & \multicolumn{2}{L{12.56cm}|}{1.} \\
   \hline
-  Assumptions & \multicolumn{2}{L{12.5cm}|}{1.} \\
+  Assumptions & \multicolumn{2}{L{12.56cm}|}{1.} \\
   \hline
   Glossary & \prdlbl{Term} & \prdlbl{Definition} \\
   \cline{2-3}
@@ -223,9 +256,8 @@ Wireframes}
   \cline{2-3}
   & \prdfield{TBD} & \prdfield{TBD} \\
   \hline
-  Related\\ Documents & \multicolumn{2}{L{12.5cm}|}{} \\
+  Related\newline Documents & \multicolumn{2}{L{12.56cm}|}{\rule{0pt}{1cm}} \\
   \hline
 \end{longtable}
 
 \end{document}
-

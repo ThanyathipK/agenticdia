@@ -10,6 +10,10 @@ Covers:
   - sync_sections_from_prd: locked / human-owned parts are PRESERVED across
     regeneration; unlocked AI parts are refreshed; the stitched markdown keeps
     both
+  - merge_edited_section / update_prd_section: a manual edit is merged with the
+    LATEST version (never against a stale empty/template part)
+  - manual-edit ownership: a manual save marks the part human-owned so it
+    survives the next "Generate PRD"; ai_generatable=True hands it back to AI
   - prd_is_sectioned_markdown: the architect early-exit guard helper
 
 Run from the ``backend`` directory::
@@ -28,12 +32,14 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.lock_service import ArtifactLockError, LockService
+from app.auth import AuthenticatedUser
 from app.models import PRDSectionModel, ProjectModel, UserModel
 from app.prd_section_service import (
     CANONICAL_KEYS,
     CANONICAL_PRD_SECTIONS,
     assemble_document_markdown,
     ensure_sections_seeded,
+    merge_edited_section,
     prd_is_sectioned_markdown,
     split_markdown_sections,
     stitch_markdown,
@@ -43,6 +49,9 @@ from app.repositories.prd_section import (
     PRDSectionRepository,
     PRDSectionVersionRepository,
 )
+from app.repositories.requirement_state import RequirementStateRepository
+from app.routes.prd_sections import update_prd_section
+from app.schemas import PrdSectionUpdate
 
 
 # =====================================================================
@@ -131,6 +140,35 @@ def _markdown_prd() -> str:
     ])
 
 
+def _latest_markdown_prd() -> str:
+    """The FILLED version of :func:`_markdown_prd` — what ``generated_prd`` holds
+    after a generation (the latest version the editor is seeded from). The
+    ``prd_sections`` rows can still be the blank template when this is the
+    project's current document."""
+    return (
+        _markdown_prd()
+        .replace("PMO No: PMO-1234", "PMO No: PMO-9999")
+        .replace("|Product Owner||", "|Product Owner|Alice|")
+        .replace("|V1.0||||", "|V1.0|2026-09-01|Alice|Initial approved version|")
+        .replace(
+            "|Problem Statement|1. Slow refunds|",
+            "|Problem Statement|1. Slow refunds are the top complaint|",
+        )
+        .replace(
+            "|Non-Functional Requirements|1. Performance|",
+            "|Non-Functional Requirements|1. Performance: p95 < 300ms|",
+        )
+    )
+
+
+def _section_content(document: str, section_key: str) -> str:
+    """The part's markdown inside a full document (heading line included)."""
+    return next(
+        p["content"] for p in split_markdown_sections(document)
+        if p["section_key"] == section_key
+    )
+
+
 # =====================================================================
 # Splitter
 # =====================================================================
@@ -149,6 +187,11 @@ class TestSplitMarkdownSections:
         parts = split_markdown_sections(_markdown_prd())
         stakeholders = next(p for p in parts if p["section_key"] == "stakeholders")
         assert stakeholders["content"].startswith("### Stakeholders")
+
+    def test_bare_pandoc_heading_is_the_contents_part(self):
+        parts = split_markdown_sections("Cover\n\n### \n\n1. Business")
+        assert [part["section_key"] for part in parts] == ["title", "contents"]
+        assert parts[1]["title"] == "Contents"
 
     def test_content_before_first_heading_is_the_title_part(self):
         parts = split_markdown_sections(_markdown_prd())
@@ -238,13 +281,15 @@ class TestSeedingAndRepository:
         section = await PRDSectionRepository.get_by_key("reviews", project_id, session)
         info = await LockService.lock_artifact(
             "prd_section", section["id"], session,
-            locked_by="user", project_id=project_id,
+            locked_by="user", lock_reason="Approved baseline", project_id=project_id,
         )
         assert info["is_locked"] is True
+        assert info["lock_reason"] == "Approved baseline"
         status = await LockService.get_lock_status(
             "prd_section", section["id"], session, project_id=project_id
         )
         assert status["is_locked"] is True
+        assert status["lock_reason"] == "Approved baseline"
 
     @pytest.mark.asyncio
     async def test_unlock_artifact(self, db_session):
@@ -415,4 +460,389 @@ class TestPrdIsSectionedMarkdown:
 
     def test_empty_is_not(self):
         assert prd_is_sectioned_markdown("") is False
+# =====================================================================
+# Three-way merge for a manual part edit (merge_edited_section)
+# =====================================================================
+class TestMergeEditedSection:
+    def test_edit_merges_with_the_latest_version(self):
+        """The route reconciles the stored part with the project's latest
+        document BEFORE merging, so ``current_content`` is the latest version
+        the user edited (not a stale blank template). With the latest version
+        as the merge base the user's touched line wins and everything else is
+        kept."""
+        latest = _section_content(_latest_markdown_prd(), "stakeholders")
+        # The caller (update_prd_section) passes the LATEST version as current.
+        edited = latest + "\n|Sponsor|Bob|"
+
+        merged = merge_edited_section(latest, latest, edited)
+
+        assert merged == edited
+        assert "|Product Owner|Alice|" in merged  # latest content survives
+        assert "|Sponsor|Bob|" in merged  # the user's edit is applied
+
+    def test_empty_stored_part_never_collapses_the_edit(self):
+        """An empty/never-populated stored part is not a concurrent deletion:
+        the full edited section is stored verbatim, not collapsed to the lines
+        the user happened to touch."""
+        latest = _section_content(_latest_markdown_prd(), "stakeholders")
+        edited = latest + "\n|Sponsor|Bob|"
+
+        merged = merge_edited_section(latest, "", edited)
+
+        assert merged == edited
+        assert "|Product Owner|Alice|" in merged
+
+    def test_in_sync_edit_is_verbatim(self):
+        latest = _section_content(_latest_markdown_prd(), "stakeholders")
+        edited = latest.replace("|Product Owner|Alice|", "|Product Owner|Alice Smith|")
+        assert merge_edited_section(latest, latest, edited) == edited
+
+    def test_no_base_is_stored_verbatim(self):
+        assert merge_edited_section(None, "old stored", "brand new") == "brand new"
+        assert merge_edited_section("", "old stored", "brand new") == "brand new"
+
+    def test_user_deletion_sticks(self):
+        latest = _section_content(_latest_markdown_prd(), "stakeholders")
+        edited = latest.replace("\n|Product Owner|Alice|", "")
+        merged = merge_edited_section(latest, latest, edited)
+        assert "|Product Owner|Alice|" not in merged
+
+    def test_concurrent_ai_insert_is_preserved(self):
+        latest = _section_content(_latest_markdown_prd(), "stakeholders")
+        # AI added a Sponsor row during the edit window; the user touched the
+        # Product Owner row only.
+        current = latest + "\n|Sponsor|AI Added|"
+        edited = latest.replace("|Product Owner|Alice|", "|Product Owner|Ann|")
+        merged = merge_edited_section(latest, current, edited)
+        assert "|Product Owner|Ann|" in merged  # user's touched line wins
+        assert "|Sponsor|AI Added|" in merged  # concurrent AI insert survives
+# =====================================================================
+# Manual edit route merges with the LATEST version (update_prd_section)
+# =====================================================================
+class TestUpdatePrdSectionMergesLatestVersion:
+    @pytest.mark.asyncio
+    async def test_manual_edit_merges_with_latest_version_not_template(self, db_session):
+        session, project_id = db_session
+        # 1. The parts were seeded from the blank TEMPLATE (e.g. the project was
+        #    opened before its first generation).
+        await ensure_sections_seeded(project_id, session, source_markdown=_markdown_prd())
+        # 2. The project's LATEST document is the FILLED one — what the editor is
+        #    seeded from (generated_prd), while prd_sections is still the template.
+        latest = _latest_markdown_prd()
+        await RequirementStateRepository.save_or_update(
+            project_id, {"generated_prd": latest}, session,
+        )
+        latest_stakeholders = _section_content(latest, "stakeholders")
+        edited = latest_stakeholders + "\n|Sponsor|Bob|"
+
+        user = AuthenticatedUser(
+            id=str(uuid.uuid4()), email="ba@example.com",
+            full_name="Product Owner", role="product_owner",
+        )
+        result = await update_prd_section(
+            project_id, "stakeholders",
+            PrdSectionUpdate(
+                content=edited, base_content=latest_stakeholders, updated_by="user",
+            ),
+            current_user=user, session=session,
+        )
+
+        # The stored part merged with the LATEST version + the user's edit ...
+        assert "|Product Owner|Alice|" in result["section"]["content"]
+        assert "|Sponsor|Bob|" in result["section"]["content"]
+        assert "|Product Owner||" not in result["section"]["content"]
+        # ... and the whole re-stitched document keeps the latest content for the
+        # other parts too (it did NOT fall back to the stale template).
+        assert "|Product Owner|Alice|" in result["document_markdown"]
+        assert "top complaint" in result["document_markdown"]
+        assert "p95 < 300ms" in result["document_markdown"]
+
+    @pytest.mark.asyncio
+    async def test_manual_edit_on_in_sync_sections_is_verbatim(self, db_session):
+        session, project_id = db_session
+        # Parts already in sync with the latest document: the edit is stored
+        # exactly, with no template merge artifacts.
+        latest = _latest_markdown_prd()
+        await ensure_sections_seeded(project_id, session, source_markdown=latest)
+        await RequirementStateRepository.save_or_update(
+            project_id, {"generated_prd": latest}, session,
+        )
+        latest_stakeholders = _section_content(latest, "stakeholders")
+        edited = latest_stakeholders.replace("|Product Owner|Alice|", "|Product Owner|Ann|")
+
+        user = AuthenticatedUser(
+            id=str(uuid.uuid4()), email="ba@example.com",
+            full_name="Product Owner", role="product_owner",
+        )
+        result = await update_prd_section(
+            project_id, "stakeholders",
+            PrdSectionUpdate(content=edited, base_content=latest_stakeholders),
+            current_user=user, session=session,
+        )
+        assert result["section"]["content"] == edited
+# =====================================================================
+# Manual edit makes the part HUMAN-OWNED so it survives "Generate PRD"
+# =====================================================================
+class TestManualEditOwnership:
+    @staticmethod
+    def _user() -> AuthenticatedUser:
+        return AuthenticatedUser(
+            id=str(uuid.uuid4()), email="ba@example.com",
+            full_name="Product Owner", role="product_owner",
+        )
+
+    @pytest.mark.asyncio
+    async def test_manual_edit_survives_ai_regeneration(self, db_session):
+        """Regression: a manual save used to leave the part AI-owned, so the
+        next 'Generate PRD' (sync_sections_from_prd) overwrote it. A manual
+        save now makes the part human-owned and the Architect preserves it."""
+        session, project_id = db_session
+        latest = _latest_markdown_prd()
+        await ensure_sections_seeded(project_id, session, source_markdown=latest)
+        await RequirementStateRepository.save_or_update(
+            project_id, {"generated_prd": latest}, session,
+        )
+        latest_stakeholders = _section_content(latest, "stakeholders")
+        manual = latest_stakeholders.replace("|Product Owner|Alice|", "|Product Owner|HUMAN EDIT|")
+
+        result = await update_prd_section(
+            project_id, "stakeholders",
+            PrdSectionUpdate(content=manual, base_content=latest_stakeholders),
+            current_user=self._user(), session=session,
+        )
+        # The manual save flips ownership -> the UI shows the "Manual" badge.
+        assert result["section"]["content_source"] == "human"
+        assert result["section"]["ai_generatable"] is False
+
+        # Simulate "Generate PRD": the Architect syncs a fresh document that
+        # would change this part.
+        regenerated = _latest_markdown_prd().replace(
+            "|Product Owner|Alice|", "|Product Owner|AI REGENERATED|",
+        )
+        merged = await sync_sections_from_prd(project_id, regenerated, session)
+        after = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        assert "HUMAN EDIT" in after["content"]  # manual content survives
+        assert "AI REGENERATED" not in after["content"]  # AI did not overwrite it
+        assert "HUMAN EDIT" in (merged or "")  # the stitched doc keeps it too
+
+    @pytest.mark.asyncio
+    async def test_hand_back_to_ai_allows_regeneration(self, db_session):
+        """Passing ai_generatable=True hands the part back to the AI, so the
+        next regeneration updates it again (not a one-way door)."""
+        session, project_id = db_session
+        latest = _latest_markdown_prd()
+        await ensure_sections_seeded(project_id, session, source_markdown=latest)
+        await RequirementStateRepository.save_or_update(
+            project_id, {"generated_prd": latest}, session,
+        )
+        latest_stakeholders = _section_content(latest, "stakeholders")
+        human = latest_stakeholders.replace("|Product Owner|Alice|", "|Product Owner|HUMAN EDIT|")
+
+        # Manual edit -> human-owned.
+        await update_prd_section(
+            project_id, "stakeholders",
+            PrdSectionUpdate(content=human, base_content=latest_stakeholders),
+            current_user=self._user(), session=session,
+        )
+        # Hand it back to the AI (content unchanged, ownership flips).
+        handed = await update_prd_section(
+            project_id, "stakeholders",
+            PrdSectionUpdate(
+                content=human, base_content=human,
+                ai_generatable=True, updated_by="ai_handoff",
+            ),
+            current_user=self._user(), session=session,
+        )
+        assert handed["section"]["ai_generatable"] is True
+        assert handed["section"]["content_source"] == "ai"
+
+        # Now the Architect may regenerate it again.
+        regenerated = _latest_markdown_prd().replace(
+            "|Product Owner|Alice|", "|Product Owner|AI REGENERATED|",
+        )
+        await sync_sections_from_prd(project_id, regenerated, session)
+        after = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        assert "AI REGENERATED" in after["content"]
+        assert "HUMAN EDIT" not in after["content"]
+
+
+# =====================================================================
+# Ownership backfill for manual edits saved BEFORE the flag existed
+# =====================================================================
+class TestManualOwnershipBackfill:
+    @pytest.mark.asyncio
+    async def test_backfill_marks_existing_manual_edit_human_owned(self, db_session):
+        """A manual edit saved before the ownership flag existed (so the part is
+        still ai_generatable=True) is retro-marked human-owned and then survives
+        the next 'Generate PRD'."""
+        session, project_id = db_session
+        await ensure_sections_seeded(project_id, session, source_markdown=_latest_markdown_prd())
+
+        s = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        # NOTE: no ownership flags -> mimics an edit saved before the fix.
+        await PRDSectionRepository.update_content(
+            s["id"], project_id,
+            "### Stakeholders\n\n|Role|Name|\n|---|---|\n|Product Owner|OLD MANUAL|",
+            session, changed_by="user", change_summary=None,
+        )
+        assert (await PRDSectionRepository.get_by_key("stakeholders", project_id, session))["ai_generatable"] is True
+
+        flipped = await PRDSectionRepository.mark_manually_edited_as_human_owned(session)
+        assert flipped == 1
+        after = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        assert after["content_source"] == "human"
+        assert after["ai_generatable"] is False
+
+        # It now survives regeneration.
+        regenerated = _latest_markdown_prd().replace("|Product Owner|Alice|", "|Product Owner|AI REGEN|")
+        await sync_sections_from_prd(project_id, regenerated, session)
+        final = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        assert "OLD MANUAL" in final["content"]
+        assert "AI REGEN" not in final["content"]
+
+    @pytest.mark.asyncio
+    async def test_backfill_ignores_ai_handoff_and_restore(self, db_session):
+        """Only genuine manual edits are flipped: AI rows, an explicit AI hand-off,
+        a whole-document restore and a system reconciliation must NOT freeze the
+        part."""
+        session, project_id = db_session
+        await ensure_sections_seeded(project_id, session, source_markdown=_latest_markdown_prd())
+
+        appendix = await PRDSectionRepository.get_by_key("appendix", project_id, session)
+        await PRDSectionRepository.update_content(
+            appendix["id"], project_id,
+            "### 4. Appendix\n\n|Open Questions & Risks|1. AI row|",
+            session, changed_by="automated_agent",
+        )
+        tech = await PRDSectionRepository.get_by_key("tech_ops", project_id, session)
+        await PRDSectionRepository.update_content(
+            tech["id"], project_id,
+            "### 3. Technical & Operational Considerations\n\n|NFR|1. Handed back|",
+            session, changed_by="ai_handoff", content_source="ai", ai_generatable=True,
+        )
+        title = await PRDSectionRepository.get_by_key("title", project_id, session)
+        await PRDSectionRepository.update_content(
+            title["id"], project_id,
+            "PRODUCT REQUIREMENT\n\nrestored content",
+            session, changed_by="user", change_summary="Restored from PRD version 2.",
+        )
+        scope = await PRDSectionRepository.get_by_key("product_scope", project_id, session)
+        await PRDSectionRepository.update_content(
+            scope["id"], project_id,
+            "### 2. Product Scope & Functional Requirements\n\n|User Story|1. reconciled|",
+            session, changed_by="user",  # system reconciliation used a user-ish author
+            change_summary="Reconciled with the latest PRD version before a manual edit.",
+        )
+
+        flipped = await PRDSectionRepository.mark_manually_edited_as_human_owned(session)
+        assert flipped == 0
+        for key in ("appendix", "tech_ops", "title", "product_scope"):
+            row = await PRDSectionRepository.get_by_key(key, project_id, session)
+            assert row["ai_generatable"] is True, key
+
+
+
+# =====================================================================
+# End-to-end: "Generate PRD" through the REAL LangGraph workflow
+# =====================================================================
+class TestGeneratePrdThroughWorkflow:
+    @pytest.mark.asyncio
+    async def test_generate_prd_preserves_human_owned_part(self, monkeypatch, db_session):
+        """Regression: the architect's section sync was guarded by
+        ``if db_session`` while ``db_session`` was not a declared AgentState
+        channel — LangGraph dropped it, so the sync never ran and the raw AI
+        LaTeX (without human-owned parts) was persisted, wiping manual edits.
+        Driving the REAL compiled workflow must preserve the human-owned part."""
+        import app.agents as agents
+
+        session, project_id = db_session
+        await ensure_sections_seeded(project_id, session, source_markdown=_markdown_prd())
+
+        # A human-owned manual edit that must survive "Generate PRD".
+        s = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        await PRDSectionRepository.update_content(
+            s["id"], project_id,
+            "### Stakeholders\n\n|Role|Name|\n|---|---|\n|Product Owner|MANUAL KEEP|",
+            session, changed_by="user", content_source="human", ai_generatable=False,
+        )
+
+        req_state = {
+            "project_id": project_id,
+            "project_name": "PromptPay Refund Portal",
+            "requirements": [{
+                "requirement_code": "REQ-001",
+                "title": "Refund Request Submission",
+                "user_stories": [{
+                    "ticket_code": "US-001",
+                    "story_title": "Submit refund request online",
+                    "as_a": "Retail Customer",
+                    "i_want_to": "submit a refund request",
+                    "so_that": "I get my money back",
+                    "is_locked": False,
+                    "acceptance_criteria": ["Given a valid id, when submitted, then PENDING"],
+                }],
+            }],
+            "business_goals": [{"description": "Cut refund handling time by 60%"}],
+            "actors": [{"name": "Retail Customer"}],
+            "user_stories": [],
+            "acceptance_criteria": [],
+            "generated_prd": "",
+            "generated_diagrams": "",
+            "current_workflow_state": "gatherer_node",
+            "version_number": 2,
+        }
+
+        async def fake_state(project_id, session=None, current_version=1):  # noqa: A002
+            return dict(req_state)
+
+        async def fake_diagram(*_a, **_k):
+            return "flowchart TD\n  A([Start]) --> B[Done]"
+
+        async def fake_save(**_k):
+            return None
+
+        monkeypatch.setattr(agents, "get_or_init_requirement_state", fake_state)
+        monkeypatch.setattr(agents, "_generate_flow_diagram", fake_diagram)
+        monkeypatch.setattr(agents.ConversationMessageRepository, "save_message", fake_save)
+
+        # The graph must carry the request-scoped session; if it did not, the
+        # fallback would silently open a NON-test session (and write there).
+        import app.database as app_database
+
+        def _no_fallback():  # pragma: no cover - executed only on regression
+            raise AssertionError("architect_node fell back to a non-request session")
+
+        monkeypatch.setattr(app_database, "AsyncSessionLocal", _no_fallback)
+
+        out = await agents.prd_workflow.ainvoke({
+            "project_id": project_id,
+            "target_agent": "architect",
+            "current_version": 2,
+            "structured_requirements": {},
+            "version_history_summaries": "No previous revision logs available.",
+            "db_session": session,
+        })
+
+        # The returned document (what the UI shows) keeps the manual part.
+        assert "MANUAL KEEP" in out["prd_markdown"]
+        after = await PRDSectionRepository.get_by_key("stakeholders", project_id, session)
+        assert "MANUAL KEEP" in after["content"]
+        # ...and the version ledger recorded the stitched document.
+        stitched = await assemble_document_markdown(project_id, session)
+        assert "MANUAL KEEP" in stitched
+
+        # THE DOCUMENT'S VERSION IS THE LEDGER'S semver: the cover and the
+        # Version History section show prd_versions.semver (first snapshot =
+        # 1.0.0) instead of the integer-derived V{n}.0 filler, and the pending
+        # marker never leaks into the stored document.
+        from app.prd_filler import PENDING_VERSION_LABEL
+        from app.repositories.prd import PRDVersionRepository
+
+        latest = await PRDVersionRepository.get_latest(project_id, session)
+        assert latest is not None
+        assert latest["semver"] == "1.0.0"
+        assert latest["semver"] in out["prd_markdown"]
+        assert PENDING_VERSION_LABEL not in out["prd_markdown"]
+        assert "V2.0" not in out["prd_markdown"]
+
         assert prd_is_sectioned_markdown(None) is False  # type: ignore[arg-type]

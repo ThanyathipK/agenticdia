@@ -28,6 +28,7 @@ from app.prd_section_service import (
     assemble_document_markdown,
     ensure_sections_seeded,
     merge_edited_section,
+    sync_sections_from_prd,
 )
 from app.repositories import (
     ArtifactEventLogRepository,
@@ -135,17 +136,21 @@ async def list_prd_sections(
 #               2.2.0 locks: project (2.0.1) → document (2.0.2) → (section, in 4.4)
 #               2.2.1 review_status validation → 422 (PRD-SECTION 3.1.1)
 #               2.2.2 section lookup → 404
-#               2.2.3 THREE-WAY merge (PRD-SECTION 3.5) so a concurrent AI change is
+#               2.2.3 reconcile with the latest document (so the merge base is the
+#                     current version, never a stale/blank template part)
+#               2.2.4 THREE-WAY merge (PRD-SECTION 3.5) so a concurrent AI change is
 #                     not clobbered by the manual save
-#               2.2.4 repository update_content (4.4: appends a prd_section_versions
-#                     row FIRST, then updates the materialized content; lock-gated)
-#               2.2.5 artifact_event_logs append (fail-soft)
-#               2.2.6 re-stitch the whole document (PRD-SECTION 3.7)
-#               2.2.7 VERSION 3.6 ledger row FIRST (so version_number advances), then
+#               2.2.5 repository update_content (4.4: appends a prd_section_versions
+#                     row FIRST, then updates the materialized content + OWNERSHIP;
+#                     lock-gated). A manual save marks the part human-owned
+#                     (ai_generatable=false) so "Generate PRD" preserves it.
+#               2.2.6 artifact_event_logs append (fail-soft)
+#               2.2.7 re-stitch the whole document (PRD-SECTION 3.7)
+#               2.2.8 VERSION 3.6 ledger row FIRST (so version_number advances), then
 #                     PROJECT 8.2.2 persists the document — ORDER MATTERS: recording the
 #                     version first makes the state write create a NEW prd_documents row
 #                     for version N+1 instead of overwriting version N's row
-#               2.2.8 SSE "prd_section_updated"
+#               2.2.9 SSE "prd_section_updated"
 @router.patch("/api/project/{project_id}/prd/sections/{section_key}", response_model=PrdSectionUpdateResponse, status_code=status.HTTP_200_OK)
 async def update_prd_section(
     project_id: str,
@@ -172,6 +177,29 @@ async def update_prd_section(
 
     section = await _get_section_or_404(section_key, project_id, session)
 
+    # MERGE-WITH-LATEST-VERSION: the editor is seeded from the project's CURRENT
+    # document (``generated_prd``) — the latest version the user sees. The
+    # ``prd_sections`` row can lag behind it (parts seeded from the template
+    # before the first generation, or a generation whose part-sync failed), and
+    # merging against that stale template would drop the latest content. So
+    # reconcile the stored parts with the latest document FIRST — reusing the
+    # same ownership contract as regeneration (locked / human-owned parts are
+    # preserved verbatim) — then merge the edit on top of the freshly-synced
+    # part. When the parts are already in sync this is a no-op.
+    state = await RequirementStateRepository.get_by_project_id(project_id, session)
+    latest_document = (state or {}).get("generated_prd") or ""
+    if latest_document.strip():
+        synced = await sync_sections_from_prd(
+            project_id, latest_document, session,
+            # A SYSTEM reconciliation, not a user edit — use a distinct author
+            # so the manual-ownership backfill never mistakes it for one.
+            changed_by="reconcile",
+            change_summary="Reconciled with the latest PRD version before a manual edit.",
+        )
+        if synced is not None:
+            # Re-read so ``section.content`` is the LATEST text, not the stale row.
+            section = await _get_section_or_404(section_key, project_id, session)
+
     # MERGE-WITH-LAST-VERSION (three-way): the UI sends BOTH the full edited
     # text (``content``) AND the text it started editing from
     # (``base_content``). ``section.content`` is the CURRENT stored text —
@@ -193,11 +221,17 @@ async def update_prd_section(
         # PRD-SECTION 2.2.4 — Repository write (4.4): append the previous content as a
         #                 prd_section_versions row, then materialize the new content.
         #                 ArtifactLockError surfaces here as 409.
+        # A manual save makes the part HUMAN-OWNED (content_source='human',
+        # ai_generatable=False) so the next "Generate PRD" PRESERVES it — the
+        # Architect only regenerates ai_generatable parts. Passing
+        # ai_generatable=True hands the part back to the AI.
         updated = await PRDSectionRepository.update_content(
             section["id"], project_id, edited_content, session,
             changed_by=payload.updated_by or "user",
             change_summary=payload.change_summary,
             review_status=payload.review_status,
+            content_source="ai" if payload.ai_generatable else "human",
+            ai_generatable=payload.ai_generatable,
         )
     except Exception as lock_err:
         # ArtifactLockError from the repository lock enforcement
@@ -217,6 +251,7 @@ async def update_prd_section(
             old_value={"content": section.get("content"), "section_key": section_key},
             new_value={"content": payload.content, "version_number": updated.get("version_number")},
             performed_by=payload.updated_by or "user",
+            project_id=project_id,
         )
     except Exception as log_err:  # never block an edit on event logging
         logger.warning(f"[PRD SECTIONS] Failed to log update event: {log_err}")
@@ -380,6 +415,7 @@ async def lock_prd_section(
             artifact_id=section["id"],
             session=session,
             locked_by=payload.locked_by or "user",
+            lock_reason=payload.lock_reason,
             project_id=project_id,
         )
     except ArtifactLockError as e:

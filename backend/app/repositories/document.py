@@ -68,6 +68,37 @@ class DocumentRepository:
         return [serialize_document(d) for d in docs]
 
     @staticmethod
+    async def get_validation_context(
+        project_id: str, session: AsyncSession
+    ) -> List[Dict[str, Any]]:
+        """Return usable knowledge-base text for the validation workflow.
+
+        Unlike the lightweight document-list query, this deliberately includes
+        the canonical markdown. Failed conversions (for example OCR-only PDFs)
+        and empty bodies are excluded because they contain no text the auditor
+        can validate.
+        """
+        pid = as_uuid(project_id)
+        stmt = (
+            select(DocumentModel)
+            .where(
+                DocumentModel.project_id == pid,
+                DocumentModel.status == "processed",
+                DocumentModel.content_markdown != "",
+            )
+            .order_by(DocumentModel.created_at.asc())
+        )
+        result = await session.execute(stmt)
+        return [
+            {
+                "document_id": str(doc.id),
+                "filename": doc.original_filename,
+                "content_markdown": doc.content_markdown,
+            }
+            for doc in result.scalars().all()
+        ]
+
+    @staticmethod
     async def get_by_id(document_id: str, project_id: str, session: AsyncSession) -> Optional[Dict[str, Any]]:
         # DOC-UPLOAD 4.3 — Single record WITH markdown (include_markdown=True) for 2.3 and for
         #             FLOW 15's process path, which re-reads the stored text.

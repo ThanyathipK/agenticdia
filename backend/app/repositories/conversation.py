@@ -73,14 +73,35 @@ class ConversationMessageRepository:
 
     # CHAT 7.2 — SELECT the full transcript oldest-first (the ORDER BY created_at
     # asc is what keeps prompt context and the restored UI timeline consistent).
+    # PERF (project switch): ``limit`` keeps only the NEWEST ``limit`` messages
+    # (returned oldest-first, so ordering semantics are unchanged). The project-
+    # state response uses it because it embeds the whole transcript on EVERY
+    # project open — an unbounded chat easily dwarfs every other payload. Callers
+    # that need the complete history (LLM context, the conversations endpoint)
+    # omit ``limit`` and behave exactly as before.
     @staticmethod
-    async def get_conversation_history(project_id: str, session: Optional[AsyncSession] = None) -> List[Dict[str, Any]]:
+    async def get_conversation_history(
+        project_id: str,
+        session: Optional[AsyncSession] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         pid = as_uuid(project_id)
 
         async def _fetch(s: AsyncSession):
-            stmt = select(ConversationMessageModel).where(ConversationMessageModel.project_id == pid).order_by(ConversationMessageModel.created_at.asc())
-            res = await s.execute(stmt)
-            messages = res.scalars().all()
+            if limit is not None and limit > 0:
+                # Newest N first, then reversed back to chronological order.
+                stmt = (
+                    select(ConversationMessageModel)
+                    .where(ConversationMessageModel.project_id == pid)
+                    .order_by(ConversationMessageModel.created_at.desc())
+                    .limit(limit)
+                )
+                res = await s.execute(stmt)
+                messages = list(res.scalars().all())[::-1]
+            else:
+                stmt = select(ConversationMessageModel).where(ConversationMessageModel.project_id == pid).order_by(ConversationMessageModel.created_at.asc())
+                res = await s.execute(stmt)
+                messages = res.scalars().all()
             return [serialize_conversation_message(m) for m in messages]
 
         if session:

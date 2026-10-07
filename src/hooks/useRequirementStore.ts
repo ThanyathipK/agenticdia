@@ -26,7 +26,6 @@ import {
   formatUserStoriesToMarkdown,
   getSafeSectionContent,
   parsePRDToSections,
-  stitchSectionsToPRD,
 } from '../utils/markdown';
 
 // ----------------------------------------------------------------------------
@@ -169,6 +168,8 @@ export interface RequirementStore {
   handleRestoreVersion: (versionNumber: number) => Promise<boolean>;
   /** Lock/unlock ONE PRD part (blocks edits + AI regeneration when locked). */
   handleToggleSectionLock: (sectionId: string) => Promise<void>;
+  /** Hand a MANUAL (human-owned) part back to AI regeneration (content kept). */
+  handleHandSectionToAi: (sectionId: string) => Promise<void>;
   sectionLocks: Record<string, PrdSectionLockState>;
 }
 
@@ -206,6 +207,8 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const activeProjectIdRef = useRef(projectId);
+  activeProjectIdRef.current = projectId;
 
   // Preload the official Krungsri Nimble template once per session so the PRD
   // panel shows the document skeleton immediately. The updater form guarantees
@@ -324,7 +327,8 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
         const res = await api.updatePrdSection(projectId, sectionId, newContent, { base_content: baseContent });
         setPrdMarkdown(res.document_markdown);
         setPrdMarkdownDisplay(res.document_markdown);
-        // Refresh per-part lock/version metadata (version_number advanced).
+        // Refresh per-part lock/version/ownership metadata (version_number
+        // advanced; a manual save flips the part to human-owned -> "Manual").
         setSectionLocks(prev => ({
           ...prev,
           [sectionId]: {
@@ -335,35 +339,23 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
             }),
             ...(res.section.is_locked !== undefined ? { is_locked: res.section.is_locked } : {}),
             ...(res.section.review_status ? { review_status: res.section.review_status } : {}),
+            ...(res.section.content_source ? { content_source: res.section.content_source } : {}),
+            ...(res.section.ai_generatable !== undefined ? { ai_generatable: res.section.ai_generatable } : {}),
             version_number: res.section.version_number ?? prev[sectionId]?.version_number ?? null,
           },
         }));
-        setSyncStatus('Section saved & versioned.');
-      } catch {
-        // Legacy fallback: stitch all sections and save the whole document.
-        // Do NOT include edits to locked sections — the lock must be honoured
-        // even in the fallback path. Restore locked sections from the backend.
-        try {
-          const payload = await api.getPrdSections(projectId);
-          const backendSections = new Map(payload.sections.map(s => [s.section_key, s.content]));
-          const safeSections = updatedSections.map(sec => {
-            // section.id IS the section_key (from parsePRDToSections)
-            const key = sec.id as string;
-            if (sectionLocks[key]?.is_locked) {
-              // Restore the locked section's content from the backend.
-              return { ...sec, content: backendSections.get(key) ?? sec.content };
-            }
-            return sec;
-          });
-          const stitchedMarkdown = stitchSectionsToPRD(safeSections);
-          setPrdMarkdown(stitchedMarkdown);
-          setPrdMarkdownDisplay(stitchedMarkdown);
-          await api.updateProjectState(projectId, { generated_prd: stitchedMarkdown });
-          setSyncStatus('Manual changes saved & synced.');
-        } catch (err) {
-          handleError('Failed to save manual edits to the database.', err);
-          setSyncStatus('Failed to sync manual changes with server.');
-        }
+        setSyncStatus(
+          res.section.ai_generatable === false
+            ? 'Section saved — marked Manual, Generate PRD will preserve it.'
+            : 'Section saved & versioned.',
+        );
+      } catch (err) {
+        // The section endpoint is authoritative. Falling back to a whole-document
+        // write on lock/conflict/network errors can overwrite newer remote edits.
+        setSections(sections);
+        handleError('Failed to save manual edits to the database.', err);
+        setSyncStatus('Save failed — the server copy was not changed.');
+        return;
       }
 
       // Refresh the version ledger — a manual section edit always creates a new
@@ -394,6 +386,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
           version_number: s.version_number ?? null,
         };
       }
+      if (activeProjectIdRef.current !== projId) return;
       setSectionLocks(map);
     } catch {
       // Cosmetic metadata — never block project loading on it.
@@ -406,6 +399,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
   const loadVersionHistory = async (projId: string) => {
     try {
       const payload = await api.getPrdVersions(projId);
+      if (activeProjectIdRef.current !== projId) return;
       console.log('[VersionHistory] Loaded', payload?.length, 'versions for project', projId);
       setVersionHistory(toVersionHistoryList(payload));
     } catch (err) {
@@ -488,6 +482,43 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     }
   };
 
+  // PRD-SECTION 1.6 — Hand a MANUAL part back to the AI. A manual save marks the
+  //             part human-owned so "Generate PRD" preserves it; this action
+  //             flips that flag back (content unchanged) so the Architect may
+  //             regenerate the part again on the next run.
+  const handleHandSectionToAi = async (sectionId: string) => {
+    if (!projectId) return;
+    const section = sections.find(s => s.id === sectionId);
+    if (!section) return;
+    setSyncStatus('Handing PRD part back to the AI...');
+    try {
+      const res = await api.updatePrdSection(projectId, sectionId, section.content, {
+        base_content: section.content,
+        ai_generatable: true,
+        // Distinct author so this hand-off is not mistaken for a manual edit
+        // by the ownership backfill (it must stay AI-generatable).
+        updated_by: 'ai_handoff',
+        change_summary: 'Handed the part back to AI regeneration.',
+      });
+      setPrdMarkdown(res.document_markdown);
+      setPrdMarkdownDisplay(res.document_markdown);
+      setSectionLocks(prev => ({
+        ...prev,
+        [sectionId]: {
+          ...(prev[sectionId] ?? { review_status: 'draft' }),
+          content_source: res.section.content_source,
+          ai_generatable: res.section.ai_generatable,
+          version_number: res.section.version_number ?? prev[sectionId]?.version_number ?? null,
+        },
+      }));
+      setSyncStatus('PRD part handed back to the AI — Generate PRD will refresh it.');
+      await loadVersionHistory(projectId);
+    } catch (err) {
+      handleError('Failed to hand the PRD part back to the AI.', err);
+      setSyncStatus('Could not hand the part back to the AI.');
+    }
+  };
+
   // Legacy helper (kept for parity): clears the requirement-engine domain state.
   // Note: pending-actions reset lives in `useProjects`, which owns that slice.
   const resetProjectState = () => {
@@ -555,6 +586,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     loadVersionHistory,
     handleRestoreVersion,
     handleToggleSectionLock,
+    handleHandSectionToAi,
     sectionLocks,
   };
 }

@@ -133,6 +133,8 @@ class PRDSectionRepository:
         changed_by: str = "user",
         change_summary: Optional[str] = None,
         review_status: Optional[str] = None,
+        content_source: Optional[str] = None,
+        ai_generatable: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Replace the current content of one section.
@@ -141,6 +143,11 @@ class PRDSectionRepository:
         silently — a new ``prd_section_versions`` row is inserted first, then
         the materialized ``content`` is updated. Lock enforcement refuses the
         update when the section is locked.
+
+        ``content_source`` / ``ai_generatable`` optionally update the part's
+        OWNERSHIP in the same write: a manual edit sets them to
+        ``'human'`` / ``False`` so the Architect never regenerates the part
+        again; passing ``ai_generatable=True`` hands it back to the AI.
         """
         sid = as_uuid(section_id)
         pid = as_uuid(project_id)
@@ -167,6 +174,10 @@ class PRDSectionRepository:
         }, session)
 
         section.content = content
+        if content_source:
+            section.content_source = content_source
+        if ai_generatable is not None:
+            section.ai_generatable = bool(ai_generatable)
         if review_status:
             section.review_status = review_status
         await session.flush()
@@ -178,6 +189,70 @@ class PRDSectionRepository:
         res_ver = await session.execute(stmt_ver)
         current_version = res_ver.scalar() or 1
         return serialize_prd_section(section, current_version=current_version)
+
+    @staticmethod
+    async def mark_manually_edited_as_human_owned(session: AsyncSession) -> int:
+        """Backfill: make every part whose NEWEST history row was authored by a
+        human manual edit HUMAN-OWNED (``ai_generatable=False``,
+        ``content_source='human'``).
+
+        Manual edits saved before the ownership flag existed would otherwise be
+        silently overwritten by the next "Generate PRD". Idempotent: parts that
+        are already human-owned / locked are skipped, and a whole-document
+        restore ("Restored …") is excluded so a restore never freezes every
+        part. Returns the number of parts flipped.
+        """
+        stmt = select(PRDSectionModel).where(
+            PRDSectionModel.ai_generatable.is_(True),
+            PRDSectionModel.is_locked.is_(False),
+        )
+        sections = (await session.execute(stmt)).scalars().all()
+        if not sections:
+            return 0
+
+        # Newest history row per section (version_number is monotonic per part).
+        newest = (
+            select(
+                PRDSectionVersionModel.section_id,
+                func.max(PRDSectionVersionModel.version_number).label("v"),
+            )
+            .where(PRDSectionVersionModel.section_id.in_([s.id for s in sections]))
+            .group_by(PRDSectionVersionModel.section_id)
+            .subquery()
+        )
+        rows = (
+            await session.execute(
+                select(
+                    PRDSectionVersionModel.section_id,
+                    PRDSectionVersionModel.changed_by,
+                    PRDSectionVersionModel.change_summary,
+                )
+                .join(
+                    newest,
+                    (newest.c.section_id == PRDSectionVersionModel.section_id)
+                    & (newest.c.v == PRDSectionVersionModel.version_number),
+                )
+            )
+        ).all()
+        latest = {r[0]: (r[1], r[2]) for r in rows}
+
+        flipped = 0
+        # System-authored part writes that happen to use a user-ish author must
+        # NOT be mistaken for manual edits (reconciliation / hand-off / restore).
+        system_summaries = ("restored", "reconciled", "handed")
+        for section in sections:
+            changed_by, change_summary = latest.get(section.id, (None, None))
+            if (changed_by or "").strip().lower() != "user":
+                continue
+            if (change_summary or "").strip().lower().startswith(system_summaries):
+                continue
+            section.content_source = "human"
+            section.ai_generatable = False
+            flipped += 1
+
+        if flipped:
+            await session.flush()
+        return flipped
 
     @staticmethod
     async def delete(id_val: str, project_id: str, session: AsyncSession) -> bool:

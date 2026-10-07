@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthenticatedUser, require_project_owner
 from app.database import get_db
-from app.repositories import PendingActionRepository, RequirementStateRepository
+from app.repositories import (
+    DocumentRepository,
+    PendingActionRepository,
+    RequirementStateRepository,
+)
 from app.schemas import (
     ArtifactLockRequest,
     ArtifactLockResponse,
@@ -30,8 +34,8 @@ VALID_ARTIFACT_TYPES = [
     "requirement",
     "user_story",
     "acceptance_criteria",
-    "clarification_question",
     "prd_document",
+    "prd_section",
 ]
 
 
@@ -89,6 +93,7 @@ async def lock_artifact(
             artifact_id=artifact_id,
             session=session,
             locked_by=payload.locked_by or "user",
+            lock_reason=payload.lock_reason,
             project_id=project_id
         )
         await event_manager.publish(project_id, "artifact_locked", {
@@ -399,6 +404,7 @@ async def confirm_action(
                     "applied_version": persisted_state.get("version_number"),
                 },
                 performed_by="user",
+                project_id=project_id,
             )
         except Exception as log_err:  # never block a confirmed merge on logging
             logger.warning(f"[MERGE CONFIRM] Failed to log document merge event: {log_err}")
@@ -495,6 +501,23 @@ async def cancel_action(
     Returns:
         ActionStatusResponse: Confirmation with status 'cancelled'.
     """
+    actions = await PendingActionRepository.get_by_project(project_id, session)
+    action = next((item for item in actions if item.get("id") == action_id), None)
+    if not action:
+        raise HTTPException(status_code=404, detail="Pending action not found")
+
+    # Cancelling a document extraction removes its only draft, so its status
+    # returns to knowledge-only. Confirming instead flips it to
+    # extraction_applied in the confirmation branch above.
+    document_ref = (action.get("proposed_changes") or {}).get("_document_ref") or {}
+    if (
+        action.get("action_type") == "INSERT_CHUNKED_REQUIREMENTS"
+        and document_ref.get("document_id")
+    ):
+        await DocumentRepository.update_extraction_status(
+            str(document_ref["document_id"]), project_id, "not_extracted", session
+        )
+
     await PendingActionRepository.delete(action_id, project_id, session)
     await event_manager.publish(project_id, "action_cancelled", {
         "project_id": project_id,

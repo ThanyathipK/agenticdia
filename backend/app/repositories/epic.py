@@ -59,7 +59,8 @@ class EpicRepository:
                     session=session,
                     old_value={"epic_name": old_name, "version": old_version},
                     new_value={"epic_name": epic.epic_name, "version": epic.version},
-                    performed_by=performed_by
+                    performed_by=performed_by,
+                    project_id=str(epic.project_id),
                 )
             except Exception as log_err:
                 logger.warning(f"[EVENT LOG] Failed to log epic update: {log_err}")
@@ -82,7 +83,8 @@ class EpicRepository:
                     session=session,
                     old_value=None,
                     new_value={"epic_name": epic.epic_name, "version": epic.version, "status": epic.status},
-                    performed_by=performed_by
+                    performed_by=performed_by,
+                    project_id=str(epic.project_id),
                 )
             except Exception as log_err:
                 logger.warning(f"[EVENT LOG] Failed to log epic create: {log_err}")

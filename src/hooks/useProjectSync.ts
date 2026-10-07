@@ -49,6 +49,8 @@ export function useProjectSync(
   const prdMarkdownRef = useRef(store.prdMarkdown);
   const currentVersionRef = useRef(store.currentVersion);
   const editingSectionIdRef = useRef(store.editingSectionId);
+  const activeProjectIdRef = useRef(projectId);
+  activeProjectIdRef.current = projectId;
   useEffect(() => {
     prdMarkdownRef.current = store.prdMarkdown;
     currentVersionRef.current = store.currentVersion;
@@ -83,6 +85,7 @@ export function useProjectSync(
   //              Reused verbatim by the SSE full refresh and the PRD preview
   //              catch-up, so PROJECT 2.x is also the read path of EVENTS.
   const loadProjectState = async (projId: string, retries = 5, delay = 1000) => {
+    let retryScheduled = false;
     // Fresh load — drop any queued PRD update / hold left over from a previous
     // project so the catch-up logic can never leak across projects.
     prdSyncPendingRef.current = false;
@@ -95,8 +98,27 @@ export function useProjectSync(
     store.setLockedRequirements({});
 
     try {
+      // PERF (project switch) — fire the independent reads BEFORE awaiting the
+      // main state fetch so they overlap on the wire instead of queueing behind
+      // it. Previously pending actions were awaited after the state response and
+      // the section-lock/version-ledger reads only started after BOTH, turning
+      // every project click into a strictly sequential 4-request chain (each also
+      // paying the ownership-check round trip to the remote database).
+      const pendingActionsPromise = api
+        .listPendingActions(projId)
+        .then((actions) => actions || [])
+        .catch((err) => {
+          handleWarning('Could not load pending actions.', err);
+          return null; // null = failed; distinguish from an intentionally empty list
+        });
+      // Load per-part PRD section lock/ownership metadata (non-blocking).
+      store.loadSectionLocks(projId);
+      // Load the immutable PRD version ledger (AI + manual snapshots)
+      store.loadVersionHistory(projId);
+
       // PROJECT 2.2 — API boundary → GET /api/project/{id} (route PROJECT 2.3).
       const payload = await api.getProjectState(projId);
+      if (activeProjectIdRef.current !== projId) return;
       if (payload) {
         // PROJECT 2.4 — Response applied to the UI store: structured
         //              requirements/stories, lock maps, version number, audit
@@ -131,36 +153,41 @@ export function useProjectSync(
         // CONFIRM 1.7 — Pending-action load (initial project open, non-blocking): the
         //              first paint already knows whether a draft is staged, so no extra
         //              state fetch is needed. The SSE path refreshes it again (1.7.1).
-        // Load pending human-in-the-loop merge actions (non-blocking). The live
-        // sync below also refreshes them, but loading them here means the first
-        // paint after opening a project is already complete — so the SSE stream
-        // doesn't have to perform an immediate duplicate state fetch.
-        try {
-          const actions = await api.listPendingActions(projId);
-          setPendingActions(actions || []);
-        } catch (err) {
-          handleWarning('Could not load pending actions.', err);
-        }
-
-        // Load per-part PRD section lock/ownership metadata (non-blocking).
-        store.loadSectionLocks(projId);
-        // Load the immutable PRD version ledger (AI + manual snapshots)
-        store.loadVersionHistory(projId);
+        //              The request was STARTED at the top of this function (PERF note)
+        //              so it already ran concurrently with the state fetch — only its
+        //              result is awaited here. A failure is already reported by the
+        //              .catch above (returns null) and must not clear staged drafts.
+        // Pending actions are secondary UI metadata. Do not block the core
+        // project payload (and therefore every workspace tab) while this
+        // independent request is slow; still discard stale project responses.
+        void pendingActionsPromise.then((actions) => {
+          if (activeProjectIdRef.current === projId && actions !== null) {
+            setPendingActions(actions);
+          }
+        });
 
         store.setSyncStatus('Synced with Supabase Cloud');
       }
     } catch (err) {
-      if (retries > 0) {
+      if (activeProjectIdRef.current !== projId) return;
+      if (retries > 0 && activeProjectIdRef.current === projId) {
+        retryScheduled = true;
         // PROJECT 2.5 — Error branch: bounded retry (5 × 1 s) before degrading
         // to the "working locally" warning. The server stays the only source of
         // truth — there is deliberately no offline cache fallback.
-        setTimeout(() => loadProjectState(projId, retries - 1, delay), delay);
+        setTimeout(() => {
+          if (activeProjectIdRef.current === projId) {
+            void loadProjectState(projId, retries - 1, delay);
+          }
+        }, delay);
       } else {
         handleWarning('Failed to load project state from the server. Working locally.', err);
         store.setSyncStatus('Failed to sync with Supabase. Working locally.');
       }
     } finally {
-      store.setIsLoading(false);
+      if (activeProjectIdRef.current === projId && !retryScheduled) {
+        store.setIsLoading(false);
+      }
     }
   };
 

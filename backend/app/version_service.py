@@ -236,7 +236,8 @@ async def record_prd_version(
     }, session, version_number=version_number)
 
     # Keep the project's current version number in lock-step with the ledger so
-    # the document cover (V{n}.0) and the UI's currentVersion always agree.
+    # the stamped document label (cover + Version History show this row's
+    # semver) and the UI's currentVersion always agree.
     try:
         await RequirementStateRepository.save_or_update(project_id, {
             "version_number": version["version_number"],
@@ -382,3 +383,76 @@ async def diff_versions(
         "base_version": base_version,
         "sections": section_diffs,
     }
+
+
+# VERSION 3.9 — PRE-RECORD semver resolution for DOCUMENT STAMPING: computes the
+#               EXACT semver record_prd_version (3.6) will assign to the NEXT snapshot,
+#               from the same inputs (latest ledger row + current locks → 3.1 changes →
+#               3.5 next semver), so the version printed ON the document (cover +
+#               Version History section) is provably the value that lands in
+#               prd_versions.semver — never a fabricated V{n}.0. Callers fill the
+#               template with prd_filler.PENDING_VERSION_LABEL and stamp the returned
+#               value in (prd_filler.stamp_version_label) BEFORE the document is
+#               stored/exported. FAIL-SOFT by contract: any failure (no ledger yet is
+#               NOT a failure — it just means 1.0.0; unreadable locks assume none;
+#               pandoc/conversion trouble) returns None and the caller keeps its
+#               legacy V{n}.0 fallback label.
+async def resolve_document_semver(
+    project_id: str,
+    session: AsyncSession,
+    *,
+    document: str,
+    change_type: str = "ai",
+) -> Optional[str]:
+    """The semver the NEXT ledger snapshot for ``project_id`` will receive.
+
+    ``document`` is the not-yet-recorded document (LaTeX or markdown). It is
+    normalized to markdown with the same ``prd_to_markdown`` step the section
+    sync uses, so :func:`compute_section_changes` compares it against the
+    stored snapshot exactly the way :func:`record_prd_version` later will
+    (once human-owned/locked parts have been re-merged, those parts only ever
+    move change records "updated → unchanged/locked_preserved", which keeps
+    the derived semver identical).
+
+    Returns ``None`` when the semver cannot be determined (fail-soft) — the
+    caller then falls back to its legacy display label.
+    """
+    try:
+        previous = await PRDVersionRepository.get_latest(project_id, session)
+        prev_document = previous["generated_prd"] if previous else ""
+
+        # Same lock source of truth as record_prd_version — a locked part that
+        # would have changed is locked_preserved, never updated.
+        locked_keys: Set[str] = set()
+        try:
+            sections = await PRDSectionRepository.get_by_project(project_id, session)
+            locked_keys = {s["section_key"] for s in sections if s.get("is_locked")}
+        except Exception as lock_err:
+            logger.warning(
+                "[PRD VERSIONS] Could not read section locks for semver pre-resolution (%s); "
+                "assuming none.", lock_err,
+            )
+
+        try:
+            from app.latex_service import prd_to_markdown
+            new_document = prd_to_markdown(document or "")
+        except Exception as conv_err:
+            logger.warning(
+                "[PRD VERSIONS] Could not normalize document for semver pre-resolution (%s).",
+                conv_err,
+            )
+            return None
+
+        changed = compute_section_changes(prev_document, new_document, locked_keys=locked_keys)
+        semver = compute_next_semver((previous or {}).get("semver"), change_type, changed)
+        logger.info(
+            "[PRD VERSIONS] Pre-resolved semver %s for project %s (change_kinds=%s)",
+            semver, project_id, [c["change_kind"] for c in changed],
+        )
+        return semver
+    except Exception as err:
+        logger.warning(
+            "[PRD VERSIONS] Failed to pre-resolve semver for project %s (%s).",
+            project_id, err,
+        )
+        return None

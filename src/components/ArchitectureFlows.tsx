@@ -1,271 +1,182 @@
-// ArchitectureFlows — System Architecture Flows tab. Renders a static, warm-themed
-// SVG flowchart DERIVED FROM THE PRD (one node per functional requirement /
-// user story in the validated dataset the PRD was generated from), plus the
-// Mermaid flowchart source under it. With no PRD info the default "No info
-// yet" empty state is shown.
-import { Network, Info, FileCode } from 'lucide-react';
+import { useCallback, useEffect, useId, useState } from 'react';
+import { AlertTriangle, FileCode, LoaderCircle, Network } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
 import { Tooltip } from './Tooltip';
 
-/** One flowchart node derived from the PRD's requirements / user stories. */
-interface FlowStep {
-  code: string;
-  title: string;
-  storyCount: number;
+let mermaidPromise: ReturnType<typeof importMermaid> | null = null;
+
+async function importMermaid() {
+  const { default: mermaid } = await import('mermaid');
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#ffffff',
+      primaryTextColor: '#171717',
+      primaryBorderColor: '#8a6a50',
+      lineColor: '#8a6a50',
+      secondaryColor: '#ece7dc',
+      tertiaryColor: '#f7f5f0',
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    },
+    flowchart: { htmlLabels: false, curve: 'basis', useMaxWidth: true },
+  });
+  return mermaid;
 }
 
-// Flowchart layout constants (top-down spine, one node per PRD requirement).
-const MAX_STEPS = 8;
-const NODE_W = 300;
-const NODE_H = 44;
-const GAP = 26;
-const START_H = 30;
-const CENTER_X = 325;
+function loadMermaid() {
+  mermaidPromise ??= importMermaid();
+  return mermaidPromise;
+}
 
-const trunc = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+interface MermaidDiagramProps {
+  source: string;
+  zoom: number;
+  onError: (message: string | null) => void;
+}
+
+function MermaidDiagram({ source, zoom, onError }: MermaidDiagramProps) {
+  const reactId = useId();
+  const [svg, setSvg] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    setSvg('');
+    onError(null);
+
+    const render = async () => {
+      try {
+        const mermaid = await loadMermaid();
+        const id = `project-flow-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+        const result = await mermaid.render(id, source);
+        if (active) setSvg(result.svg);
+      } catch (error) {
+        if (!active) return;
+        onError(error instanceof Error ? error.message : 'The Mermaid source could not be rendered.');
+      }
+    };
+
+    void render();
+    return () => {
+      active = false;
+    };
+  }, [onError, reactId, source]);
+
+  if (!svg) {
+    return (
+      <div className="flex min-h-72 items-center justify-center gap-2 text-sm text-on-surface-variant">
+        <LoaderCircle className="h-5 w-5 animate-spin text-primary" />
+        Rendering flowchart…
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="min-w-full transition-transform duration-300 [&_svg]:mx-auto [&_svg]:h-auto [&_svg]:max-w-none"
+      style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}
+      // Mermaid sanitizes labels in strict security mode. This SVG is the
+      // library's intended browser output and never includes raw user HTML.
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
 
 export function ArchitectureFlows({ state }: { state: ProjectState }) {
-  const {
-    mermaidDiagram,
-    diagramZoom,
-    setDiagramZoom,
-    hoverNode,
-    setHoverNode,
-  } = state;
-
-  // --- PRD-derived flowchart data -------------------------------------------
-  // The PRD is generated from the validated requirement dataset, so the
-  // flowchart nodes come straight from `structuredRequirements`: functional
-  // requirements first, user stories as fallback, the epic as last resort.
-  const { epic_name: epic, version, requirements, user_stories: stories } = state.structuredRequirements;
-  let steps: FlowStep[] = (requirements ?? []).map((r, i) => ({
-    code: r.requirement_code || `REQ-${String(i + 1).padStart(3, '0')}`,
-    title: r.title || r.description || 'Requirement',
-    storyCount: r.user_stories?.length ?? 0,
-  }));
-  if (steps.length === 0) {
-    steps = (stories ?? []).map((s, i) => ({
-      code: s.ticket_code || `US-${String(i + 1).padStart(3, '0')}`,
-      title: s.story_title || 'User story',
-      storyCount: s.acceptance_criteria?.length ?? 0,
-    }));
-  }
-  if (steps.length === 0 && epic) {
-    steps = [{ code: `V${version ?? 1}`, title: epic, storyCount: 0 }];
-  }
-  const hasPrdInfo = steps.length > 0;
-
-  // Shared hover handlers/fills for the flowchart nodes (warm theme tones).
-  const hoverProps = (key: string) => ({
-    onMouseEnter: () => setHoverNode(key),
-    onMouseLeave: () => setHoverNode(null),
-  });
-  // Requirement nodes: white card with a subtle warm highlight on hover.
-  const nodeFill = (key: string) => (hoverNode === key ? '#ece7dc' : '#ffffff');
-  // Start/End terminals: solid brand brown, brightened on hover.
-  const terminalFill = (key: string) => (hoverNode === key ? '#a9835f' : '#8a6a50');
-
-  // --- Layout (computed from the derived steps) ------------------------------
-  const hasEpic = Boolean(epic);
-  const yStart = hasEpic ? 40 : 16;
-  const startBottom = yStart + START_H;
-  const firstTop = startBottom + GAP;
-  const shownSteps = steps.slice(0, MAX_STEPS);
-  const hiddenCount = steps.length - shownSteps.length;
-  const nodeTop = (i: number) => firstTop + i * (NODE_H + GAP);
-  const lastBottom = nodeTop(shownSteps.length - 1) + NODE_H;
-  const endTop = firstTop + shownSteps.length * (NODE_H + GAP);
-  const viewH = endTop + START_H + 16;
-  const edgePaths = hasPrdInfo
-    ? [
-        `M ${CENTER_X},${startBottom} L ${CENTER_X},${firstTop - 4}`,
-        ...shownSteps.slice(0, -1).map((_, i) => `M ${CENTER_X},${nodeTop(i) + NODE_H} L ${CENTER_X},${nodeTop(i + 1) - 4}`),
-        `M ${CENTER_X},${lastBottom} L ${CENTER_X},${endTop - 4}`,
-      ]
-    : [];
-
-  // --- Mermaid source --------------------------------------------------------
-  // The backend-generated diagram (itself PRD-derived) wins when it is a
-  // flowchart; otherwise the flowchart markdown is generated from the PRD
-  // dataset so the source always mirrors the visual above.
-  const backendIsFlowchart = /^\s*(flowchart|graph)\s+(TD|TB|LR|RL)/i.test(mermaidDiagram || '');
-  const derivedMermaid = hasPrdInfo
-    ? [
-        'flowchart TD',
-        epic ? `    %% PRD Epic: ${epic} (v${version ?? 1})` : null,
-        '    S([Start])',
-        ...steps.flatMap((s, i) => ([
-          `    N${i}["${s.code} · ${trunc(s.title, 60).replace(/"/g, "'")}"]`,
-          `    ${i === 0 ? 'S' : `N${i - 1}`} --> N${i}`,
-        ])),
-        `    N${steps.length - 1} --> E([End])`,
-      ].filter(Boolean).join('\n')
-    : '';
-  const displayedDiagram = backendIsFlowchart ? mermaidDiagram : derivedMermaid;
+  const { mermaidDiagram, diagramZoom, setDiagramZoom, isLoading, isProcessing } = state;
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const handleRenderError = useCallback((message: string | null) => setRenderError(message), []);
+  const source = mermaidDiagram.trim();
+  const isWaitingForFirstDiagram = !source && (isLoading || isProcessing);
 
   return (
     <div className="space-y-6 animate-fadeIn">
-      
-      {/* Visual SVG diagram view with interactive controls */}
-      <div className="bg-white rounded-3xl border border-outline p-4 sm:p-6 shadow-sm overflow-hidden relative">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-4 pb-3 border-b border-black/5">
-          <div className="flex items-center gap-2 min-w-0">
-            <Network className="text-primary w-5 h-5 shrink-0" />
+      <div className="relative overflow-hidden rounded-3xl border border-outline bg-white p-4 shadow-sm sm:p-6">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-black/5 pb-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Network className="h-5 w-5 shrink-0 text-primary" />
             <div className="min-w-0">
-              <h3 className="font-bold text-sm text-on-surface">Interactive System Flowchart</h3>
-              <p className="text-[11px] text-on-surface-variant font-mono break-words">Rendering: flowchart TD • Derived from the PRD</p>
+              <h3 className="text-sm font-bold text-on-surface">Project Flowchart</h3>
+              <p className="break-words font-mono text-[11px] text-on-surface-variant">
+                Mermaid • Generated from saved requirements and user stories
+              </p>
             </div>
           </div>
-          <div className="flex bg-black/5 rounded-xl p-1 shrink-0">
-            <Tooltip label="Zoom out" side="bottom">
-              <button
-                onClick={() => setDiagramZoom(prev => Math.max(70, prev - 15))}
-                aria-label="Zoom out"
-                className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
-              >
-                -
-              </button>
-            </Tooltip>
-            <span className="px-3 text-xs font-mono font-bold flex items-center">{diagramZoom}%</span>
-            <Tooltip label="Zoom in" side="bottom">
-              <button
-                onClick={() => setDiagramZoom(prev => Math.min(150, prev + 15))}
-                aria-label="Zoom in"
-                className="p-1 px-2.5 text-xs font-semibold hover:bg-white rounded transition-all cursor-pointer"
-              >
-                +
-              </button>
-            </Tooltip>
-          </div>
-        </div>
 
-        {/* Interactive Flowchart Stage — derived from the PRD dataset */}
-        <div 
-          className="w-full flex items-center justify-center p-4 sm:p-6 bg-background border border-outline rounded-2xl overflow-x-auto custom-scrollbar"
-        >
-          {/* Inner wrapper carries the zoom transform so the scroll container keeps full width */}
-          <div
-            className="min-w-0 transition-transform duration-300"
-            style={{ transform: `scale(${diagramZoom / 100})`, transformOrigin: 'top center' }}
-          >
-          {hasPrdInfo ? (
-          <svg className="w-full max-w-2xl font-mono" viewBox={`0 0 650 ${viewH}`} fill="none">
-            {/* Arrowhead marker */}
-            <defs>
-              <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a6a50" />
-              </marker>
-            </defs>
-
-            {/* Flowchart edges (always visible) */}
-            <g stroke="#8a6a50" strokeWidth="1.5" fill="none" opacity="0.7" markerEnd="url(#arrow)">
-              {edgePaths.map((d, i) => (
-                <path key={i} d={d} />
-              ))}
-            </g>
-
-            {/* Flowchart nodes — one per PRD requirement / user story */}
-            <g>
-              {/* Epic name from the PRD */}
-              {hasEpic && (
-                <text x={CENTER_X} y={24} fill="#8c8676" fontSize="11" fontWeight="bold" textAnchor="middle" className="pointer-events-none">{trunc(epic, 52)}</text>
-              )}
-
-              {/* Start terminal */}
-              <rect
-                x={CENTER_X - 60} y={yStart} width="120" height={START_H} rx="16"
-                fill={terminalFill('start')}
-                stroke="#8a6a50" strokeWidth="1.5"
-                className="cursor-pointer transition-colors"
-                {...hoverProps('start')}
-              />
-              <text x={CENTER_X} y={yStart + 20} fill="#ffffff" fontSize="10" fontWeight="bold" textAnchor="middle" className="pointer-events-none">Start</text>
-
-              {/* PRD requirement nodes */}
-              {shownSteps.map((step, i) => {
-                const top = nodeTop(i);
-                return (
-                  <g key={`${step.code}-${i}`}>
-                    <rect
-                      x={CENTER_X - NODE_W / 2} y={top} width={NODE_W} height={NODE_H} rx="10"
-                      fill={nodeFill(`step-${i}`)}
-                      stroke="#8a6a50" strokeWidth="1.5"
-                      className="cursor-pointer transition-colors"
-                      {...hoverProps(`step-${i}`)}
-                    />
-                    <text x={CENTER_X} y={top + 17} fill="#8a6a50" fontSize="10" fontWeight="bold" textAnchor="middle" className="pointer-events-none">{step.code}</text>
-                    <text x={CENTER_X} y={top + 33} fill="#171717" fontSize="10" textAnchor="middle" className="pointer-events-none">{trunc(step.title, 40)}</text>
-                    {step.storyCount > 0 && (
-                      <text x={CENTER_X + NODE_W / 2 - 10} y={top + 17} fill="#8c8676" fontSize="8" textAnchor="end" className="pointer-events-none">{step.storyCount} {step.storyCount === 1 ? 'story' : 'stories'}</text>
-                    )}
-                  </g>
-                );
-              })}
-
-              {/* End terminal */}
-              <rect
-                x={CENTER_X - 60} y={endTop} width="120" height={START_H} rx="16"
-                fill={terminalFill('end')}
-                stroke="#8a6a50" strokeWidth="1.5"
-                className="cursor-pointer transition-colors"
-                {...hoverProps('end')}
-              />
-              <text x={CENTER_X} y={endTop + 20} fill="#ffffff" fontSize="10" fontWeight="bold" textAnchor="middle" className="pointer-events-none">End</text>
-
-              {hiddenCount > 0 && (
-                <text x={CENTER_X} y={endTop + START_H + 13} fill="#8c8676" fontSize="9" textAnchor="middle" className="pointer-events-none">+{hiddenCount} more requirements in the PRD</text>
-              )}
-            </g>
-
-          </svg>
-          ) : (
-          <div className="p-6 sm:p-10 m-2 border border-dashed border-outline rounded-2xl flex flex-col items-center justify-center gap-1.5 text-center">
-            <FileCode className="w-7 h-7 text-primary/40" />
-            <span className="text-sm font-bold text-on-surface">No info yet</span>
-            <p className="text-xs text-on-surface-variant italic max-w-sm">
-              The flowchart is derived from the PRD — validate requirements and generate the PRD first.
-            </p>
-          </div>
+          {source && !renderError && (
+            <div className="flex shrink-0 rounded-xl bg-black/5 p-1">
+              <Tooltip label="Zoom out" side="bottom">
+                <button
+                  onClick={() => setDiagramZoom((previous) => Math.max(70, previous - 15))}
+                  aria-label="Zoom out"
+                  className="cursor-pointer rounded px-2.5 py-1 text-xs font-semibold transition-all hover:bg-white"
+                >
+                  −
+                </button>
+              </Tooltip>
+              <span className="flex items-center px-3 font-mono text-xs font-bold">{diagramZoom}%</span>
+              <Tooltip label="Zoom in" side="bottom">
+                <button
+                  onClick={() => setDiagramZoom((previous) => Math.min(150, previous + 15))}
+                  aria-label="Zoom in"
+                  className="cursor-pointer rounded px-2.5 py-1 text-xs font-semibold transition-all hover:bg-white"
+                >
+                  +
+                </button>
+              </Tooltip>
+            </div>
           )}
-          </div>
         </div>
 
-        <div className="mt-4 p-4.5 bg-black/5 rounded-2xl border border-black/5 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-on-surface">
-            <Info className="text-primary w-4 h-4 shrink-0" />
-            <span>Visual Diagram Node Explanations:</span>
-          </div>
-          <p className="text-xs text-on-surface-variant leading-relaxed">
-            Every node is derived from the PRD — one per functional requirement (or user story) in the validated dataset, in document order. Hover over a node to highlight it; the arrows show the processing order from Start to End.
-          </p>
+        <div className="min-h-72 w-full overflow-auto rounded-2xl border border-outline bg-background p-4 custom-scrollbar sm:p-6">
+          {isWaitingForFirstDiagram ? (
+            <div className="flex min-h-72 flex-col items-center justify-center gap-2 text-center">
+              <LoaderCircle className="h-7 w-7 animate-spin text-primary" />
+              <span className="text-sm font-bold text-on-surface">
+                {isLoading ? 'Loading project flowchart…' : 'Generating project flowchart…'}
+              </span>
+              <p className="max-w-sm text-xs text-on-surface-variant">
+                The Architect is building the Mermaid flow from this project's requirements and user stories.
+              </p>
+            </div>
+          ) : renderError ? (
+            <div className="flex min-h-72 flex-col items-center justify-center gap-2 text-center">
+              <AlertTriangle className="h-7 w-7 text-red-600" />
+              <span className="text-sm font-bold text-on-surface">Flowchart could not be rendered</span>
+              <p className="max-w-lg text-xs text-on-surface-variant">
+                The saved Mermaid source is invalid. Generate the PRD again to refresh the project flowchart.
+              </p>
+              <p className="max-w-lg break-words font-mono text-[10px] text-red-700">{renderError}</p>
+            </div>
+          ) : source ? (
+            <MermaidDiagram source={source} zoom={diagramZoom} onError={handleRenderError} />
+          ) : (
+            <div className="flex min-h-72 flex-col items-center justify-center gap-2 text-center">
+              <FileCode className="h-7 w-7 text-primary/40" />
+              <span className="text-sm font-bold text-on-surface">No flowchart generated yet</span>
+              <p className="max-w-sm text-xs text-on-surface-variant">
+                Add and validate requirements, then use Generate PRD. The Architect will create and save a Mermaid flowchart for this project.
+              </p>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Raw Mermaid flowchart source panel — the source mirrors the PRD:
-          the backend-generated flowchart when present, otherwise the
-          flowchart generated from the PRD dataset; "No info yet" until the
-          PRD data exists. */}
-      <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm">
-        <div className="flex items-center gap-2 mb-3">
-          <FileCode className="text-primary w-4.5 h-4.5" />
-          <span className="font-bold text-sm text-on-surface">Raw Mermaid.js Flowchart Source</span>
-          <span className="text-[10px] font-mono font-bold bg-primary/10 text-primary border border-primary/20 px-2 py-0.5 rounded uppercase">flowchart TD</span>
-        </div>
-        {hasPrdInfo ? (
-          <pre className="p-4 bg-slate-900 text-slate-100 font-mono text-xs rounded-2xl overflow-x-auto border border-slate-800">
-            <code>{displayedDiagram}</code>
+      {source && (
+        <details className="rounded-3xl border border-outline bg-white p-6 shadow-sm">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-bold text-on-surface">
+            <FileCode className="h-4.5 w-4.5 text-primary" />
+            Mermaid source
+            <span className="rounded border border-primary/20 bg-primary/10 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-primary">
+              Saved with project
+            </span>
+          </summary>
+          <pre className="mt-3 overflow-x-auto rounded-2xl border border-slate-800 bg-slate-900 p-4 font-mono text-xs text-slate-100">
+            <code>{source}</code>
           </pre>
-        ) : (
-          <div className="p-10 bg-black/5 border border-dashed border-outline rounded-2xl flex flex-col items-center justify-center gap-1.5 text-center">
-            <FileCode className="w-6 h-6 text-on-surface-variant/50" />
-            <span className="text-sm font-bold text-on-surface">No info yet</span>
-            <p className="text-xs text-on-surface-variant italic max-w-sm">
-              The flowchart is derived from the PRD — validate requirements and generate the PRD first.
-            </p>
-          </div>
-        )}
-      </div>
-
+        </details>
+      )}
     </div>
   );
 }

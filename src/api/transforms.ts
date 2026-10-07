@@ -75,6 +75,7 @@ export function toRequirementItem(r: RequirementPayload): RequirementItem {
     is_locked: r.is_locked || false,
     locked_by: r.locked_by,
     locked_at: r.locked_at,
+    lock_reason: r.lock_reason,
   };
 }
 
@@ -263,4 +264,3 @@ export function toVersionHistoryList(versions: PrdVersionPayload[] | null | unde
     .map(toVersionHistory)
     .sort((a, b) => b.version - a.version);
 }
-

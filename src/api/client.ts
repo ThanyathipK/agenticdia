@@ -167,13 +167,16 @@ export const api = {
     projectId: string,
     sectionKey: string,
     content: string,
-    options?: { review_status?: string; change_summary?: string; updated_by?: string; base_content?: string }
+    options?: { review_status?: string; change_summary?: string; updated_by?: string; base_content?: string; ai_generatable?: boolean }
   ) =>
     patch<PrdSectionUpdateResponse>(`/api/project/${projectId}/prd/sections/${sectionKey}`, {
       content,
       base_content: options?.base_content,
       review_status: options?.review_status,
       change_summary: options?.change_summary,
+      // Omitted => backend default False => the manual save makes the part
+      // HUMAN-OWNED so "Generate PRD" preserves it. Pass true to hand it back.
+      ai_generatable: options?.ai_generatable,
       updated_by: options?.updated_by ?? 'user',
     }),
   // PRD-SECTION 1.4 — per-part lock (PRD-SECTION 2.4); `lockedBy` is the lock owner label.
@@ -285,10 +288,10 @@ export const api = {
     get<ImpactAnalysisPayload>(`/api/pending-actions/${actionId}/impact`, { project_id: projectId }),
 
   // ---- Artifact locks -----------------------------------------------------
-  lockArtifact: (projectId: string, artifactType: string, artifactId: string, lockedBy = 'user') =>
+  lockArtifact: (projectId: string, artifactType: string, artifactId: string, lockedBy = 'user', lockReason?: string) =>
     post<ArtifactLockResponse>(
       `/api/project/${projectId}/artifacts/${artifactType}/${artifactId}/lock`,
-      { locked_by: lockedBy }
+      { locked_by: lockedBy, lock_reason: lockReason }
     ),
   unlockArtifact: (projectId: string, artifactType: string, artifactId: string, lockedBy = 'user') =>
     post<ArtifactLockResponse>(

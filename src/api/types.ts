@@ -66,6 +66,7 @@ export interface UserStoryPayload {
   is_locked?: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
+  lock_reason?: string | null;
 }
 
 // ----------------------------------------------------------------------------
@@ -83,6 +84,7 @@ export interface RequirementPayload {
   is_locked?: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
+  lock_reason?: string | null;
   user_stories?: UserStoryPayload[];
 }
 
@@ -299,6 +301,7 @@ export interface ArtifactLockMetadata {
   is_locked: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
+  lock_reason?: string | null;
 }
 
 export interface ArtifactLockResponse {
@@ -642,4 +645,3 @@ export const AUTH_ROLES = [
   'Developer',
   'QA',
 ] as const;
-

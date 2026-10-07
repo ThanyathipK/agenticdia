@@ -29,6 +29,7 @@ from app.repositories import (
     ConversationMessageRepository,
     PendingActionRepository,
     ClarificationQuestionRepository,
+    DocumentRepository,
 )
 from app.schemas import (
     ProcessRequirementsRequest,
@@ -532,6 +533,7 @@ async def post_process_requirements(
             f"[CANCELLED] Generation for project {request.project_id} was stopped by the user; "
             "skipping all result persistence."
         )
+        await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
@@ -906,6 +908,15 @@ async def _process_requirements_pipeline(
         "requirement_state": req_state,
         "detected_intent": detected_intent,
         "intent_confidence": intent_confidence,
+        # Validate always uses the server-side persisted knowledge base. The
+        # browser sends only document metadata, so loading the canonical text
+        # here prevents stale/tampered client content and makes a document-only
+        # project auditable without requiring extraction first.
+        "knowledge_documents": (
+            await DocumentRepository.get_validation_context(request.project_id, session)
+            if request.target_agent == "auditor"
+            else []
+        ),
         "db_session": session  # Pass the active session to workflow nodes
     }
 
@@ -1032,6 +1043,10 @@ async def _process_requirements_pipeline(
             "pending_merge": True,
             "pending_action_id": pending_action_id
         }
+    except HTTPException:
+        # Preserve intentional 4xx responses (notably validation-context 413s)
+        # instead of disguising them as a generic LangGraph 500.
+        raise
     except LMStudioUnavailableError as e:
         logger.error(f"LM Studio unreachable during workflow for project {request.project_id}: {e}")
         raise HTTPException(

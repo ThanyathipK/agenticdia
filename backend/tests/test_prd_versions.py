@@ -8,6 +8,9 @@ Covers:
     document is byte-identical, e.g. every changed section was locked),
     stores change_type / change_summary / changed_sections, and keeps
     requirement_states.version_number in lock-step
+  - resolve_document_semver: the pre-record stamp resolves EXACTLY the semver
+    record_prd_version will store, so the version shown on the document
+    (cover + Version History) equals prd_versions.semver
   - diff_versions: per-section line diff between two stored versions
 
 Run from the ``backend`` directory::
@@ -36,6 +39,7 @@ from app.version_service import (
     compute_section_changes,
     diff_versions,
     record_prd_version,
+    resolve_document_semver,
 )
 
 
@@ -331,3 +335,59 @@ class TestSemVer:
         assert [(r.version_number, r.semver) for r in rows] == [
             (1, "1.0.0"), (2, "1.1.0"), (3, "1.1.1"),
         ]
+
+
+# =====================================================================
+# resolve_document_semver — pre-record stamp (document shows the ledger semver)
+# =====================================================================
+@pytest.mark.asyncio
+async def test_resolve_document_semver_matches_record(db_session):
+    """resolve_document_semver must return EXACTLY the semver
+    record_prd_version assigns to the next snapshot — the property that makes
+    the label stamped on the document provably equal to prd_versions.semver
+    (and never a fabricated V{n}.0)."""
+    from app.prd_filler import PENDING_VERSION_LABEL, stamp_version_label
+
+    session, project_id = db_session
+
+    # v1 already in the ledger.
+    first = await record_prd_version(
+        project_id, session, generated_prd=_doc_v1(), change_type="ai",
+    )
+    assert first["semver"] == "1.0.0"
+
+    # The next document as fill_template_body hands it over: a content change
+    # PLUS the pending version marker in the Version History row.
+    doc_v2 = (
+        _doc_v1()
+        .replace("V1.0|2026-09-01", f"{PENDING_VERSION_LABEL}|2026-09-01")
+        .replace("1. Slow refunds", "1. Real-time settlement")
+    )
+    resolved = await resolve_document_semver(
+        project_id, session, document=doc_v2, change_type="ai",
+    )
+    assert resolved == "1.1.0"  # AI content update → MINOR
+
+    stamped = stamp_version_label(doc_v2, resolved)
+    assert PENDING_VERSION_LABEL not in stamped
+    assert "1.1.0" in stamped
+
+    second = await record_prd_version(
+        project_id, session, generated_prd=stamped, change_type="ai",
+    )
+    assert second["semver"] == resolved  # doc label == ledger row, provably
+
+
+@pytest.mark.asyncio
+async def test_resolve_document_semver_first_snapshot(db_session):
+    """With an empty ledger the pre-resolution returns the first snapshot's
+    1.0.0 — exactly what record_prd_version will store."""
+    session, project_id = db_session
+    resolved = await resolve_document_semver(
+        project_id, session, document=_doc_v1(), change_type="ai",
+    )
+    assert resolved == "1.0.0"
+    row = await record_prd_version(
+        project_id, session, generated_prd=_doc_v1(), change_type="ai",
+    )
+    assert row["semver"] == resolved

@@ -22,6 +22,7 @@ Each compile runs in a fresh temporary working directory with a strict timeout,
 so a malformed LLM-generated fragment does not wedge the server and never
 touches the application source tree.
 """
+import functools
 import logging
 import os
 import re
@@ -72,6 +73,52 @@ _VENDORED_FONTS: tuple = tuple(
     for p in sorted((_BACKEND_DIR / ".tools" / "fonts").glob("*.tt[fc]"))
     if p.is_file()
 )
+
+# The required reference PDF uses Aptos. Microsoft Office on macOS keeps its
+# fonts inside the Word application bundle rather than the normal system font
+# directories, so neither headless LibreOffice nor Tectonic discovers them on
+# its own. We do not redistribute these proprietary files; when Word is
+# installed, stage its local regular/bold faces into each isolated conversion
+# directory. DOCX files already declare Aptos and will use the same family when
+# opened in Word even on hosts where these paths do not exist.
+_APTOS_FONT_CANDIDATES = {
+    "regular": (
+        Path("/Applications/Microsoft Word.app/Contents/Resources/DFonts/Aptos.ttf"),
+        Path("/Library/Fonts/Aptos.ttf"),
+        Path.home() / "Library" / "Fonts" / "Aptos.ttf",
+    ),
+    "bold": (
+        Path("/Applications/Microsoft Word.app/Contents/Resources/DFonts/Aptos-Bold.ttf"),
+        Path("/Library/Fonts/Aptos-Bold.ttf"),
+        Path.home() / "Library" / "Fonts" / "Aptos-Bold.ttf",
+    ),
+}
+
+
+def _aptos_font_files() -> dict[str, Path]:
+    """Return locally installed Aptos regular/bold files when both exist."""
+    found = {
+        weight: next((path for path in candidates if path.is_file()), None)
+        for weight, candidates in _APTOS_FONT_CANDIDATES.items()
+    }
+    return found if all(found.values()) else {}
+
+
+def _enable_aptos_for_tectonic(document: str) -> str:
+    """Switch the portable Helvetica preamble to staged Aptos font files."""
+    portable = "\\usepackage[T1]{fontenc}\n\\usepackage{helvet}"
+    aptos = r"""\usepackage{fontspec}
+\setmainfont[
+  Path=./,
+  UprightFont=Aptos.ttf,
+  BoldFont=Aptos-Bold.ttf
+]{Aptos}
+\setsansfont[
+  Path=./,
+  UprightFont=Aptos.ttf,
+  BoldFont=Aptos-Bold.ttf
+]{Aptos}"""
+    return document.replace(portable, aptos, 1)
 
 
 def _find_binary(env_name: str, default_candidates: tuple, name: str) -> str:
@@ -186,7 +233,7 @@ _KNOWN_N_LEADING_COMMANDS = frozenset({
     "newtok", "newfont", "newskip", "newread", "newwrite", "newfam",
     "newlanguage", "noindent", "nobreak", "nolinebreak", "nopagebreak", "nonumber",
     "noalign", "noexpand", "nolimits", "nonscript", "nointerlineskip", "nu",
-    "neq", "nabla", "nearrow", "node", "normalfont", "null",
+    "neq", "nabla", "nearrow", "node", "normalfont", "normalsize", "null",
 })
 
 
@@ -420,11 +467,11 @@ def _load_template_preamble_and_footer() -> tuple[str, str]:
 def ensure_full_document(latex_source: str) -> str:
     r"""Return a compilable standalone LaTeX document.
 
-    If the supplied source already declares `\documentclass`, it is used as-is
-    (the generation prompts force the LLM to emit a complete document). For a
-    fragment/body-only string, the official Krungsri Nimble template preamble is
-    prepended (and closing braces appended) so the exported artifact always
-    follows the authoritative PDF-exact layout.
+    The document body is always placed inside the preamble from
+    ``prompts/template-krungsrinimble.tex``.  This is intentional even when a
+    stored/LLM-produced source is already standalone: accepting its preamble
+    would allow page size, margins, fonts, colours, and running furniture to
+    drift away from the required export format.
     """
     src = (latex_source or "").strip()
     if not src:
@@ -446,14 +493,9 @@ def ensure_full_document(latex_source: str) -> str:
     # "! Undefined control sequence \n".
     src = sanitize_generated_latex(src)
 
-    # Defensive: if the model returned a full standalone document despite the
-    # instruction, keep it verbatim - it already carries its own preamble.
-    if "\\documentclass" in src:
-        return src
-
-    # Defensive: a body that still carries \begin{document}/\end{document} but
-    # no preamble must NOT be double-wrapped (that would produce two nested
-    # document environments and fail to compile). Extract its inner body.
+    # A full standalone source may carry formatting invented by the model or
+    # copied from an older template.  Keep only its body so the authoritative
+    # template remains the single source of export formatting.
     begin = "\\begin{document}"
     end = "\\end{document}"
     if begin in src:
@@ -495,7 +537,7 @@ def ensure_full_document(latex_source: str) -> str:
 # preamble (fancyhdr, xcolor, custom column types, ...) is purposefully dropped:
 # page furniture is applied by Word itself and none of those packages are
 # understood by pandoc anyway.
-_PANDOC_SAFE_PREAMBLE = r"""\documentclass[12pt,a4paper]{article}
+_PANDOC_SAFE_PREAMBLE = r"""\documentclass[12pt,letterpaper]{article}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
 \begin{document}
@@ -667,6 +709,7 @@ def preprocess_latex_for_pandoc(latex_body: str) -> str:
     s = _rewrite_command(s, "multicolumn", _unwrap_last)
     s = _rewrite_command(s, "parbox", _unwrap_last)
     s = _rewrite_command(s, "shortstack", _unwrap_shortstack)
+    s = _rewrite_command(s, "coverfont", _unwrap_last)
 
     # Simple labelled fields are used all over the template.
     s = re.sub(r"\\prdlbl\{([^{}]*)\}", r"\\textbf{\1}", s)
@@ -701,6 +744,10 @@ def preprocess_latex_for_pandoc(latex_body: str) -> str:
     # Layout-only space / font glue that pandoc's reader complains about.
     s = re.sub(r"\\(?:vspace|hspace)\*?\s*\{[^{}]*\}", "", s)
     s = re.sub(r"\\fontsize\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\\selectfont", "", s)
+    # Font/layout declarations around the cover text are meaningful to the PDF
+    # renderer but cause pandoc to preserve raw HTML or discard the wrapped
+    # words. The preview supplies its own typography, so retain the text only.
+    s = re.sub(r"\\(?:sffamily|large|normalsize|mdseries|noindent|par)\b", "", s)
     s = re.sub(r"\{\\Large\s*", "", s)
     s = re.sub(r"\{\\bfseries\s*", r"\\textbf{", s)
     s = s.replace(r"\\\[2.2cm]", "").replace(r"\\\[0.4cm]", "").replace(r"\\\[1.8cm]", "")
@@ -847,6 +894,14 @@ def compile_latex_to_pdf(latex_source: str) -> bytes:
     full = ensure_full_document(sanitize_generated_latex(latex_source))
     with tempfile.TemporaryDirectory(prefix="prd-pdf-") as tmp:
         workdir = Path(tmp)
+        # Keep the emergency direct-PDF path typographically identical to the
+        # DOCX/LibreOffice path. Without this, Tectonic used Helvetica while
+        # the downloaded Word document used Aptos.
+        aptos_fonts = _aptos_font_files()
+        if aptos_fonts:
+            shutil.copy2(aptos_fonts["regular"], workdir / "Aptos.ttf")
+            shutil.copy2(aptos_fonts["bold"], workdir / "Aptos-Bold.ttf")
+            full = _enable_aptos_for_tectonic(full)
         src_path = workdir / "prd.tex"
         src_path.write_text(full, encoding="utf-8")
         _run([tectonic_bin(), "prd.tex"], workdir, "PDF")
@@ -884,12 +939,11 @@ def convert_markdown_to_pdf(markdown: str) -> bytes:
 
 
 def convert_latex_to_docx(latex_source: str) -> bytes:
-    """Convert a LaTeX PRD to DOCX bytes via Pandoc.
+    """Convert a LaTeX PRD to DOCX bytes.
 
-    LaTeX sources are first rewritten into the pandoc-compatible subset built by
-    :func:`pandoc_friendly_document` (custom ``L{}`` column types, ``\\shortstack``,
-    ``\\multirow``/``\\multicolumn`` are resolved before pandoc runs), so the DOCX
-    contains real native tables instead of verbose column-spec text.
+    The Krungsri-native renderer preserves template geometry, merged cells,
+    shading, headers, and footers. Pandoc remains the fallback for unexpected
+    input that the native renderer cannot process.
     """
     return convert_to_docx(latex_source)
 
@@ -1009,6 +1063,15 @@ def docx_to_pdf(docx_bytes: bytes) -> bytes:
                 shutil.copy2(font, user_fonts / font.name)
             except OSError:
                 logger.warning("Could not stage vendored font %s for LibreOffice.", font)
+        # Aptos is the Latin face in both the supplied reference PDF and the
+        # native DOCX. LibreOffice cannot discover Office's private DFonts
+        # directory, so explicitly expose the local Word copies to this
+        # conversion profile and prevent a visually different substitution.
+        for font in _aptos_font_files().values():
+            try:
+                shutil.copy2(font, user_fonts / font.name)
+            except OSError:
+                logger.warning("Could not stage Aptos font %s for LibreOffice.", font)
         start = time.time()
         result = subprocess.run(
             [
@@ -1105,6 +1168,11 @@ def _normalize_pandoc_gfm(markdown: str) -> str:
     """Post-process pandoc GFM output: demote headings and inline any leftover
     HTML tables so the frontend renders pure markdown."""
     normalized = _demote_headings(markdown)
+    # The official template centres Contents with \makebox. Pandoc preserves
+    # the section boundary but loses that wrapped title, producing a bare
+    # ``###``. Restore the visible/canonical title before the document is split
+    # into independently editable and lockable sections.
+    normalized = re.sub(r"(?m)^###\s*$", "### Contents", normalized)
 
     def _sub(match: re.Match) -> str:
         converted = _html_table_to_gfm(match.group(0))
@@ -1121,6 +1189,11 @@ def prd_to_markdown(source: str) -> str:
     pandoc-compatible subset and pandoc converts that to clean GFM pipe tables
     (headings demoted to the ``### `` level the section parser expects).
     Markdown input is returned unchanged.
+
+    PERF (project switch): the preview conversion runs on EVERY project open
+    for every LaTeX document, and each run spawns a pandoc subprocess
+    (~0.3-1s). Results are therefore memoized per normalized source body
+    (see ``_prd_to_markdown_cached``) so repeat conversions are free.
     """
 
     src = _strip_code_fence(source).strip()
@@ -1132,6 +1205,18 @@ def prd_to_markdown(source: str) -> str:
     document, kind = pandoc_friendly_document(src)
     if kind != "latex":
         return document
+    return _prd_to_markdown_cached(document)
+
+
+@functools.lru_cache(maxsize=32)
+def _prd_to_markdown_cached(document: str) -> str:
+    """Pandoc LaTeX -> GFM for one pandoc-ready body, memoized.
+
+    Keyed on the full normalized source, so a document that changed is
+    converted again (never serves stale output) while unchanged documents —
+    the common case when switching back and forth between projects — hit the
+    cache. ``maxsize=32`` bounds memory; entries are a few hundred KB at most.
+    """
     with tempfile.TemporaryDirectory(prefix="prd-md-") as tmp:
         workdir = Path(tmp)
         src_path = workdir / "prd.tex"

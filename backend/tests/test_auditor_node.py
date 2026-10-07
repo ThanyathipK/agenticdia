@@ -134,3 +134,57 @@ async def test_auditor_never_fabricates_a_requirement_without_stories(monkeypatc
 
     assert result["requirement_state"]["requirements"] == []
     assert result["requirement_state"]["user_stories"] == []
+
+
+@pytest.mark.asyncio
+async def test_auditor_validates_document_content_without_stories(monkeypatch):
+    """Validate must call the auditor with persisted document text even when
+    the requirement board is still empty; upload alone remains knowledge-only.
+    """
+    _patch(monkeypatch, _board([], []))
+    captured = {}
+
+    class FakeChain:
+        def __or__(self, _other):
+            return self
+
+        async def ainvoke(self, values):
+            captured.update(values)
+            return {
+                "is_valid": False,
+                "passed_checks": [],
+                "failed_checks": ["Idempotency"],
+                "clarification_questions": [
+                    {
+                        "checklist_category": "Idempotency",
+                        "target_user_story_id": "brief.md",
+                        "question_text": "Define the idempotency key.",
+                    }
+                ],
+            }
+
+    fake_chain = FakeChain()
+    monkeypatch.setattr(agents, "PromptTemplate", lambda **_kwargs: fake_chain)
+
+    async def fake_save(**_kwargs):
+        return {}
+
+    monkeypatch.setattr(agents.ConversationMessageRepository, "save_message", fake_save)
+
+    result = await agents.auditor_node({
+        "project_id": "p1",
+        "current_version": 3,
+        "structured_requirements": _legacy_payload([]),
+        "knowledge_documents": [
+            {
+                "document_id": "doc-1",
+                "filename": "brief.md",
+                "content_markdown": "Transfers require maker-checker approval.",
+            }
+        ],
+    })
+
+    prompt_payload = captured["structured_requirements"]
+    assert '"filename": "brief.md"' in prompt_payload
+    assert "maker-checker approval" in prompt_payload
+    assert result["audit_result"]["failed_checks"] == ["Idempotency"]

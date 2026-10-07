@@ -353,6 +353,17 @@ class TestUploadValidation:
         assert listing.status_code == 200
         assert len(listing.json()) == 1
 
+        history = await client.get(f"/api/project/{seeded_project}/conversations")
+        conversion_messages = [
+            item for item in history.json()
+            if item["workflow_state"] == "document_conversion"
+        ]
+        assert [item["intent"] for item in conversion_messages] == [
+            "DOCUMENT_CONVERSION_REQUESTED",
+            "DOCUMENT_CONVERSION_PROCESSED",
+        ]
+        assert "brief.md" in conversion_messages[0]["message"]
+
     @pytest.mark.asyncio
     async def test_scanned_pdf_fails_loudly_needs_ocr(self, seeded_project, client, db_session, monkeypatch):
         """Image-only PDFs surface an explicit needs-OCR failure (OCR out of scope)."""
@@ -380,6 +391,14 @@ class TestUploadValidation:
         body = resp.json()
         assert body["status"] == "failed"
         assert "OCR is out of scope" in body["message"]
+
+        history = await client.get(f"/api/project/{seeded_project}/conversations")
+        conversion_messages = [
+            item for item in history.json()
+            if item["workflow_state"] == "document_conversion"
+        ]
+        assert conversion_messages[-1]["intent"] == "DOCUMENT_CONVERSION_FAILED"
+        assert "OCR is out of scope" in conversion_messages[-1]["message"]
 
         # The failed document cannot be processed into requirements.
         process = await client.post(
@@ -424,6 +443,32 @@ def fake_gatherer(monkeypatch):
 
 
 class TestDraftOnlyExtraction:
+
+    @pytest.mark.asyncio
+    async def test_failed_extraction_restores_knowledge_only_status(
+        self, seeded_project, client, db_session, monkeypatch
+    ):
+        """An LLM failure creates no draft and must not leave a false pending chip."""
+        async def fail_extract(*_args, **_kwargs):
+            raise RuntimeError("model offline")
+
+        import app.routes.documents as documents_module
+        monkeypatch.setattr(documents_module, "extract_requirements_from_text", fail_extract)
+
+        doc = await _upload_doc(client, seeded_project)
+        response = await client.post(
+            f"/api/project/{seeded_project}/documents/{doc['id']}/process"
+        )
+
+        assert response.status_code == status.HTTP_502_BAD_GATEWAY
+        assert "No changes were written" in response.json()["detail"]
+        assert await _count(db_session, PendingActionModel) == 0
+        row = (
+            await db_session.execute(
+                select(DocumentModel).where(DocumentModel.id == doc["id"])
+            )
+        ).scalar_one()
+        assert row.extraction_status == "not_extracted"
 
     @pytest.mark.asyncio
     async def test_process_creates_draft_only_and_confirm_applies_once(
@@ -552,6 +597,12 @@ class TestDraftOnlyExtraction:
         assert await _count(db_session, UserStoryModel) == 0
         assert await _count(db_session, AcceptanceCriteriaModel) == 0
         assert await _count(db_session, RequirementStateModel) == 0
+        doc_row = (
+            await db_session.execute(
+                select(DocumentModel).where(DocumentModel.id == doc["id"])
+            )
+        ).scalar_one()
+        assert doc_row.extraction_status == "not_extracted"
 
     @pytest.mark.asyncio
     async def test_full_mode_single_pass_when_under_budget(

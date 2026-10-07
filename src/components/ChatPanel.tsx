@@ -388,7 +388,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
           <button
             onClick={handleValidateRequirements}
             disabled={agentActionsDisabled}
-            title={agentActionsDisabled ? agentActionHint : 'Run the compliance audit against the current requirements'}
+            title={agentActionsDisabled ? agentActionHint : 'Validate current requirements and knowledge-base document content'}
             className="min-w-[160px] flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CheckCircle2 className="w-3.5 h-3.5 text-primary" />

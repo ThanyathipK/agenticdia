@@ -55,6 +55,14 @@ logger = logging.getLogger("app.routes.projects")
 
 router = APIRouter()
 
+# PERF (project switch) — how many of the NEWEST conversation messages are
+# embedded in the GET /api/project/{id} state response. The chat timeline only
+# needs enough turns to restore the visible conversation; the complete
+# transcript stays available via GET /api/project/{id}/conversations and is
+# still what the LLM context path loads. Raise this if the restored chat should
+# reach further back.
+PROJECT_STATE_HISTORY_LIMIT = 100
+
 
 def _duplicate_project_name_detail(name: str) -> str:
     """User-facing detail message for a duplicate project-name conflict (409)."""
@@ -174,7 +182,7 @@ async def create_project(
     # PROJECT 4.4.1 — Duplicate-name branch (409). NOTE: this check is not
     #                user-scoped, so names are globally unique and the 409 can
     #                disclose another tenant's project name (analysis §9 item 3).
-    if await ProjectRepository.name_exists(payload.name, db):
+    if await ProjectRepository.name_exists(payload.name, db, user_id=UUID(current_user.id)):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=_duplicate_project_name_detail(payload.name),
@@ -234,7 +242,10 @@ async def update_project(
     # project (the project may keep its own name). Same 409 contract as create.
     # PROJECT 5.3.1 — Duplicate-name branch (409) excluding this project, so a
     #                project may keep or re-adopt its own name.
-    if await ProjectRepository.name_exists(updates["name"], db, exclude_project_id=project_id):
+    if await ProjectRepository.name_exists(
+        updates["name"], db, exclude_project_id=project_id,
+        user_id=UUID(current_user.id),
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=_duplicate_project_name_detail(updates["name"]),
@@ -519,7 +530,14 @@ async def get_project_requirement_state(
     #                the SAME request session (one fewer pooled connection); the
     #                result is attached to the response below so the UI restores
     #                the chat transcript in PROJECT 2.4.
-    conv_history = await ConversationMessageRepository.get_conversation_history(project_id, session)
+    # PERF (project switch) — only the NEWEST N messages are embedded: this
+    # response is fetched on every project click and an unbounded transcript is
+    # the single largest field after the PRD itself. The timeline still renders
+    # chronologically; older turns are simply not restored (the dedicated
+    # /conversations endpoint still returns the complete transcript).
+    conv_history = await ConversationMessageRepository.get_conversation_history(
+        project_id, session, limit=PROJECT_STATE_HISTORY_LIMIT
+    )
     if isinstance(state, dict):
         state = dict(state)
         state["conversation_history"] = conv_history
@@ -537,6 +555,7 @@ async def get_project_requirement_state(
 async def get_project_conversations(
     project_id: str,
     current_user: AuthenticatedUser = Depends(require_project_owner),
+    session: AsyncSession = Depends(get_db),
 ) -> List[ConversationMessageResponse]:
     """
     Retrieve the persisted conversation history for a project.
@@ -554,7 +573,7 @@ async def get_project_conversations(
         UUID(project_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
-    return await ConversationMessageRepository.get_conversation_history(project_id)
+    return await ConversationMessageRepository.get_conversation_history(project_id, session=session)
 
 
 # PROJECT 8.2 — Route: PUT /api/project/{project_id} (DIRECT requirement-state write).
@@ -719,7 +738,7 @@ async def post_prd_export_generation(
     # skeleton - every table, merged-cell structure and \newpage marker - is
     # always the untouched official template, so the export is PDF-exact and
     # compiles every time.
-    from app.prd_filler import fill_template_body
+    from app.prd_filler import PENDING_VERSION_LABEL, fill_template_body, stamp_version_label
 
     nested = any(
         isinstance(r, dict) and r.get("user_stories") for r in (requirements or [])
@@ -750,13 +769,34 @@ async def post_prd_export_generation(
         version=version_number,
         data=data,
         version_summary="Initial approved version",
+        # EXPORTED DOCUMENT VERSION = THE LEDGER'S semver: fill with the pending
+        # marker, resolve the semver this snapshot will get (same inputs as
+        # record_prd_version) and stamp it in below, so the cover and the
+        # Version History section show prd_versions.semver — never V{n}.0.
+        version_label=PENDING_VERSION_LABEL,
+    )
+    semver = None
+    try:
+        from app.version_service import resolve_document_semver
+        semver = await resolve_document_semver(
+            str(project_id), db, document=markdown_content, change_type="ai",
+        )
+    except Exception as resolve_err:
+        # FAIL SOFT: an unstamped-pending document must still export — keep the
+        # legacy V{n}.0 label and let the row fall back to the repo default.
+        logger.error(f"[PRD EXPORT] Failed to resolve PRD semver: {resolve_err}", exc_info=True)
+    markdown_content = stamp_version_label(
+        markdown_content, semver or f"V{version_number}.0",
     )
     # Persist the newly generated PRD as an immutable version record
     version_record = None
     try:
         version_record = await PRDVersionRepository.create(str(project_id), {
             "generated_prd": markdown_content,
-            "generated_by": "prd_export_endpoint"
+            "generated_by": "prd_export_endpoint",
+            # The stamped document label and this row carry the SAME semver;
+            # falsy (resolution failed) falls back to the repo default "1.0.0".
+            "semver": semver,
         }, db)
         logger.info(f"[PRD EXPORT] Created PRD version {version_record['version_number']} for project {project_id}.")
     except Exception as version_err:
@@ -790,10 +830,9 @@ async def post_prd_export_generation(
 # template-krungsrinimble.tex template, so both file exports are built from
 # THAT LaTeX server-side:
 #   DOCX -> native python-docx renderer (Pandoc fallback)
-#   PDF  -> the SAME Word document, rendered by headless LibreOffice
-#           (Tectonic/LaTeX fallback) so the two downloads always match -
-#           the TeX engine silently drops Thai glyphs, the Word renderer
-#           does not.
+#   PDF  -> render the template-faithful DOCX through LibreOffice, with direct
+#           LaTeX compilation as a fallback when LibreOffice is unavailable.
+# Legacy Markdown documents are first filled into the same official template.
 # The browser never parses the LaTeX as markdown again.
 
 
@@ -857,6 +896,153 @@ async def _latest_stored_prd_source(project_id: str, db: AsyncSession) -> str:
     return ((ledger or {}).get("generated_prd") or "").strip()
 
 
+def _markdown_export_narrative(source: str) -> Dict[str, Any]:
+    """Recover useful prose from a legacy Markdown PRD for template fields.
+
+    Older projects pre-date the LaTeX template and therefore only have a
+    Markdown snapshot.  Exporting that snapshot with Pandoc reproduces the old
+    generic layout.  We instead retain its prose while placing it in the
+    authoritative Krungsri template.
+    """
+    sections: Dict[str, List[str]] = {}
+    current = ""
+    title = ""
+    for raw_line in (source or "").splitlines():
+        heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*$", raw_line)
+        if heading:
+            label = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", heading.group(2)).strip()
+            if len(heading.group(1)) == 1 and not title:
+                title = re.sub(r"^PRD\s*:\s*", "", label, flags=re.I).strip()
+            current = label.lower()
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(raw_line)
+
+    def prose(*names: str) -> str:
+        for name in names:
+            for heading, lines in sections.items():
+                if name in heading:
+                    cleaned = []
+                    for line in lines:
+                        value = line.strip()
+                        if not value or value.startswith("|") or re.fullmatch(r"[-:| ]+", value):
+                            continue
+                        value = re.sub(r"^[-*+]\s+", "", value)
+                        value = re.sub(r"^\d+[.)]\s+", "", value)
+                        cleaned.append(value)
+                    if cleaned:
+                        return " ".join(cleaned)
+        return ""
+
+    summary = prose("executive summary", "introduction", "overview")
+    if not summary:
+        summary = prose(*tuple(sections.keys()))
+    return {
+        "epic_name": title,
+        "problem_statement": prose("problem statement", "problem"),
+        "business_goals": prose("business objectives", "business goals", "objectives"),
+        "narrative": {
+            "exec_summary": summary,
+            "expected_benefit": prose("expected benefit", "benefits"),
+            "success_metrics": prose("success metrics", "metrics"),
+            "non_functional": prose("non-functional", "non functional"),
+            "tps_volume": prose("tps", "customer volume"),
+            "growth": prose("growth"),
+            "launch_plan": prose("launch", "rollout"),
+            "open_questions": prose("open questions", "risks"),
+            "assumptions": prose("assumptions"),
+        },
+    }
+
+
+async def _fill_official_export_template(
+    project_id: str,
+    project: Dict[str, Any],
+    markdown_source: str,
+    payload: LatexExportPayload,
+    db: AsyncSession,
+) -> str:
+    """Put project data and legacy prose into the official template body."""
+    from app.prd_filler import fill_template_body
+
+    req_state = await RequirementStateRepository.get_by_project_id(project_id, db) or {}
+    requirements = req_state.get("requirements") or []
+    user_stories = req_state.get("user_stories") or []
+    nested = any(
+        isinstance(requirement, dict) and requirement.get("user_stories")
+        for requirement in requirements
+    )
+    all_stories = (
+        [
+            story
+            for requirement in requirements
+            if isinstance(requirement, dict)
+            for story in (requirement.get("user_stories") or [])
+        ]
+        if nested else user_stories
+    )
+
+    recovered = _markdown_export_narrative(markdown_source)
+    goals = req_state.get("business_goals") or []
+    if not goals and recovered["business_goals"]:
+        goals = [recovered["business_goals"]]
+    problem_statement = recovered["problem_statement"]
+
+    version_number = req_state.get("version_number") or payload.version or 1
+    try:
+        version_number = int(version_number)
+    except (TypeError, ValueError):
+        version_number = 1
+    versions = await PRDVersionRepository.get_by_project(project_id, db)
+    latest_version = versions[0] if versions else None
+    version_label = ((latest_version or {}).get("semver") or "").strip() or f"V{version_number}.0"
+
+    # Rebuild the same complete Version History shown by the preview. The
+    # newest ledger row is the current export row; all older rows are supplied
+    # as history and the filler writes one concise sentence per version.
+    previous_version_history = "\n".join(
+        f"- v{version.get('semver') or version.get('version_number')} "
+        f"({version.get('created_at') or ''}, {version.get('generated_by') or 'System'}): "
+        f"{version.get('change_summary') or 'PRD updated.'}"
+        for version in versions[1:]
+    )
+    current_version_summary = (
+        (latest_version or {}).get("change_summary")
+        or ("Initial PRD created." if not versions else "PRD updated with the latest requirements.")
+    )
+
+    epic_name = recovered["epic_name"]
+    if requirements and isinstance(requirements[0], dict):
+        epic_name = requirements[0].get("title") or epic_name
+    epic_name = epic_name or str(project.get("name") or "")
+
+    data = {
+        "epic_name": epic_name,
+        "business_goals": goals,
+        "actors": req_state.get("actors") or [],
+        "requirements": requirements if nested else [],
+        "user_stories": [] if nested else user_stories,
+        "acceptance_criteria": [] if nested else (req_state.get("acceptance_criteria") or []),
+        "scope_in": [
+            story.get("story_title") or story.get("i_want_to") or ""
+            for story in all_stories if isinstance(story, dict)
+        ],
+        "problem_statement": [problem_statement] if problem_statement else [],
+    }
+    narrative = {key: value for key, value in recovered["narrative"].items() if value}
+    return fill_template_body(
+        project_id=project_id,
+        project_name=str(project.get("name") or payload.project_name or ""),
+        version=version_number,
+        data=data,
+        narrative=narrative,
+        version_summary=current_version_summary,
+        version_history=previous_version_history,
+        version_label=version_label,
+    )
+
+
 async def _export_prd_bytes(
     project_id: str,
     payload: LatexExportPayload,
@@ -891,52 +1077,40 @@ async def _export_prd_bytes(
             detail="No PRD content was supplied to export.",
         )
 
-    # Exporting BEFORE the first PRD has been generated: the frontend store
-    # still holds the blank Markdown skeleton served by GET /api/prd/template
-    # (preloaded into prdMarkdown on mount). Substitute the OFFICIAL Krungsri
-    # Nimble LaTeX template so the downloaded file is the real branded blank
-    # PRD instead of a plain-GFM rendering of the skeleton (or, before the
-    # classification fix, a 502 compile failure).
-    if source == load_prd_template().strip():
-        source = load_prd_latex_template()
+    # Legacy and on-screen PRDs are Markdown.  Sending them directly to Pandoc
+    # was the reason exports continued to use the old generic formatting even
+    # after template-krungsrinimble.tex was updated.  Rebuild those snapshots
+    # into the official template first, preserving their prose and filling the
+    # structured requirements from the database.  Newer stored LaTeX documents
+    # are already template-shaped and remain untouched.
+    if is_markdown_prd(source):
+        source = await _fill_official_export_template(
+            project_id, project, source, payload, db,
+        )
+    is_markdown = False
 
-    # The PRD store holds LaTeX (Krungsri .tex template) for documents generated
-    # after the LaTeX switch, and plain GFM Markdown for older ones. Both are
-    # exportable: LaTeX goes through the native DOCX renderer (PDF: rendered
-    # from that DOCX by LibreOffice) and Markdown through Pandoc's GFM readers.
-    is_markdown = is_markdown_prd(source)
+    def _pdf_export(src: str, markdown_reader: bool) -> bytes:
+        """Render PDF from the same reference-shaped document as DOCX.
 
-    # PDF exports render the SAME Word document the DOCX export produces, so
-    # both downloads always match. This matters because the TeX pipeline drops
-    # every Thai glyph (its fonts have no Thai coverage) and fails hard on LLM
-    # LaTeX mistakes, while the Word renderer handles full Unicode and
-    # degrades gracefully. Hosts without LibreOffice keep the historical TeX
-    # PDF pipelines unchanged.
-    soffice_ok: Optional[bool] = None
-
-    def _soffice_reachable() -> bool:
-        nonlocal soffice_ok
-        if soffice_ok is None:
-            soffice_ok = soffice_available()
-        return soffice_ok
-
-    def _pdf_via_docx(src: str, markdown_reader: bool) -> bytes:
-        """PDF via the Word pipeline, with the TeX pipelines as fallback."""
-        if _soffice_reachable():
+        The supplied reference PDF originated from a Word-style layout (Aptos,
+        US Letter and nested grids), so LibreOffice rendering of the native
+        DOCX is the closest match. Direct LaTeX remains a reliable fallback.
+        """
+        if soffice_available():
             build = convert_markdown_to_docx if markdown_reader else convert_latex_to_docx
             try:
                 return docx_to_pdf(build(src))
             except RuntimeError as soffice_err:
                 logger.warning(
                     "DOCX->PDF conversion failed for project %s (%s); "
-                    "retrying via the TeX PDF pipeline.",
+                    "falling back to direct PDF rendering.",
                     project_id, soffice_err,
                 )
         return convert_markdown_to_pdf(src) if markdown_reader else compile_latex_to_pdf(src)
 
     try:
         if fmt == "pdf":
-            data = await asyncio.to_thread(_pdf_via_docx, source, is_markdown)
+            data = await asyncio.to_thread(_pdf_export, source, is_markdown)
         elif is_markdown:
             data = await asyncio.to_thread(convert_markdown_to_docx, source)
         else:
@@ -953,7 +1127,7 @@ async def _export_prd_bytes(
                 project_id, fmt, compile_err,
             )
             if fmt == "pdf":
-                retry_fn = lambda: _pdf_via_docx(source, True)  # noqa: E731
+                retry_fn = lambda: _pdf_export(source, True)  # noqa: E731
             else:
                 retry_fn = convert_markdown_to_docx
             try:
@@ -998,7 +1172,10 @@ async def _export_prd_bytes(
     return Response(
         content=data,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{stem}.{fmt}"',
+            "X-PRD-Template": "krungsrinimble-reference-v2",
+        },
     )
 
 
@@ -1010,7 +1187,8 @@ async def export_prd_pdf(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """
-    Compiles the supplied LaTeX PRD into a downloadable PDF via Tectonic.
+    Renders the supplied PRD into a downloadable PDF using the same native
+    Word layout as DOCX (direct LaTeX compilation is the fallback).
 
     The PRD source follows prompts/template-krungsrinimble.tex - this endpoint
     renders THAT LaTeX, it does not re-parse Markdown.
@@ -1033,7 +1211,8 @@ async def export_prd_docx(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """
-    Converts the supplied LaTeX PRD into a downloadable Word document via Pandoc.
+    Converts the supplied LaTeX PRD into a downloadable Word document with the
+    native Krungsri template renderer (Pandoc is a defensive fallback).
 
     Returns:
         Response: .docx attachment converted from the Krungsri Nimble LaTeX.
@@ -1119,7 +1298,14 @@ async def get_prd_versions(
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
     versions = await PRDVersionRepository.get_by_project(project_id, session)
-    return versions
+    # PERF (project switch) — the timeline only needs METADATA: semver, author,
+    # change summary and the per-section change records. Serializing every
+    # snapshot's full PRD body made this list the largest payload in the app
+    # (N versions x whole document), downloaded on EVERY project open even
+    # though no consumer reads it (toVersionHistory ignores generated_prd).
+    # Content stays reachable through the dedicated single-version endpoints
+    # (VERSION 2.3/2.4) and the diff endpoint (VERSION 2.2).
+    return [{**v, "generated_prd": ""} for v in versions]
 
 
 # VERSION 2.2 — READ: per-section line diff for one version (VERSION 1.2).

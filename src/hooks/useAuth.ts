@@ -227,6 +227,7 @@ export function useAuth(): UseAuthResult {
       const signInError = await login(email, password);
       if (signInError) {
         notify('Account created — please sign in.', 'success');
+        return signInError;
       }
       return null;
     },

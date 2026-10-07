@@ -59,7 +59,7 @@ import { highlightMatch } from '../utils/highlight';
 const TAB_ITEMS: ReadonlyArray<{ id: WorkspaceTab; label: string; icon: typeof FileText }> = [
   { id: 'prd', label: 'PRD Documents', icon: FileText },
   { id: 'trace', label: 'Requirements', icon: GitBranch },
-  { id: 'flows', label: 'Flows', icon: Network },
+  { id: 'flows', label: 'Diagram', icon: Network },
   { id: 'history', label: 'Versions', icon: Clock },
 ];
 
@@ -899,6 +899,7 @@ export default function Dashboard() {
                       isLockableRequirementId(lockedRequirements[req.requirement_code]?.artifact_id);
                     const lockedBy = req.locked_by || lockedRequirements[req.requirement_code]?.locked_by || 'user';
                     const lockedAt = req.locked_at || lockedRequirements[req.requirement_code]?.locked_at || '';
+                    const lockReason = req.lock_reason || lockedRequirements[req.requirement_code]?.lock_reason || '';
                     const storyCount = req.user_stories?.length ?? storiesByRequirement[req.requirement_code] ?? 0;
                     const isArchived = req.status?.toLowerCase() === 'archived';
                     return (
@@ -922,6 +923,7 @@ export default function Dashboard() {
                               <p className="text-[10px] text-amber-700 font-mono mt-0.5">
                                 🔒 Locked by {lockedBy}
                                 {lockedAt ? ` at ${new Date(lockedAt).toLocaleString()}` : ''}
+                                {lockReason ? ` — ${lockReason}` : ''}
                               </p>
                             )}
                           </div>

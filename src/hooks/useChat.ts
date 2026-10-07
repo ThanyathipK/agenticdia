@@ -145,7 +145,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     const history = store.versionHistory || [];
     if (history.length === 0) return undefined;
     return history
-      .map(h => `- v${h.version} (${h.timestamp}, ${h.author}): ${h.description}`)
+      .map(h => `- v${h.semVersion} (${h.timestamp}, ${h.author}): ${h.description}`)
       .join('\n');
   };
 
@@ -162,7 +162,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setMessages(prev => [...prev, {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        content: '⚠️ **No Project Selected:** Please select or create a project before interacting.',
+        content: '**No Project Selected:** Please select or create a project before interacting.',
         timestamp: nowTime(),
       }]);
       return;
@@ -254,7 +254,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           store.setMessages(prev => [...prev, {
             id: `merge-preview-${Date.now()}`,
             role: 'assistant',
-            content: `📋 **Merge Preview Ready**\nI have analyzed your input and prepared the merged requirements. Please review the changes below and **Save** or **Cancel**.\n\n> *"${inputMsg}"*`,
+            content: `**Merge Preview Ready**\nI have analyzed your input and prepared the merged requirements. Please review the changes below and **Save** or **Cancel**.\n\n> *"${inputMsg}"*`,
             timestamp: nowTime(),
           }]);
         } else if (receivedReqs && receivedReqs.epic_name) {
@@ -279,7 +279,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           store.setMessages(prev => [...prev, {
             id: `gatherer-passed-${Date.now()}`,
             role: 'assistant',
-            content: '📥 **Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.',
+            content: '**Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.',
             timestamp: nowTime(),
           }]);
         }
@@ -289,7 +289,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setMessages(prev => [...prev, {
           id: `stopped-${Date.now()}`,
           role: 'assistant',
-          content: '⏹️ **Stopped.**\nYou cancelled this request — the server-side run was terminated and no requirement changes were applied.',
+          content: '**Stopped.**\nYou cancelled this request — the server-side run was terminated and no requirement changes were applied.',
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Request stopped by user.');
@@ -346,6 +346,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setSyncStatus('Nothing to validate yet — add requirements or upload a knowledge document.');
       return;
     }
+    // prepare the UI for the audit run / clear any prior audit state
     const projectId = deps.projectId;
     store.setIsLoading(true);
     store.setIsProcessing(true);
@@ -396,7 +397,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       if (isValid === false) {
         const questions = receivedAudit.clarification_questions || [];
         const questionTexts = questions.map(q => `• ${q.question_text}`).join('\n');
-        const warningContent = `⚠️ **Compliance Audit Alert (Auditor Agent):**\nTechnical gaps or missing security constraints were detected in your specifications against our checklist.\n\n**Pending Clarifications:**\n${questionTexts || 'None specified'}`;
+        const warningContent = ` **Compliance Audit Alert (Auditor Agent):**\nTechnical gaps or missing security constraints were detected in your specifications against our checklist.\n\n**Pending Clarifications:**\n${questionTexts || 'None specified'}`;
 
         store.setMessages(prev => [...prev, {
           id: `audit-failed-${Date.now()}`,
@@ -412,7 +413,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         // AUDIT 5.4 — Success branch: a positive verdict bubble (no clarification
         //            form). The audit is still only STAGED — the user's Save in the
         //            ConfirmationPanel is what persists the verdict (CONFIRM 3.3).
-        const successContent = `✅ **Compliance Audit Passed!**\nRequirements have successfully validated against all retail banking security and regulatory checks. Ready for PRD compilation.`;
+        const successContent = `**Compliance Audit Passed!**\nRequirements have successfully validated against all retail banking security and regulatory checks. Ready for PRD compilation.`;
         store.setMessages(prev => [...prev, {
           id: `audit-passed-${Date.now()}`,
           role: 'assistant',
@@ -437,7 +438,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setMessages(prev => [...prev, {
           id: `stopped-${Date.now()}`,
           role: 'assistant',
-          content: '⏹️ **Stopped.**\nYou cancelled this request — the audit was terminated and no validation verdict was applied.',
+          content: '⏹**Stopped.**\nYou cancelled this request — the audit was terminated and no validation verdict was applied.',
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Validation stopped by user.');
@@ -467,7 +468,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setMessages(prev => [...prev, {
         id: `audit-error-${Date.now()}`,
         role: 'assistant',
-        content: `⚠️ **Audit Failed — No Validation Was Saved.**\n\nThe audit could not complete against the requirement engine (${(err as Error)?.message || err}).\n\nNo validation verdict was applied and no requirements were changed.`,
+        content: `**Audit Failed — No Validation Was Saved.**\n\nThe audit could not complete against the requirement engine (${(err as Error)?.message || err}).\n\nNo validation verdict was applied and no requirements were changed.`,
         timestamp: nowTime(),
       }]);
       store.setSyncStatus('Audit failed. No changes were saved.');

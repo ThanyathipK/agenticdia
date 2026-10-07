@@ -60,8 +60,8 @@ export function parsePRDToSections(markdown: unknown): PRDSection[] {
     // "### 1. Business & Strategic Overview"), so treat BOTH as section
     // boundaries — otherwise the template's front-matter tables collapse into
     // one giant undifferentiated block.
-    const isH3Boundary = trimmed.startsWith('### ');
-    if (trimmed.startsWith('## ') || isH3Boundary) {
+    const headingBoundary = trimmed.match(/^(#{2,3})(?:\s+(.*)|$)/);
+    if (headingBoundary) {
       // Save previous section if it has content
       sections.push({
         id: currentSectionId,
@@ -70,7 +70,12 @@ export function parsePRDToSections(markdown: unknown): PRDSection[] {
       });
       
       // Start new section
-      const title = trimmed.replace(/^#{2,3}\s+/, '').trim();
+      // Pandoc drops the text from the template's centred
+      // `\section*{\makebox[...,]{Contents}}` heading and emits a bare `###`.
+      // Keep that derived page as the canonical, independently lockable
+      // Contents section instead of creating an anonymous `section` part.
+      const parsedTitle = headingBoundary[2]?.trim() ?? '';
+      const title = parsedTitle || 'Contents';
       currentSectionTitle = title;
       
       // Determine ID from title
@@ -147,4 +152,3 @@ export function formatUserStoriesToMarkdown(userStories: UserStory[]): string {
   
   return md;
 }
-

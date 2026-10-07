@@ -347,10 +347,16 @@ class RequirementStateRepository:
                 epic_name_val = updates.get("project_name", "Default Epic")
 
             # Save or update active Epic in epics table
-            if epic_name_val:
+            active_epic = await EpicRepository.get_active_by_project(str(project_id), session)
+            # AI/document merges preserve a locked epic instead of failing the
+            # whole otherwise-valid merge. Direct repository update/delete
+            # operations still reject with ArtifactLockError.
+            if active_epic and active_epic.get("is_locked"):
+                epic_rec = active_epic
+                logger.warning("[LOCK ENFORCEMENT] Preserving locked epic %s", epic_rec["id"])
+            elif epic_name_val:
                 epic_rec = await EpicRepository.save_or_update_epic(str(project_id), epic_name_val, session, version=version_num)
             else:
-                active_epic = await EpicRepository.get_active_by_project(str(project_id), session)
                 epic_rec = active_epic or await EpicRepository.save_or_update_epic(str(project_id), "Untitled Epic", session, version=version_num)
 
             epic_id_uuid = uuid.UUID(epic_rec["id"])
@@ -542,7 +548,8 @@ class RequirementStateRepository:
                     for i, text_val in enumerate(incoming_ac_texts):
                         for db_ac in db_ac_list:
                             if db_ac.id not in matched_db_ac and db_ac.status == "active" and db_ac.criteria_text == text_val:
-                                db_ac.change_type = "unchanged"
+                                if not db_ac.is_locked:
+                                    db_ac.change_type = "unchanged"
                                 matched_db_ac.add(db_ac.id)
                                 matched_incoming_indices.add(i)
                                 break
@@ -551,6 +558,8 @@ class RequirementStateRepository:
                         if i in matched_incoming_indices:
                             continue
                         for db_ac in db_ac_list:
+                            if db_ac.is_locked:
+                                continue
                             if db_ac.id not in matched_db_ac and db_ac.status == "archived" and db_ac.criteria_text == text_val:
                                 db_ac.status = "active"
                                 db_ac.change_type = "updated"
@@ -559,7 +568,12 @@ class RequirementStateRepository:
                                 matched_incoming_indices.add(i)
                                 break
 
-                    unmatched_active_db_ac = [ac for ac in db_ac_list if ac.id not in matched_db_ac and ac.status == "active"]
+                    # Locked criteria may be read/matched but are never selected
+                    # as overwrite targets for a newly extracted/generated item.
+                    unmatched_active_db_ac = [
+                        ac for ac in db_ac_list
+                        if ac.id not in matched_db_ac and ac.status == "active" and not ac.is_locked
+                    ]
                     unmatched_incoming_indices_list = [i for i in range(len(incoming_ac_texts)) if i not in matched_incoming_indices]
 
                     for idx, i in enumerate(unmatched_incoming_indices_list):
@@ -585,6 +599,12 @@ class RequirementStateRepository:
 
                     for db_ac in db_ac_list:
                         if db_ac.id not in matched_db_ac and db_ac.status == "active":
+                            if db_ac.is_locked:
+                                logger.warning(
+                                    "[LOCK ENFORCEMENT] Preserving locked acceptance criteria %s",
+                                    db_ac.id,
+                                )
+                                continue
                             db_ac.status = "archived"
                             db_ac.change_type = "archived"
                             db_ac.version = db_ac.version + 1
@@ -613,6 +633,12 @@ class RequirementStateRepository:
                         res_story_ac = await session.execute(stmt_story_ac)
                         story_ac_list = res_story_ac.scalars().all()
                         for db_ac in story_ac_list:
+                            if db_ac.is_locked:
+                                logger.warning(
+                                    "[LOCK ENFORCEMENT] Preserving locked acceptance criteria %s",
+                                    db_ac.id,
+                                )
+                                continue
                             db_ac.status = "archived"
                             db_ac.change_type = "archived"
                             db_ac.version = db_ac.version + 1

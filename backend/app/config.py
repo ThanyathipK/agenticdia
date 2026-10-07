@@ -1,6 +1,7 @@
 import logging
 import re
 from typing import List
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Set up standard logging configuration for enterprise-grade audits
@@ -252,6 +253,26 @@ class Settings(BaseSettings):
     # Application details
     APP_NAME: str = "Enterprise Requirements Architecture Core"
     DEBUG: bool = False
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def normalize_debug_mode(cls, value):
+        """Accept common runtime mode names accidentally exported as DEBUG.
+
+        Some IDEs and process managers export ``DEBUG=release`` or
+        ``DEBUG=development``.  Because pydantic-settings reads the ambient
+        environment before uvicorn starts, those otherwise harmless values used
+        to abort the entire backend and leave Vite reporting opaque proxy
+        connection errors.  Preserve normal boolean parsing while mapping the
+        conventional mode names to their intended boolean value.
+        """
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "production", "prod"}:
+                return False
+            if normalized in {"debug", "development", "dev"}:
+                return True
+        return value
 
     # CORS security: explicit allowed origins (comma-separated in .env).
     # Never use "*" with allow_credentials=True — browsers reject this combination.

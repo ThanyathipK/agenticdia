@@ -2,7 +2,7 @@
 // Renders the compiled PRD as editable markdown sections with lock/unlock and
 // inline section editing.
 import { useRef } from 'react';
-import { FileText, Pencil, Save, Lock, Unlock } from 'lucide-react';
+import { FileText, Pencil, Save, Lock, Unlock, Sparkles } from 'lucide-react';
 import { ProjectState } from '../hooks/useProjectState';
 import { getSafeSectionTitle, getSafeSectionContent } from '../utils/markdown';
 import { parseAndRenderMarkdown } from './MarkdownRenderer';
@@ -18,6 +18,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
     handleSaveSection,
     sectionLocks,
     handleToggleSectionLock,
+    handleHandSectionToAi,
   } = state;
 
   // The section text the current edit STARTED from. Sent back as
@@ -40,7 +41,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
             <p className="text-xs max-w-sm mt-1">The Krungsri Nimble template could not be fetched. Enter your raw requirements in the chat or click Generate PRD to build the document.</p>
           </div>
         ) : (
-          <div className="space-y-10 divide-y divide-slate-100">
+          <div className="space-y-6">
             {sections.map((section, sectionIdx) => {
               const isEditing = editingSectionId === section.id;
               const safeTitle = getSafeSectionTitle(section.title);
@@ -49,10 +50,10 @@ export function PRDEditor({ state }: { state: ProjectState }) {
               return (
                 <div 
                   key={section.id} 
-                  className={`relative group pt-8 first:pt-0 transition-all duration-200 ${
+                  className={`relative group rounded-2xl border transition-all duration-200 ${
                     isEditing 
-                      ? 'bg-slate-50/50 p-3.5 sm:p-6 rounded-2xl border border-primary/20 shadow-sm' 
-                      : 'border-transparent hover:bg-slate-50/20 px-2 rounded-2xl'
+                      ? 'bg-slate-50/50 p-3.5 sm:p-6 border-primary/30 shadow-sm'
+                      : 'border-slate-200 bg-white p-3.5 sm:p-5 hover:border-slate-300 hover:shadow-sm'
                   }`}
                 >
                   {/* Header Area with Title & Edit button */}
@@ -123,6 +124,22 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                           </button>
                         );
                       })()}
+
+                      {/* Hand a MANUAL (human-owned) part back to AI. A manual
+                          save marks the part human-owned so Generate PRD keeps
+                          it; this flips it back so the Architect can refresh it. */}
+                      {!isEditing
+                        && sectionLocks[section.id]?.content_source === 'human'
+                        && !(sectionLocks[section.id]?.is_locked ?? false) && (
+                        <button
+                          onClick={() => handleHandSectionToAi(section.id)}
+                          title="This part is Manual (kept as-is by Generate PRD). Hand it back to the AI to let the Architect refresh it."
+                          className="opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity bg-violet-50 hover:bg-violet-100 text-violet-700 text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border border-violet-200 shadow-sm cursor-pointer z-10 font-semibold"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-violet-600" />
+                          <span>Use AI</span>
+                        </button>
+                      )}
 
                       {!isEditing && (
                         <button

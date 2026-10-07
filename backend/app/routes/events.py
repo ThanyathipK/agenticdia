@@ -122,7 +122,9 @@ async def get_recent_events(
     Returns:
         EventListResponse: Newest-first events with pagination metadata.
     """
-    events = await ArtifactEventLogRepository.get_recent(session, limit=limit, offset=offset)
+    events = await ArtifactEventLogRepository.get_recent(
+        session, limit=limit, offset=offset, user_id=current_user.id
+    )
     return {
         "events": events,
         "total": len(events),
@@ -154,7 +156,8 @@ async def get_artifact_events(
         ArtifactEventListResponse: Newest-first events for the artifact.
     """
     events = await ArtifactEventLogRepository.get_by_artifact(
-        artifact_type, artifact_id, session, limit=limit, offset=offset
+        artifact_type, artifact_id, session, limit=limit, offset=offset,
+        user_id=current_user.id,
     )
     return {
         "artifact_type": artifact_type,
@@ -195,7 +198,9 @@ async def get_events_by_action(
             status_code=400,
             detail=f"Invalid action '{action}'. Must be one of: {', '.join(sorted(ArtifactEventLogRepository.VALID_ACTIONS))}"
         )
-    events = await ArtifactEventLogRepository.get_by_action(action_upper, session, limit=limit, offset=offset)
+    events = await ArtifactEventLogRepository.get_by_action(
+        action_upper, session, limit=limit, offset=offset, user_id=current_user.id
+    )
     return {
         "action": action_upper,
         "events": events,

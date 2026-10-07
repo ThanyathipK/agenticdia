@@ -159,6 +159,7 @@ class ProjectRepository:
         name: str,
         session: AsyncSession,
         exclude_project_id: Optional[str] = None,
+        user_id: Optional[uuid.UUID] = None,
     ) -> bool:
         """Return ``True`` when a project already uses ``name``.
 
@@ -186,6 +187,8 @@ class ProjectRepository:
         )
         if exclude_project_id is not None:
             stmt = stmt.where(ProjectModel.id != as_uuid(exclude_project_id))
+        if user_id is not None:
+            stmt = stmt.where(ProjectModel.user_id == user_id)
         result = await session.execute(stmt)
         return bool((result.scalar_one() or 0) > 0)
 
@@ -426,7 +429,9 @@ class ProjectRepository:
                     session=session,
                     old_value={"name": p.name, "description": p.description},
                     new_value=None,
-                    performed_by="automated_agent"
+                    performed_by="automated_agent",
+                    project_id=str(project_id),
+                    user_id=str(p.user_id),
                 )
             except Exception as log_err:
                 logger.warning(f"[EVENT LOG] Failed to log project delete: {log_err}")

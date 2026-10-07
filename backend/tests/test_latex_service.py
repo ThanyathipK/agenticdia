@@ -30,11 +30,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.database import get_db as app_get_db
 from app.latex_service import (
+    _aptos_font_files,
     compile_latex_to_pdf,
     convert_latex_to_docx,
     convert_markdown_to_pdf,
     convert_to_docx,
     docx_to_pdf,
+    ensure_full_document,
     is_markdown_prd,
     pandoc_friendly_document,
     preprocess_latex_for_pandoc,
@@ -189,6 +191,24 @@ class TestIsMarkdownPrd:
     def test_empty_source_is_not_markdown(self):
         assert is_markdown_prd("") is False
         assert is_markdown_prd("   \n  ") is False
+
+
+class TestAuthoritativeTemplateAssembly:
+    def test_standalone_source_cannot_override_template_formatting(self):
+        source = (
+            "\\documentclass[9pt,a4paper]{article}\n"
+            "\\usepackage[margin=4in]{geometry}\n"
+            "\\begin{document}\n"
+            "\\section*{Project content}\nBody\n"
+            "\\end{document}\n"
+        )
+        assembled = ensure_full_document(source)
+        assert "\\documentclass[12pt,letterpaper]{article}" in assembled
+        assert "top=1in,bottom=1in,left=1in,right=1in" in assembled
+        assert "a4paper" not in assembled
+        assert "margin=4in" not in assembled
+        assert assembled.count("\\begin{document}") == 1
+        assert "\\section*{Project content}" in assembled
 
 
 # =====================================================================
@@ -447,10 +467,9 @@ class TestNativeDocxExport:
         # not a Word table - see _render_cover)
         assert xml.count("<w:tbl>") >= 7
 
-    def test_cover_matches_template_pdf_layout(self):
-        """The DOCX cover must mirror the ORIGINAL template-krungsrinimble.pdf:
-        28pt regular right-aligned title, 20pt bold LEFT subtitles, and plain
-        16pt PMO label lines instead of a centered cover table."""
+    def test_cover_matches_authoritative_tex_layout(self):
+        """The DOCX cover follows the supplied reference PDF: a 28pt regular
+        right-aligned title, left-aligned bold subtitles, and 16pt form lines."""
         import io
 
         from docx import Document
@@ -471,18 +490,15 @@ class TestNativeDocxExport:
             sub_idx = title_idx + offset
             assert texts[sub_idx] == text
             sub_p = paras[sub_idx]
-            assert str(sub_p.alignment).startswith("LEFT")
+            assert sub_p.alignment is None or str(sub_p.alignment).startswith("LEFT")
             assert sub_p.runs[0].font.size == Pt(20) and sub_p.runs[0].bold
 
         pmo_idx = next(i for i, t in enumerate(texts) if t.startswith("PMO No:"))
-        assert paras[pmo_idx].runs[0].font.size == Pt(16)
-        assert not paras[pmo_idx].runs[0].bold
         labels = [texts[pmo_idx + k].split("\t")[0] for k in range(6)]
         assert labels == [
             "PMO No:", "PMO Name:", "Version:", "Status:", "Last Update:", "Author:",
         ]
-        # the blank line the template leaves between PMO Name and Version
-        assert paras[pmo_idx + 1].paragraph_format.space_after.cm > 1.0
+        assert all(paras[pmo_idx + k].runs[0].font.size == Pt(16) for k in range(6))
 
     def test_merged_cells_present(self):
         xml = self._document_xml()
@@ -493,7 +509,7 @@ class TestNativeDocxExport:
 
     def test_header_rows_shaded(self):
         xml = self._document_xml()
-        assert xml.count('w:fill="F8FAFC"') >= 10  # Role/Name + history + reviews
+        assert 'w:fill="F8FAFC"' not in xml
 
     def test_no_latex_leakage(self):
         import io
@@ -642,6 +658,27 @@ class TestOfficialTemplateWorkflow:
         assert pdf.startswith(b"%PDF")
         assert len(pdf) > 3000
 
+    def test_pdf_and_docx_use_the_same_aptos_family(self):
+        """The emergency TeX PDF path must not regress to Helvetica while
+        Word uses Aptos. This host gets Aptos from Microsoft Word's DFonts."""
+        if not _aptos_font_files():
+            pytest.skip("Aptos is not locally installed on this host")
+
+        from docx import Document
+        from pypdf import PdfReader
+
+        source = load_prd_latex_template()
+        docx = Document(io.BytesIO(convert_latex_to_docx(source)))
+        assert docx.styles["Normal"].font.name == "Aptos"
+        assert docx.styles["Heading 1"].font.name == "Aptos"
+
+        fonts = set()
+        for page in PdfReader(io.BytesIO(compile_latex_to_pdf(source))).pages:
+            for font in (page.get("/Resources", {}).get("/Font") or {}).values():
+                fonts.add(str(font.get_object().get("/BaseFont")))
+        assert fonts
+        assert all("Aptos" in font for font in fonts), sorted(fonts)
+
     def test_full_official_template_converts_to_docx(self):
         docx = convert_latex_to_docx(load_prd_latex_template())
         assert docx_table_count(docx) >= 7
@@ -650,6 +687,10 @@ class TestOfficialTemplateWorkflow:
         md = prd_to_markdown(load_prd_latex_template())
         assert "\\begin{tabular}" not in md
         assert "Stakeholders" in md
+        assert "**KRUNGSRI NIMBLE**" in md
+        assert "**Product Requirement Document**" in md
+        assert "**PMO No:**" in md
+        assert "PMO_NO" in md
 
     def test_markdown_skeleton_loads_and_starts_with_heading(self):
         tpl = load_prd_template()
@@ -690,10 +731,8 @@ class TestOfficialTemplateWorkflow:
     def test_single_backslash_spacing_bracket_template_exports(self):
         BS = chr(92)
         buggy = load_prd_latex_template()
-        buggy = buggy.replace(BS + BS + "[2.2cm]", BS + "[2.2cm]")
-        buggy = buggy.replace(BS + BS + "[0.4cm]", BS + "[0.4cm]")
-        buggy = buggy.replace(BS + BS + "[1.8cm]", BS + "[1.8cm]")
-        assert (BS + "[2.2cm]") in buggy  # precondition: bug present
+        buggy = buggy.replace(BS + BS + "[0.65cm]", BS + "[0.65cm]")
+        assert (BS + "[0.65cm]") in buggy  # precondition: bug present
         pdf = compile_latex_to_pdf(buggy)
         assert pdf.startswith(b"%PDF")
         assert docx_table_count(convert_latex_to_docx(buggy)) >= 7
@@ -737,7 +776,7 @@ class TestConvertEndpoint:
 class TestExportEndpoints:
     @pytest.mark.asyncio
     async def test_legacy_markdown_docx_export_succeeds(self, client, seeded_project):
-        """Regression: legacy Markdown PRDs used to fail with HTTP 422."""
+        """Legacy Markdown is content input, never a generic layout path."""
         resp = await client.post(
             f"/api/project/{seeded_project}/export/docx",
             json={"latex_source": MARKDOWN_PRD, "version": 1, "project_name": "Export Test Project"},
@@ -746,7 +785,14 @@ class TestExportEndpoints:
         assert resp.headers["content-type"].startswith(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-        assert docx_table_count(resp.content) >= 1
+        assert resp.headers["x-prd-template"] == "krungsrinimble-reference-v2"
+        # The old generic Markdown converter produced one table. The official
+        # reference layout contains the cover plus all seven structured grids.
+        assert docx_table_count(resp.content) >= 7
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+            xml = z.read("word/document.xml").decode("utf-8")
+        assert "Nimble by Krungsri" in xml
+        assert "Secure transfer API for retail customers." in xml
 
     @pytest.mark.asyncio
     async def test_krungsri_latex_pdf_export_succeeds(self, client, seeded_project):
@@ -771,20 +817,24 @@ class TestExportEndpoints:
         assert match, resp.headers["content-disposition"]
 
     @pytest.mark.asyncio
-    async def test_pdf_export_renders_the_docx_pipeline(self, client, seeded_project, monkeypatch):
-        """With LibreOffice installed the PDF endpoint must render the SAME
-        native Word document the DOCX export produces (so the two downloads
-        always match), not compile the LaTeX with Tectonic."""
+    async def test_pdf_export_renders_reference_shaped_docx(self, client, seeded_project, monkeypatch):
+        """PDF prefers the same native Word layout as DOCX because the supplied
+        reference PDF uses Word/Aptos geometry."""
         import app.routes.projects as projects_route
 
         captured: dict = {}
 
-        def fake_docx_to_pdf(docx_bytes: bytes) -> bytes:
-            captured["docx"] = docx_bytes
-            return b"%PDF-from-docx"
+        def fake_docx(source: str) -> bytes:
+            captured["source"] = source
+            return b"PK-reference-docx"
+
+        def fake_pdf(docx: bytes) -> bytes:
+            captured["docx"] = docx
+            return b"%PDF-from-reference-docx"
 
         monkeypatch.setattr(projects_route, "soffice_available", lambda: True)
-        monkeypatch.setattr(projects_route, "docx_to_pdf", fake_docx_to_pdf)
+        monkeypatch.setattr(projects_route, "convert_latex_to_docx", fake_docx)
+        monkeypatch.setattr(projects_route, "docx_to_pdf", fake_pdf)
 
         resp = await client.post(
             f"/api/project/{seeded_project}/export/pdf",
@@ -792,16 +842,15 @@ class TestExportEndpoints:
                   "project_name": "Export Test Project"},
         )
         assert resp.status_code == 200
-        assert resp.content == b"%PDF-from-docx"
-        # The bytes handed to LibreOffice ARE the native DOCX payload.
-        assert captured["docx"][:2] == b"PK"
-        assert docx_table_count(captured["docx"]) >= 2
+        assert resp.content == b"%PDF-from-reference-docx"
+        assert captured["source"] == KRUNGSRI_BODY.strip()
+        assert captured["docx"] == b"PK-reference-docx"
 
     @pytest.mark.asyncio
-    async def test_pdf_export_falls_back_to_tectonic_without_soffice(
+    async def test_pdf_export_does_not_require_soffice(
         self, client, seeded_project, monkeypatch
     ):
-        """Hosts without LibreOffice keep the historical TeX PDF pipeline."""
+        """Direct template compilation remains the no-LibreOffice fallback."""
         import app.routes.projects as projects_route
 
         monkeypatch.setattr(projects_route, "soffice_available", lambda: False)
@@ -848,12 +897,12 @@ class TestExportEndpoints:
 
         captured: dict = {}
 
-        def fake_docx_to_pdf(docx_bytes: bytes) -> bytes:
-            captured["docx"] = docx_bytes
-            return b"%PDF-from-docx"
+        def fake_compile(source: str) -> bytes:
+            captured["source"] = source
+            return b"%PDF-from-tex"
 
-        monkeypatch.setattr(projects_route, "soffice_available", lambda: True)
-        monkeypatch.setattr(projects_route, "docx_to_pdf", fake_docx_to_pdf)
+        monkeypatch.setattr(projects_route, "compile_latex_to_pdf", fake_compile)
+        monkeypatch.setattr(projects_route, "convert_markdown_to_pdf", fake_compile)
 
         # The (stale) frontend posts the OLD copy — the stored LATEST must win.
         resp = await client.post(
@@ -861,11 +910,9 @@ class TestExportEndpoints:
             json={"latex_source": MARKDOWN_PRD},
         )
         assert resp.status_code == 200
-        assert resp.content == b"%PDF-from-docx"
-        with zipfile.ZipFile(io.BytesIO(captured["docx"])) as z:
-            xml = z.read("word/document.xml").decode("utf-8")
-        assert "LATEST v2 instant transfer API" in xml
-        assert "Secure transfer API for retail customers." not in xml
+        assert resp.content == b"%PDF-from-tex"
+        assert "LATEST v2 instant transfer API" in captured["source"]
+        assert "Secure transfer API for retail customers." not in captured["source"]
 
     @pytest.mark.asyncio
     async def test_docx_export_compiles_the_latest_stored_version(
@@ -901,6 +948,39 @@ class TestExportEndpoints:
             xml = z.read("word/document.xml").decode("utf-8")
         assert "LATEST v2 instant transfer API" in xml
         assert "Secure transfer API for retail customers." not in xml
+
+    @pytest.mark.asyncio
+    async def test_docx_export_contains_every_preview_version_row(
+        self, client, seeded_project, db_session
+    ):
+        """Markdown previews rebuilt into the official DOCX keep the complete
+        ledger, with one short sentence in each version row."""
+        from app.repositories.prd import PRDVersionRepository
+
+        await PRDVersionRepository.create(seeded_project, {
+            "generated_prd": MARKDOWN_PRD,
+            "generated_by": "user",
+            "change_summary": "Initial PRD created.",
+            "semver": "1.0.0",
+        }, db_session)
+        await PRDVersionRepository.create(seeded_project, {
+            "generated_prd": MARKDOWN_PRD,
+            "generated_by": "automated_agent",
+            "change_summary": "Added payment flow. Internal detail is omitted.",
+            "semver": "1.1.0",
+        }, db_session)
+        await db_session.commit()
+
+        resp = await client.post(
+            f"/api/project/{seeded_project}/export/docx",
+            json={"latex_source": MARKDOWN_PRD},
+        )
+        assert resp.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+            xml = z.read("word/document.xml").decode("utf-8")
+        assert "1.0.0" in xml and "Initial PRD created." in xml
+        assert "1.1.0" in xml and "Added payment flow." in xml
+        assert "Internal detail is omitted." not in xml
 
     @pytest.mark.asyncio
     async def test_krungsri_latex_docx_export_succeeds(self, client, seeded_project):

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ArtifactEventLogModel
+from app.models import ArtifactEventLogModel, ProjectModel
 from app.repositories.base import serialize_event_log
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,9 @@ class ArtifactEventLogRepository:
         session: AsyncSession,
         old_value: Optional[Dict[str, Any]] = None,
         new_value: Optional[Dict[str, Any]] = None,
-        performed_by: str = "automated_agent"
+        performed_by: str = "automated_agent",
+        project_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Append a single event to the artifact event log.
@@ -57,8 +59,17 @@ class ArtifactEventLogRepository:
                 f"{', '.join(sorted(ArtifactEventLogRepository.VALID_ACTIONS))}"
             )
 
+        owner_id = uuid.UUID(str(user_id)) if user_id else None
+        project_uuid = uuid.UUID(str(project_id)) if project_id else None
+        if owner_id is None and project_uuid is not None:
+            owner_id = await session.scalar(
+                select(ProjectModel.user_id).where(ProjectModel.id == project_uuid)
+            )
+
         log_entry = ArtifactEventLogModel(
             event_id=uuid.uuid4(),
+            project_id=project_uuid,
+            user_id=owner_id,
             artifact_type=artifact_type,
             artifact_id=str(artifact_id),
             action=action_upper,
@@ -80,7 +91,8 @@ class ArtifactEventLogRepository:
         artifact_id: str,
         session: AsyncSession,
         limit: int = 100,
-        offset: int = 0
+        offset: int = 0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Retrieve all events for a specific artifact, newest first."""
         stmt = (
@@ -89,10 +101,10 @@ class ArtifactEventLogRepository:
                 ArtifactEventLogModel.artifact_type == artifact_type,
                 ArtifactEventLogModel.artifact_id == str(artifact_id)
             )
-            .order_by(ArtifactEventLogModel.timestamp.desc())
-            .limit(limit)
-            .offset(offset)
         )
+        if user_id is not None:
+            stmt = stmt.where(ArtifactEventLogModel.user_id == uuid.UUID(str(user_id)))
+        stmt = stmt.order_by(ArtifactEventLogModel.timestamp.desc()).limit(limit).offset(offset)
         result = await session.execute(stmt)
         events = result.scalars().all()
         return [serialize_event_log(e) for e in events]
@@ -117,7 +129,7 @@ class ArtifactEventLogRepository:
         This method is a convenience wrapper — for production use, consider
         querying by known artifact IDs from the project.
         """
-        conditions = []
+        conditions = [ArtifactEventLogModel.project_id == uuid.UUID(str(project_id))]
         if artifact_type:
             conditions.append(ArtifactEventLogModel.artifact_type == artifact_type)
         if action:
@@ -137,17 +149,18 @@ class ArtifactEventLogRepository:
         action: str,
         session: AsyncSession,
         limit: int = 100,
-        offset: int = 0
+        offset: int = 0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Retrieve all events for a specific action type (e.g. all CREATE events)."""
         action_upper = action.upper()
         stmt = (
             select(ArtifactEventLogModel)
             .where(ArtifactEventLogModel.action == action_upper)
-            .order_by(ArtifactEventLogModel.timestamp.desc())
-            .limit(limit)
-            .offset(offset)
         )
+        if user_id is not None:
+            stmt = stmt.where(ArtifactEventLogModel.user_id == uuid.UUID(str(user_id)))
+        stmt = stmt.order_by(ArtifactEventLogModel.timestamp.desc()).limit(limit).offset(offset)
         result = await session.execute(stmt)
         events = result.scalars().all()
         return [serialize_event_log(e) for e in events]
@@ -156,15 +169,16 @@ class ArtifactEventLogRepository:
     async def get_recent(
         session: AsyncSession,
         limit: int = 50,
-        offset: int = 0
+        offset: int = 0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Retrieve the most recent events across all artifacts."""
         stmt = (
             select(ArtifactEventLogModel)
-            .order_by(ArtifactEventLogModel.timestamp.desc())
-            .limit(limit)
-            .offset(offset)
         )
+        if user_id is not None:
+            stmt = stmt.where(ArtifactEventLogModel.user_id == uuid.UUID(str(user_id)))
+        stmt = stmt.order_by(ArtifactEventLogModel.timestamp.desc()).limit(limit).offset(offset)
         result = await session.execute(stmt)
         events = result.scalars().all()
         return [serialize_event_log(e) for e in events]

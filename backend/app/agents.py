@@ -90,6 +90,15 @@ class AgentState(TypedDict, total=False):
     intent_confidence: Optional[float]
     workflow_routing: Optional[dict]
     agent_message: Optional[str]
+    # Full canonical text of successfully converted uploaded documents. It is
+    # loaded server-side only for explicit Validate runs.
+    knowledge_documents: List[Dict[str, Any]]
+    # The active request-scoped DB session. It MUST be a declared channel:
+    # LangGraph only carries keys present in the state schema, so when this was
+    # undeclared every node saw ``state.get("db_session") is None`` and skipped
+    # its DB work — which is how "Generate PRD" used to drop human-owned PRD
+    # parts (the architect's section sync never ran).
+    db_session: Optional[AsyncSession]
 
 async def get_or_init_requirement_state(project_id: str, session: Optional[AsyncSession] = None, current_version: int = 1) -> RequirementState:
     """
@@ -774,19 +783,19 @@ def _build_change_summary(merge_report: Dict[str, Any]) -> str:
     lines = ["📥 **Requirements Gathered & Updated!**"]
     if buckets["created"]:
         lines.append(
-            f"✅ **Added** {len(buckets['created'])} new user story(ies): {', '.join(sorted(buckets['created']))}"
+            f"**Added** {len(buckets['created'])} new user story(ies): {', '.join(sorted(buckets['created']))}"
         )
     if buckets["updated"]:
         lines.append(
-            f"🔄 **Updated** {len(buckets['updated'])} user story(ies): {', '.join(sorted(buckets['updated']))}"
+            f"**Updated** {len(buckets['updated'])} user story(ies): {', '.join(sorted(buckets['updated']))}"
         )
     if buckets["archived"]:
         lines.append(
-            f"🗑️ **Archived** {len(buckets['archived'])} user story(ies): {', '.join(sorted(buckets['archived']))}"
+            f"**Archived** {len(buckets['archived'])} user story(ies): {', '.join(sorted(buckets['archived']))}"
         )
     if buckets["conflict"]:
         lines.append(
-            f"⚠️ {len(buckets['conflict'])} locked story(ies) matched a removal request but stayed active: "
+            f"{len(buckets['conflict'])} locked story(ies) matched a removal request but stayed active: "
             f"{', '.join(sorted(buckets['conflict']))}"
         )
     if len(lines) == 1:
@@ -1719,11 +1728,10 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
-        # LOCK ENFORCEMENT: Exclude locked user stories from audit
-        passed_stories = [
-            us for us in passed_structured.get("user_stories", [])
-            if not (us.get("is_locked", False))
-        ]
+        # Locked artifacts remain readable audit input.  The auditor only
+        # creates findings/questions; repository guards prevent it from
+        # mutating the protected source artifact.
+        passed_stories = list(passed_structured.get("user_stories", []))
         # The reloaded database board is authoritative: auditing stories must
         # never rebuild requirement groups. A legacy FLAT board (no requirement
         # rows yet) still needs ONE group to hold the audited stories, and it is
@@ -1753,20 +1761,16 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     current_version = req_state["version_number"]
     
     # Step 10 compliance: Segment user stories by change_type
-    # LOCK ENFORCEMENT: Exclude locked user stories from audit
+    # Locked stories are validated normally; locking is write protection, not
+    # an audit/status filter.
     all_stories = req_state.get("user_stories", [])
-    unlocked_stories = [
-        story for story in all_stories
-        if not (story.get("is_locked", False))
-    ]
-    if len(unlocked_stories) != len(all_stories):
-        logger.info(f"[AUDITOR] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from audit.")
     # AUDIT 1.2 — Audit scope (cost + consistency control): only UNLOCKED stories with
     #             change_type created/updated (or missing) are sent to the LLM;
     #             `unchanged` stories are tracked separately so their existing
     #             unresolved questions can be carried over in AUDIT 2.2.
-    to_audit_stories = [story for story in unlocked_stories if story.get("change_type") in ["created", "updated", None]]
-    unchanged_stories = [story for story in unlocked_stories if story.get("change_type") == "unchanged"]
+    to_audit_stories = [story for story in all_stories if story.get("change_type") in ["created", "updated", None]]
+    unchanged_stories = [story for story in all_stories if story.get("change_type") == "unchanged"]
+    knowledge_documents = state.get("knowledge_documents") or []
     
     logger.info(f"Auditor Node: {len(to_audit_stories)} stories to audit, {len(unchanged_stories)} unchanged stories.")
     
@@ -1774,7 +1778,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     #             kept (validation_status) and a result is synthesized from a hardcoded
     #             7-point checklist, so "passed_checks" can be reported here without any
     #             audit actually having run (documented behaviour, not changed).
-    if not to_audit_stories:
+    if not to_audit_stories and not knowledge_documents:
         logger.info("Auditor Node: All user stories are unchanged. Skipping LLM execution and keeping existing validation status.")
         is_valid = req_state.get("validation_status") == "valid"
         fallback_checks = ["Idempotency", "Security", "Audit Logging", "Database Consistency", "Network Timeouts", "Financial Regulatory Compliance", "Edge-Case Failure Handling"]
@@ -1800,8 +1804,19 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     structured_reqs_for_prompt = {
         "epic_name": epic_name,
         "version": req_state["version_number"],
-        "user_stories": to_audit_stories
+        "user_stories": to_audit_stories,
+        # Knowledge documents are evidence for validation, not requirements.
+        # Keeping them in a separate field ensures Validate can cross-reference
+        # their actual content without silently converting/persisting anything.
+        "knowledge_base_documents": knowledge_documents,
     }
+
+    # The upload limit is intentionally larger than the LLM context window.
+    # Fail clearly before inference rather than truncating a document and
+    # returning a misleading validation verdict. Users can explicitly Extract
+    # a very large document first, which already has chunked processing.
+    from app.input_validation import validate_body_budget
+    validate_body_budget(structured_reqs_for_prompt, "Validation context")
     
     prompt = PromptTemplate(
         template=load_prompt("auditor"),
@@ -1938,11 +1953,10 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
-        # LOCK ENFORCEMENT: Exclude locked user stories from PRD generation
-        passed_stories = [
-            us for us in passed_structured.get("user_stories", [])
-            if not (us.get("is_locked", False))
-        ]
+        # Locked source artifacts remain available as read-only Architect
+        # context. Only generated targets (notably PRD sections) are excluded
+        # from writes by their repository/service lock gates.
+        passed_stories = list(passed_structured.get("user_stories", []))
         # Preserve database identity from the previous requirement record(s).
         # The synthetic rebuild below must keep the ``id`` field — it is
         # REQUIRED by the RequirementDetail response schema; dropping it made
@@ -1965,7 +1979,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
                     continue
                 inc_stories = [
                     us for us in (inc.get("user_stories") or [])
-                    if isinstance(us, dict) and not us.get("is_locked", False)
+                    if isinstance(us, dict)
                 ]
                 rebuilt_reqs.append({
                     **inc,
@@ -2003,15 +2017,10 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         req_state["acceptance_criteria"] = all_ac
 
     # Step 11 compliance: Segment user stories to check for changes
-    # LOCK ENFORCEMENT: Exclude locked user stories from PRD generation
+    # Read locked stories as context. Locking forbids mutation; it does not
+    # remove finalized facts from generated documentation.
     all_stories = req_state.get("user_stories", [])
-    unlocked_stories = [
-        story for story in all_stories
-        if not (story.get("is_locked", False))
-    ]
-    if len(unlocked_stories) != len(all_stories):
-        logger.info(f"[ARCHITECT] Filtered out {len(all_stories) - len(unlocked_stories)} locked user stories from PRD generation.")
-    to_build_stories = [story for story in unlocked_stories if story.get("change_type") in ["created", "updated", None]]
+    to_build_stories = [story for story in all_stories if story.get("change_type") in ["created", "updated", None]]
     
     # If everything is unchanged, and we have an existing PRD/Diagram, bypass LLM entirely.
     # GUARD: only reuse when the stored PRD already follows the official
@@ -2054,7 +2063,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     #             to HTTP 500 and nothing is persisted. Stories may live flat in
     #             user_stories OR nested inside requirements; a stored legacy PRD does
     #             not excuse an empty dataset (it is never reused — see 2.2).
-    if not unlocked_stories and not nested:
+    if not all_stories and not nested:
         # FAIL LOUDLY: invoking the LLM with an empty story set would only
         # produce a hallucinated PRD. Raise so /api/process-requirements maps
         # this to HTTP 500 and nothing is persisted. Stories may live flat in
@@ -2081,7 +2090,15 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     #             — every table, merged cell and \newpage marker — is always the
     #             untouched official template, and NO free-form LLM text is spliced into
     #             the structure, so PDF-exact compilation is guaranteed.
-    from app.prd_filler import fill_template_body
+    from app.prd_filler import (
+        PENDING_VERSION_LABEL,
+        fill_template_body,
+        version_history_sentence,
+    )
+
+    # The incoming value is a multi-version audit digest for context, not text
+    # for a single table cell. Give this version one concise human sentence.
+    current_version_summary = version_history_sentence(version_history_summaries)
 
     # ARCHITECT 3.2 — Dataset assembly: nested boards contribute `requirements`
     #             (with their stories/ACs), flat boards contribute `user_stories` +
@@ -2093,7 +2110,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
             if isinstance(r, dict):
                 stories_flat.extend(r.get("user_stories") or [])
     else:
-        stories_flat = unlocked_stories
+        stories_flat = all_stories
 
     epic_name = requirements[0].get("title", "") if requirements else ""
     data: Dict[str, Any] = {
@@ -2101,7 +2118,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         "business_goals": req_state.get("business_goals", []),
         "actors": req_state.get("actors", []),
         "requirements": requirements if nested else [],
-        "user_stories": [] if nested else unlocked_stories,
+        "user_stories": [] if nested else all_stories,
         "acceptance_criteria": [] if nested else req_state.get("acceptance_criteria", []),
         "problem_statement": req_state.get("problem_statement", []),
         "scope_in": [s.get("story_title", "") for s in stories_flat if s.get("story_title")],
@@ -2117,7 +2134,12 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         project_name=req_state.get("project_name", "") or "",
         version=req_state["version_number"],
         data=data,
-        version_summary=(version_history_summaries or "").strip() or "Initial approved version",
+        version_summary=current_version_summary,
+        version_history=version_history_summaries,
+        # The cover + Version History version is the LEDGER's semver, resolved
+        # and stamped below once the write session is open — never the
+        # integer-derived V{n}.0 filler.
+        version_label=PENDING_VERSION_LABEL,
     )
 
     req_state["generated_prd"] = generated_prd
@@ -2148,47 +2170,82 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     #             becomes the current generated_prd, which is what keeps human edits
     #             alive across every regeneration.
     #             5.2 — fail-soft: section bookkeeping must never fail PRD generation.
-    if db_session:
-        try:
-            from app.prd_section_service import sync_sections_from_prd
-            merged_markdown = await sync_sections_from_prd(
-                project_id, req_state["generated_prd"], db_session,
-                changed_by="automated_agent",
-            )
-            if merged_markdown:
-                req_state["generated_prd"] = merged_markdown
-        except Exception as section_sync_err:
-            # Never fail PRD generation because of section bookkeeping.
-            logger.error(
-                f"[PRD SECTIONS] Failed to sync PRD sections for project {project_id}: "
-                f"{str(section_sync_err)}"
-            )
+    # The section sync + version ledger need a live session. LangGraph now
+    # carries ``db_session`` (it is declared in AgentState), but guard anyway:
+    # when the node runs outside the graph without a session, open a short-lived
+    # one so human-owned parts are PRESERVED and the version is still recorded.
+    write_session = db_session
+    owns_write_session = False
+    if write_session is None:
+        from app.database import AsyncSessionLocal
+        write_session = AsyncSessionLocal()
+        owns_write_session = True
 
-    # Persist the FINAL document as an immutable PRD version record. The
-    # version ALWAYS advances on every Generate PRD click — even when every
-    # changed section was locked and the final merged document is byte-identical
-    # to the previous snapshot — so the Version ledger never collapses. The
-    # per-section change records prove which parts changed and which were
-    # locked_preserved by the lock contract.
-    # ARCHITECT 6.0 — Version ledger (VERSIONING flow → PROJECT 8.2.3 / CONFIRM 3.3.7
-    #             all record here): every Generate PRD appends an immutable
-    #             prd_versions snapshot and advances version_number — even when the
-    #             merged document is byte-identical because every changed section was
-    #             locked — so the ledger never collapses. 6.1 — fail-soft (logged).
-    if db_session:
-        try:
-            from app.version_service import record_prd_version
-            await record_prd_version(
-                project_id, db_session,
-                generated_prd=req_state["generated_prd"],
-                generated_by="automated_agent",
-                change_type="ai",
-                change_summary=(version_history_summaries or "").strip()
-                    or None,
-            )
-            logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
-        except Exception as version_err:
-            logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
+    try:
+        # ARCHITECT 5.0.1 — DOCUMENT VERSION = THE LEDGER'S semver (not V{n}.0):
+        #             the template was filled with PENDING_VERSION_LABEL; resolve the
+        #             semver THIS snapshot will get — computed from the same inputs
+        #             record_prd_version uses below, so the printed label always
+        #             equals prd_versions.semver — and stamp it in BEFORE the section
+        #             sync stores the parts. 5.0.2 — fail-soft: a failed resolution
+        #             keeps the legacy V{n}.0 label; the stamp itself is a plain
+        #             string replace, so the pending marker can never leak out.
+        from app.version_service import resolve_document_semver
+        semver_label = await resolve_document_semver(
+            project_id, write_session,
+            document=req_state["generated_prd"],
+            change_type="ai",
+        ) if write_session else None
+
+        from app.prd_filler import stamp_version_label
+        req_state["generated_prd"] = stamp_version_label(
+            req_state["generated_prd"],
+            semver_label or f"V{req_state.get('version_number', 1)}.0",
+        )
+
+        if write_session:
+            try:
+                from app.prd_section_service import sync_sections_from_prd
+                merged_markdown = await sync_sections_from_prd(
+                    project_id, req_state["generated_prd"], write_session,
+                    changed_by="automated_agent",
+                )
+                if merged_markdown:
+                    req_state["generated_prd"] = merged_markdown
+            except Exception as section_sync_err:
+                # Never fail PRD generation because of section bookkeeping.
+                logger.error(
+                    f"[PRD SECTIONS] Failed to sync PRD sections for project {project_id}: "
+                    f"{str(section_sync_err)}"
+                )
+
+        # Persist the FINAL document as an immutable PRD version record. The
+        # version ALWAYS advances on every Generate PRD click — even when every
+        # changed section was locked and the final merged document is byte-identical
+        # to the previous snapshot — so the Version ledger never collapses. The
+        # per-section change records prove which parts changed and which were
+        # locked_preserved by the lock contract.
+        # ARCHITECT 6.0 — Version ledger (VERSIONING flow → PROJECT 8.2.3 / CONFIRM 3.3.7
+        #             all record here): every Generate PRD appends an immutable
+        #             prd_versions snapshot and advances version_number — even when the
+        #             merged document is byte-identical because every changed section was
+        #             locked — so the ledger never collapses. 6.1 — fail-soft (logged).
+        if write_session:
+            try:
+                from app.version_service import record_prd_version
+                await record_prd_version(
+                    project_id, write_session,
+                    generated_prd=req_state["generated_prd"],
+                    generated_by="automated_agent",
+                    change_type="ai",
+                    change_summary=current_version_summary,
+                )
+                logger.info(f"[PRD VERSION] Created new PRD version for project {project_id}")
+            except Exception as version_err:
+                logger.error(f"[PRD VERSION] Failed to create PRD version: {str(version_err)}")
+    finally:
+        if owns_write_session and write_session is not None:
+            await write_session.close()
 
     # ARCHITECT 7.0 — Architect chat turn (conversation_messages, role="architect",
     #             intent="PRD_GENERATION"), and ARCHITECT 8.0 — the return contract

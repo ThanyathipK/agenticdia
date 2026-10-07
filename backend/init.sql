@@ -53,6 +53,7 @@ CREATE TABLE projects (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -74,6 +75,7 @@ CREATE TABLE epics (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     status VARCHAR(50) NOT NULL DEFAULT 'active'
@@ -100,6 +102,7 @@ CREATE TABLE requirements (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -129,6 +132,7 @@ CREATE TABLE user_stories (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -156,6 +160,7 @@ CREATE TABLE acceptance_criteria (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -222,6 +227,7 @@ CREATE TABLE prd_documents (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -278,6 +284,7 @@ CREATE TABLE prd_sections (
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
+    lock_reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_prd_sections_project_key UNIQUE (project_id, section_key)
@@ -359,6 +366,8 @@ CREATE INDEX idx_clarification_questions_category ON clarification_questions(che
 -- Never overwrites or deletes existing records.
 CREATE TABLE artifact_event_logs (
     event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     artifact_type VARCHAR(50) NOT NULL,       -- e.g. 'epic', 'requirement', 'user_story', 'acceptance_criteria', 'prd'
     artifact_id VARCHAR(36) NOT NULL,          -- UUID of the modified artifact
     action VARCHAR(20) NOT NULL,               -- CREATE, UPDATE, DELETE, ARCHIVE, LOCK, UNLOCK
@@ -370,6 +379,8 @@ CREATE TABLE artifact_event_logs (
 
 -- Indexes for efficient querying
 CREATE INDEX idx_artifact_event_logs_artifact ON artifact_event_logs(artifact_type, artifact_id);
+CREATE INDEX idx_artifact_event_logs_project_id ON artifact_event_logs(project_id);
+CREATE INDEX idx_artifact_event_logs_user_id ON artifact_event_logs(user_id);
 CREATE INDEX idx_artifact_event_logs_action ON artifact_event_logs(action);
 CREATE INDEX idx_artifact_event_logs_timestamp ON artifact_event_logs(timestamp);
 

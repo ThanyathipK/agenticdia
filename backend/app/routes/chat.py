@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthenticatedUser, get_current_user, verify_project_access
 from app.config import settings
@@ -158,16 +159,16 @@ async def post_chat_query(
     formatted_messages = [{"role": "system", "content": system_instruction}]
     for msg in request.messages:
         formatted_messages.append({"role": msg.role, "content": msg.content})
-        # CHAT 5.3 — Repository WRITE per incoming turn (conversation_messages,
-        #            workflow_state="chat"); the same table the pipeline branch
-        #            writes to (CHAT 2.3.3), so both chat paths share one transcript.
-        if request.project_id:
+
+    # Persist only the newest user turn. Clients resend the timeline for LLM
+    # context, so storing every supplied message would duplicate history on
+    # every request.
+    if request.project_id:
+        newest_user = next((msg for msg in reversed(request.messages) if msg.role == "user"), None)
+        if newest_user is not None:
             await ConversationMessageRepository.save_message(
-                project_id=str(request.project_id),
-                role=msg.role,
-                message=msg.content,
-                workflow_state="chat",
-                intent="GENERAL_CHAT"
+                project_id=str(request.project_id), role="user", message=newest_user.content,
+                workflow_state="chat", intent="GENERAL_CHAT", session=session,
             )
 
     logger.info("Initiating conversational analyst run.")
@@ -191,7 +192,8 @@ async def post_chat_query(
             role="assistant",
             message=reply_text,
             workflow_state="chat",
-            intent="GENERAL_CHAT"
+            intent="GENERAL_CHAT",
+            session=session,
         )
         # Semantic memory write path (fail-open): distil durable facts from
         # this finished turn so FUTURE conversations understand the project

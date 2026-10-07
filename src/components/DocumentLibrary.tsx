@@ -138,7 +138,7 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
                   title="Extract requirements as a DRAFT merge preview (nothing is written until you confirm)"
                 >
                   {isProcessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                  <span>{isProcessing ? 'Extracting…' : 'Process / Extract Requirements'}</span>
+                  <span>{isProcessing ? 'Extracting…' : 'Extract Requirements'}</span>
                 </button>
                 <button
                   onClick={() => setDeleteTarget(doc)}

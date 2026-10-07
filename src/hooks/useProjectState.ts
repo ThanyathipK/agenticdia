@@ -149,6 +149,8 @@ export interface ProjectState {
   sectionLocks: Record<string, PrdSectionLockState>;
   /** Lock/unlock ONE PRD part — blocks edits + AI regeneration when locked. */
   handleToggleSectionLock: (sectionId: string) => Promise<void>;
+  /** Hand a MANUAL (human-owned) PRD part back to AI regeneration. */
+  handleHandSectionToAi: (sectionId: string) => Promise<void>;
   /** Restore the whole PRD document from a ledger version (append-only;
    *  locked parts preserved). Resolves to true on success. */
   handleRestoreVersion: (versionNumber: number) => Promise<boolean>;
@@ -256,7 +258,11 @@ export function useProjectState(
   const hasRequirementContent =
     (store.structuredRequirements.user_stories?.length ?? 0) > 0 ||
     (store.structuredRequirements.requirements?.length ?? 0) > 0;
-  const hasKnowledgeContent = documents.documents.length > 0;
+  // Failed conversions (notably OCR-only PDFs) have no usable text and must
+  // not enable Validate merely because their metadata row is visible.
+  const hasKnowledgeContent = documents.documents.some(
+    document => document.status === 'processed' && document.token_count > 0,
+  );
   const canRunAgentActions =
     Boolean(projectsApi.projectId) && (hasRequirementContent || hasKnowledgeContent);
 
@@ -393,6 +399,7 @@ export function useProjectState(
     refreshLockableRequirements: locks.refreshRequirementList,
     sectionLocks: store.sectionLocks,
     handleToggleSectionLock: store.handleToggleSectionLock,
+    handleHandSectionToAi: store.handleHandSectionToAi,
     handleRestoreVersion: store.handleRestoreVersion,
     activeTab: ui.activeTab,
     setActiveTab: ui.setActiveTab,

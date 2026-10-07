@@ -79,7 +79,8 @@ async def test_architect_fills_template_from_full_project_dataset(monkeypatch):
     assert "\\multirow" in prd and "\\multicolumn" in prd
     # filled from the project data
     assert "PromptPay Refund Portal" in prd        # cover PMO_NAME
-    assert "V2.0" in prd                            # version history
+    assert "V2.0" in prd                            # version history (fallback label: no ledger for "p1")
+    assert "PENDINGSEMVER" not in prd               # pending marker always stamped out
     assert "Cut refund handling time by 60" in prd  # business objectives
     assert "US-001: Submit refund request online" in prd  # FR row
     assert "Given a valid transaction ID" in prd          # acceptance criteria

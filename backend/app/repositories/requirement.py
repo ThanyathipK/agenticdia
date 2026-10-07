@@ -178,7 +178,8 @@ class RequirementRepository:
                     session=session,
                     old_value={"is_locked": False},
                     new_value={"is_locked": True, "locked_by": locked_by},
-                    performed_by=locked_by
+                    performed_by=locked_by,
+                    project_id=str(req.project_id),
                 )
             except Exception as log_err:
                 logger.warning(f"[EVENT LOG] Failed to log requirement lock: {log_err}")
@@ -227,7 +228,8 @@ class RequirementRepository:
                     session=session,
                     old_value={"is_locked": True, "locked_by": old_locked_by},
                     new_value={"is_locked": False},
-                    performed_by=unlocked_by
+                    performed_by=unlocked_by,
+                    project_id=str(req.project_id),
                 )
             except Exception as log_err:
                 logger.warning(f"[EVENT LOG] Failed to log requirement unlock: {log_err}")

@@ -11,8 +11,8 @@ document via python-docx:
 - custom ``L{..}``/``R{..}`` column widths become fixed Word column widths,
 - ``\\shortstack`` / ``\\parbox`` stacks become multi-paragraph cells,
 - ``\\section*`` headings, ``\\newpage`` breaks, enumerate lists, A4 page
-  geometry and the PRODUCT REQUIREMENT / CONFIDENTIAL header-footer mirror
-  the compiled PDF.
+  geometry, typography, cover, and the PRODUCT REQUIREMENT / CONFIDENTIAL
+  header-footer follow ``prompts/template-krungsrinimble.tex``.
 
 Anything unexpected degrades to plain text; :func:`app.latex_service.convert_to_docx`
 falls back to the Pandoc pipeline if this module raises unexpectedly.
@@ -37,7 +37,8 @@ from app.latex_service import (
 )
 
 #: Header-row fill taken from the template's ``\\definecolor{tblHeader}``.
-HEADER_FILL = "F8FAFC"
+HEADER_FILL = "FFFFFF"
+LATIN_FONT = "Aptos"
 
 #: Complex-script (CTL) face declared on the Normal/Heading styles so Thai
 #: text renders in the headless LibreOffice PDF conversion (and in Word).
@@ -68,6 +69,13 @@ _TEX_TEXT_REPLACEMENTS = (
 
 def _tex_to_text(fragment: str) -> str:
     """Decode escaped TeX characters into plain text."""
+    fragment = re.sub(
+        r"\\(?:normal(?:font|size)|large|Large|LARGE|sffamily|mdseries|bfseries|selectfont|noindent|hfill)\b",
+        "",
+        fragment,
+    )
+    fragment = re.sub(r"\\(?:hspace|vspace)\*?\{[^{}]*\}", "", fragment)
+    fragment = re.sub(r"\\(?:rule|fontfamily|fontsize)\{[^{}]*\}(?:\{[^{}]*\})?", "", fragment)
     for old, new in _TEX_TEXT_REPLACEMENTS:
         fragment = fragment.replace(old, new)
     return fragment.replace("{", "").replace("}", "").strip()
@@ -140,6 +148,7 @@ _COMMAND_ARGC: Dict[str, int] = {
     "fontsize": 2,
     "textbf": 1,
     "rowcolor": 1,
+    "coverfont": 1,
 }
 
 
@@ -160,6 +169,15 @@ def _read_command(text: str, start: int) -> Optional[Tuple[str, List[str], int]]
     if argc is None:
         return None
     i = start + m.end()
+    # Commands such as ``\shortstack[l]{...}`` carry an optional alignment
+    # argument before their braced payload. It affects layout only; the Word
+    # renderer already uses left-aligned cell paragraphs by default.
+    while i < len(text) and text[i].isspace():
+        i += 1
+    if i < len(text) and text[i] == "[":
+        closer = text.find("]", i + 1)
+        if closer != -1:
+            i = closer + 1
     args: List[str] = []
     while len(args) < argc and i < len(text):
         j = i
@@ -193,10 +211,11 @@ _RUN = Tuple[str, bool]  # one (text, bold) run
 
 
 def _unwrap_stacks(src: str) -> str:
-    """Unwrap ``\\shortstack{..}``, ``\\parbox{..}{..}`` and ``\\prdfield{..}``
+    """Unwrap ``\\shortstack{..}``, ``\\parbox{..}{..}``, ``\\coverfont{..}``
+    and ``\\prdfield{..}``
     so their inner content (and ``\\\\`` line breaks) becomes top-level."""
     while True:
-        m = re.search(r"\\(shortstack|parbox|prdfield)\b", src)
+        m = re.search(r"\\(shortstack|parbox|prdfield|coverfont)\b", src)
         if not m:
             return src
         parsed = _read_command(src, m.start())
@@ -250,7 +269,7 @@ def _parse_cell(src: str) -> Dict:
         else:
             meta["hspan"] = max(1, int(count))
         src = (args[-1] if args else "").strip()
-    src = _unwrap_stacks(src)
+    src = _unwrap_stacks(src).replace("\\newline", "\\\\")
     for line in _split_top(src, "\\\\"):
         line = line.strip()
         if not line:
@@ -446,6 +465,7 @@ def _shade(cell, fill: str) -> None:
 def _fill_cell(cell, paras: List[List[_RUN]]) -> None:
     for i, runs in enumerate(paras):
         p = cell.paragraphs[0] if i == 0 else cell.add_paragraph()
+        p.paragraph_format.space_after = Pt(0)
         for text, bold in runs:
             run = p.add_run(text)
             run.bold = bold
@@ -456,6 +476,7 @@ def _render_table(doc: "Document", spec: str, rows_src: str, centered: bool) -> 
     rows: List[List[Dict]] = []
     for raw in _split_tabular_rows(rows_src, len(widths)):
         raw = re.sub(r"\\(?:hline|cline\{\d+-\d+\})", "", raw)
+        raw = re.sub(r"\\noalign\{\\vskip\s+[^{}]+\}", "", raw)
         if not raw.strip():
             continue
         rows.append([_parse_cell(c) for c in _split_top(raw, "&")])
@@ -569,7 +590,16 @@ def _spacer(doc: "Document", amount_cm: float = 0.0) -> None:
 
 def _add_heading(doc: "Document", title: str) -> None:
     if title:
-        doc.add_heading(title, level=1)
+        if "Contents" in title:
+            title = "Contents"
+        title = _tex_to_text(title)
+        p = doc.add_heading(title, level=1)
+        if title == "Contents":
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        elif title.startswith("1."):
+            p.paragraph_format.left_indent = Cm(1.27)
+        elif re.match(r"^[234]\.\s", title):
+            p.paragraph_format.left_indent = Cm(0.64)
 
 
 def _render_enum(doc: "Document", enum_src: str) -> None:
@@ -580,13 +610,9 @@ def _render_enum(doc: "Document", enum_src: str) -> None:
 
 
 def _render_cover_titles(doc: "Document", flush_src: str) -> None:
-    """Render the cover title stack with the geometry of the ORIGINAL
-    ``template-krungsrinimble.pdf``: a 28pt REGULAR title, right-aligned,
-    sitting ~4.2cm below the page top, followed by 20pt bold LEFT-aligned
-    subtitle lines flush with the margin (the template PDF does not right-align
-    them the way the LaTeX ``flushright`` block does)."""
+    """Render the reference PDF's 28pt regular right-aligned cover title."""
     segments = re.split(r"\\\\(?:\[([0-9.]+)(?:cm|pt|em|ex)?\])?", flush_src)
-    first = True
+    title_index = 0
     for part in segments:
         if part is None or re.fullmatch(r"[0-9.]+", part):
             continue  # pure spacing terminator - gaps come from the template
@@ -598,11 +624,10 @@ def _render_cover_titles(doc: "Document", flush_src: str) -> None:
         )
         if not text:
             continue
-        if first:
-            size, bold, align, before_cm, after_cm = 28.0, False, WD_ALIGN_PARAGRAPH.RIGHT, 1.85, 2.2
-            first = False
+        if title_index == 0:
+            size, bold, align, before_cm, after_cm = 28.0, False, WD_ALIGN_PARAGRAPH.RIGHT, 1.65, 2.15
         else:
-            size, bold, align, before_cm, after_cm = 20.0, True, WD_ALIGN_PARAGRAPH.LEFT, 0.0, 0.45
+            size, bold, align, before_cm, after_cm = 20.0, True, WD_ALIGN_PARAGRAPH.LEFT, 0.0, 0.4
         p = doc.add_paragraph()
         p.alignment = align
         p.paragraph_format.space_before = Cm(before_cm)
@@ -610,21 +635,18 @@ def _render_cover_titles(doc: "Document", flush_src: str) -> None:
         run = p.add_run(text)
         run.bold = bold
         run.font.size = Pt(size)
+        title_index += 1
 
 
 def _render_cover(doc: "Document", cover_src: str) -> bool:
-    """Render the cover page with the exact layout of the original
-    ``template-krungsrinimble.pdf``: title stack (see
-    :func:`_render_cover_titles`) followed by plain 16pt PMO label lines on
-    the left margin - the template has NO bordered/centered table there, just
-    form-style lines with the value typed after a tab stop.
+    """Render page 1 from the supplied PDF's measured cover layout.
 
     Returns True when the cover was rendered from the template structure;
     False makes the caller fall back to the generic LaTeX body renderer.
     """
     flush_m = re.search(r"\\begin\{flushright\}(.*?)\\end\{flushright\}", cover_src, re.S)
     tbl_m = re.search(
-        r"\\begin\{tabular\}\s*\{(?P<spec>(?:[^{}]|\{[^{}]*\})*)\}(?P<tbl>.*?)\\end\{tabular\}",
+        r"\\begin\{tabular\}\{[^\n]*\}\s*(?P<tbl>.*?)\\end\{tabular\}",
         cover_src,
         re.S,
     )
@@ -632,33 +654,39 @@ def _render_cover(doc: "Document", cover_src: str) -> bool:
         return False
 
     _render_cover_titles(doc, flush_m.group(1))
+    for text, after_cm in (
+        ("KRUNGSRI NIMBLE", 0.25),
+        ("Product Requirement Document", 0.20),
+    ):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Cm(after_cm)
+        run = p.add_run(text)
+        run.bold = True
+        run.font.size = Pt(20)
 
     prev_p = None
     for raw in _split_top(tbl_m.group("tbl"), "\\\\"):
         raw = re.sub(r"\\(?:hline|cline\{\d+-\d+\})", "", raw).strip()
+        raw = re.sub(r"\\noalign\{\\vskip\s+[^{}]+\}", "", raw).strip()
         if not raw:
             continue
         cells = _split_top(raw, "&")
         if len(cells) < 2:
             continue
         label = "".join(t for t, _b in _line_runs(_unwrap_stacks(cells[0]))).strip()
+        value = "".join(t for t, _b in _line_runs(_unwrap_stacks(cells[1]))).strip()
         if not label:
             continue
-        value = "".join(t for t, _b in _line_runs(_unwrap_stacks(cells[1]))).strip()
         p = doc.add_paragraph()
-        # form-style line: label at the margin, value after a 4.5cm tab
-        # (the label-column width of the template's cover table)
         p.paragraph_format.tab_stops.add_tab_stop(Cm(4.5))
-        p.paragraph_format.space_after = Cm(0.44)
+        p.paragraph_format.space_after = Cm(0.35)
         run = p.add_run(label)
         run.font.size = Pt(16)
         if value:
-            vrun = p.add_run("\t" + value)
-            vrun.font.size = Pt(16)
+            value_run = p.add_run("\t" + value)
+            value_run.font.size = Pt(16)
         if label.lower().startswith("version") and prev_p is not None:
-            # the template leaves a blank line between "PMO Name:" and
-            # "Version:" before the second field group
-            prev_p.paragraph_format.space_after = Cm(1.7)
+            prev_p.paragraph_format.space_after = Cm(1.65)
         prev_p = p
     return True
 
@@ -756,37 +784,41 @@ def _add_cs_font(style, latin: str, size_pt: float) -> None:
 def _new_document() -> Document:
     doc = Document()
     normal = doc.styles["Normal"]
-    normal.font.name = "Arial"
-    normal.font.size = Pt(11)
-    _add_cs_font(normal, "Arial", 11)
+    normal.font.name = LATIN_FONT
+    normal.font.size = Pt(14)
+    normal.paragraph_format.space_after = Pt(0)
+    _add_cs_font(normal, LATIN_FONT, 14)
     heading = doc.styles["Heading 1"]
-    heading.font.name = "Arial"
-    heading.font.size = Pt(14)
-    heading.font.bold = True
-    heading.font.color.rgb = RGBColor(0x1F, 0x29, 0x37)
-    _add_cs_font(heading, "Arial", 14)
+    heading.font.name = LATIN_FONT
+    heading.font.size = Pt(16)
+    heading.font.bold = False
+    heading.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    heading.paragraph_format.space_after = Cm(0.35)
+    _add_cs_font(heading, LATIN_FONT, 16)
 
     section = doc.sections[0]
-    section.page_width = Cm(21.0)
-    section.page_height = Cm(29.7)
-    section.top_margin = Cm(2.2)
-    section.bottom_margin = Cm(2.2)
-    section.left_margin = Cm(2.4)
-    section.right_margin = Cm(2.4)
+    section.page_width = Cm(21.59)
+    section.page_height = Cm(27.94)
+    section.top_margin = Cm(2.54)
+    section.bottom_margin = Cm(2.54)
+    section.left_margin = Cm(2.54)
+    section.right_margin = Cm(2.54)
     # The official template shows the running header/footer on every page,
     # including the cover, so do not suppress first-page furniture.
     section.different_first_page_header_footer = False
 
     header_run = section.header.paragraphs[0].add_run("PRODUCT REQUIREMENT")
-    header_run.font.size = Pt(9)
+    header_run.font.name = LATIN_FONT
+    header_run.font.size = Pt(12)
 
     # Footer mirrors the compiled PDF: page number bottom-LEFT, company
     # "KRUNGSRI NIMBLE CONFIDENTIAL" centered across the page.
     footer_p = section.footer.paragraphs[0]
-    footer_p.paragraph_format.tab_stops.add_tab_stop(Cm(10.5), WD_TAB_ALIGNMENT.CENTER)
+    footer_p.paragraph_format.tab_stops.add_tab_stop(Cm(8.255), WD_TAB_ALIGNMENT.CENTER)
     _add_page_field(footer_p)
     footer_run = footer_p.add_run("\tKRUNGSRI NIMBLE CONFIDENTIAL")
-    footer_run.font.size = Pt(9)
+    footer_run.font.name = LATIN_FONT
+    footer_run.font.size = Pt(12)
 
     doc.core_properties.title = "Krungsri Nimble - Product Requirement Document"
     return doc
@@ -803,9 +835,9 @@ def latex_to_docx_native(latex_source: str) -> bytes:
     if not body:
         raise ValueError("Cannot export an empty PRD.")
     doc = _new_document()
-    # The cover page (everything before the first \newpage) is rendered with
-    # the exact geometry of the original template-krungsrinimble.pdf; anything
-    # that does not match that structure falls back to the generic renderer.
+    # The cover page (everything before the first \newpage) is rendered from
+    # the explicit structure in template-krungsrinimble.tex; anything that does
+    # not match that structure falls back to the generic renderer.
     cover_end = body.find("\\newpage")
     cover_rendered = False
     if cover_end != -1:
@@ -817,7 +849,3 @@ def latex_to_docx_native(latex_source: str) -> bytes:
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
-
-
-
-

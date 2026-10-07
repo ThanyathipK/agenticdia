@@ -65,11 +65,24 @@ export function renderInlineFormatting(
 
 // Splits a markdown table row "| a | b |" into its trimmed cells.
 function splitMarkdownRow(row: string): string[] {
-  return row
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
+  const source = row.replace(/^\|/, '').replace(/\|$/, '');
+  const cells: string[] = [];
+  let cell = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    // A GFM escaped pipe belongs to the cell; it is not a column boundary.
+    if (char === '\\' && source[i + 1] === '|') {
+      cell += '|';
+      i += 1;
+    } else if (char === '|') {
+      cells.push(cell.trim());
+      cell = '';
+    } else {
+      cell += char;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
 }
 
 // True for GFM separator rows like "|---|---|".
@@ -93,20 +106,45 @@ function renderCellContent(cell: string) {
 
 // Renders grouped markdown-table lines as a styled React table.
 function renderMarkdownTable(rows: string[], key: string) {
-  const hasHeader = rows.length > 1 && isSeparatorRow(rows[1]);
-  const headerCells = hasHeader ? splitMarkdownRow(rows[0]) : null;
-  const bodyRows = hasHeader ? rows.slice(2) : rows;
+  const separatorIndex = rows.findIndex(isSeparatorRow);
+  const declaredHeader = separatorIndex > 0 ? splitMarkdownRow(rows[separatorIndex - 1]) : null;
+  // Separator rows are Markdown syntax, never document content. Filter every
+  // occurrence so repeated separators from generated/edited tables cannot
+  // leak strings such as `:-----------------` into the visible preview.
+  let bodyRows = rows.filter((row, index) => (
+    !isSeparatorRow(row) && (separatorIndex < 0 || index !== separatorIndex - 1)
+  ));
+
+  // Pandoc sometimes emits an empty first row for LaTeX tables whose real
+  // headings are in the next bold row. Do not render that empty band as the
+  // table header; promote the next all-bold row when one is available.
+  let headerCells = declaredHeader?.some(Boolean) ? declaredHeader : null;
+  if (!headerCells && bodyRows.length > 0) {
+    const firstBodyCells = splitMarkdownRow(bodyRows[0]);
+    if (firstBodyCells.some(Boolean) && firstBodyCells.every(cell => !cell || /^\*\*.+\*\*$/.test(cell))) {
+      headerCells = firstBodyCells;
+      bodyRows = bodyRows.slice(1);
+    }
+  }
+
+  const allRows = [headerCells, ...bodyRows.map(splitMarkdownRow)].filter(Boolean) as string[][];
+  const columnCount = Math.max(1, ...allRows.map(row => row.length));
+  const normalizeCells = (cells: string[]) => [
+    ...cells.slice(0, columnCount),
+    ...Array(Math.max(0, columnCount - cells.length)).fill(''),
+  ];
+  if (headerCells) headerCells = normalizeCells(headerCells);
 
   return (
-    <div key={key} className="w-full overflow-x-auto custom-scrollbar my-4">
-    <table className="w-full border-collapse text-sm">
+    <div key={key} className="w-full max-w-full overflow-hidden my-4 rounded-xl border border-slate-200">
+    <table className="w-full max-w-full border-collapse text-sm table-fixed">
       {headerCells && (
         <thead>
           <tr>
             {headerCells.map((cell, i) => (
               <th
                 key={i}
-                className="border border-slate-200 bg-slate-50 px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-slate-700 break-words"
+                className="border border-slate-200 bg-slate-50 px-2 sm:px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-slate-700 break-words [overflow-wrap:anywhere]"
               >
                 {renderCellContent(cell)}
               </th>
@@ -117,8 +155,8 @@ function renderMarkdownTable(rows: string[], key: string) {
       <tbody>
         {bodyRows.map((row, r) => (
           <tr key={r} className={r % 2 === 1 ? 'bg-slate-50/50' : ''}>
-            {splitMarkdownRow(row).map((cell, c) => (
-              <td key={c} className="border border-slate-200 px-3 py-2 align-top text-slate-600 leading-relaxed break-words">
+            {normalizeCells(splitMarkdownRow(row)).map((cell, c) => (
+              <td key={c} className="border border-slate-200 px-2 sm:px-3 py-2 align-top text-slate-600 leading-relaxed break-words [overflow-wrap:anywhere] whitespace-normal">
                 {renderCellContent(cell)}
               </td>
             ))}
@@ -159,6 +197,18 @@ export function parseAndRenderMarkdown(md: string) {
         }
 
         const trimmed = block.line.trim();
+
+        // Pandoc wraps the cover brand in a flushright HTML container. The
+        // preview does not render raw HTML; hide the wrapper and style its
+        // retained text directly.
+        if (/^<\/?div(?:\s[^>]*)?>$/i.test(trimmed)) return null;
+        if (trimmed.toLowerCase() === 'nimble by krungsri') {
+          return (
+            <h2 key={idx} className="text-xl font-bold text-right text-slate-800 mt-2 mb-8 tracking-tight">
+              {trimmed}
+            </h2>
+          );
+        }
 
         // Manual page break marker — shown as a subtle divider in the preview.
         if (trimmed === '\\newpage') {
@@ -242,9 +292,10 @@ export function parseAndRenderMarkdown(md: string) {
         }
 
         // Standard Paragraph
+        const paragraphText = trimmed.endsWith('\\') ? trimmed.slice(0, -1).trimEnd() : trimmed;
         return (
           <p key={idx} className="text-slate-600 my-2 leading-relaxed text-sm break-words">
-            {renderInlineFormatting(trimmed)}
+            {renderInlineFormatting(paragraphText)}
           </p>
         );
       })}

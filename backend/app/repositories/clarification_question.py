@@ -124,17 +124,9 @@ class ClarificationQuestionRepository:
         target_us = data.get("target_user_story_id")
         story_id_val = await ClarificationQuestionRepository._resolve_story_id(pid, session, target_us)
 
-        # LOCK ENFORCEMENT: Cannot add clarification questions to a locked user story
-        if story_id_val:
-            stmt_story = select(UserStoryModel).where(UserStoryModel.id == story_id_val)
-            res_story = await session.execute(stmt_story)
-            story = res_story.scalar_one_or_none()
-            if story:
-                LockService.raise_if_locked_model(
-                    "user_story",
-                    story,
-                    message=f"User Story {story.ticket_code} is locked by {story.locked_by or 'unknown'}. Unlock it before adding clarification questions."
-                )
+        # Clarification questions are audit findings, not edits to the target
+        # story. They may reference locked artifacts and retain their normal
+        # resolved/status lifecycle.
 
         cq = ClarificationQuestionModel(
             audit_result_id=ar.id,
@@ -256,12 +248,6 @@ class ClarificationQuestionRepository:
         result = await session.execute(stmt)
         cq = result.scalar_one_or_none()
         if cq:
-            # LOCK ENFORCEMENT: Cannot update a locked clarification question
-            LockService.raise_if_locked_model(
-                "clarification_question",
-                cq,
-                message=f"Clarification Question is locked by {cq.locked_by or 'unknown'}. Unlock it before modifying."
-            )
             if "checklist_category" in updates:
                 cq.checklist_category = updates["checklist_category"]
             if "question_text" in updates:
@@ -314,12 +300,6 @@ class ClarificationQuestionRepository:
         result = await session.execute(stmt)
         cq = result.scalar_one_or_none()
         if cq:
-            # LOCK ENFORCEMENT: Cannot delete a locked clarification question
-            LockService.raise_if_locked_model(
-                "clarification_question",
-                cq,
-                message=f"Clarification Question is locked by {cq.locked_by or 'unknown'}. Unlock it before deleting."
-            )
             await session.delete(cq)
             await session.flush()
             return True

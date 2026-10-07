@@ -23,6 +23,7 @@ export interface RequirementItem {
   is_locked?: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
+  lock_reason?: string | null;
 }
 
 export interface StructuredRequirements {
@@ -93,6 +94,7 @@ export interface PRDSection {
 export interface PrdSectionLockState {
   is_locked: boolean;
   locked_by?: string | null;
+  lock_reason?: string | null;
   review_status: string;
   content_source: string;
   ai_generatable: boolean;
@@ -104,6 +106,7 @@ export interface ArtifactLockState {
   is_locked: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
+  lock_reason?: string | null;
 }
 
 // Optimistic lock state tracked in the UI keyed by requirement code.
@@ -111,5 +114,6 @@ export interface RequirementLockState {
   is_locked: boolean;
   locked_by?: string | null;
   locked_at?: string | null;
+  lock_reason?: string | null;
   artifact_id?: string;
 }

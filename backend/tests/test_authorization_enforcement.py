@@ -1,4 +1,3 @@
-o
 """Integration tests: authentication/ownership is actually WIRED to the routes.
 
 tests/conftest.py bypasses authentication for every other test module so they
@@ -390,8 +389,8 @@ async def test_audit_respond_owner_can_resolve_question(client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_audit_respond_locked_question_is_409(client, db_session):
-    """A locked question cannot be answered (the lock gate used to be bypassed)."""
+async def test_clarification_status_is_independent_from_legacy_lock_columns(client, db_session):
+    """Clarifications use resolved/status logic and are not lockable artifacts."""
     owner_token = await _register_and_login(client, "audit-locked-authz@bank.com")
     project_id = await _create_project(client, owner_token, "AuthZ Locked Q Project")
     question_id = await _seed_clarification_question(
@@ -403,11 +402,11 @@ async def test_audit_respond_locked_question_is_409(client, db_session):
         json={"answer_text": ANSWER},
         headers={"Authorization": f"Bearer {owner_token}"},
     )
-    assert resp.status_code == 409, resp.text
+    assert resp.status_code == 200, resp.text
 
     user_answer, is_resolved = await _read_question_state(db_session, question_id)
-    assert user_answer is None
-    assert is_resolved is False
+    assert user_answer == ANSWER
+    assert is_resolved is True
 
 
 # =====================================================================

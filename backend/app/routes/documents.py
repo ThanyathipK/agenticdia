@@ -49,6 +49,7 @@ from app.event_manager import event_manager
 from app.input_validation import count_tokens
 from app.rate_limit import rate_limit_dependency
 from app.repositories import (
+    ConversationMessageRepository,
     DocumentRepository,
     PendingActionRepository,
     RequirementStateRepository,
@@ -63,6 +64,44 @@ from app.schemas import (
 logger = logging.getLogger("app.routes.documents")
 
 router = APIRouter()
+
+
+async def _persist_conversion_message(
+    project_id: str,
+    message: str,
+    *,
+    status_value: str,
+    session: AsyncSession,
+) -> None:
+    """Append a durable document-conversion turn to the project transcript.
+
+    Each milestone is committed immediately. A failed upload raises
+    ``HTTPException``, which rolls back the request's current transaction; the
+    explicit commit ensures prior conversion messages remain permanent.
+    """
+    await ConversationMessageRepository.save_message(
+        project_id=project_id,
+        role="assistant",
+        message=message,
+        workflow_state="document_conversion",
+        intent=f"DOCUMENT_CONVERSION_{status_value.upper()}",
+        session=session,
+    )
+    await session.commit()
+    try:
+        await event_manager.publish(
+            project_id,
+            "chat_reply",
+            {
+                "project_id": project_id,
+                "intent": f"DOCUMENT_CONVERSION_{status_value.upper()}",
+            },
+        )
+    except Exception:
+        # Realtime delivery is only a refresh hint. The committed transcript is
+        # authoritative and must not be reported as a failed conversion merely
+        # because an SSE subscriber disappeared.
+        logger.exception("Failed to publish conversion chat refresh for %s", project_id)
 
 # ==========================================
 # ALLOWED FORMATS / MIME VALIDATION
@@ -294,9 +333,29 @@ async def upload_document(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid project_id format")
 
+    filename = (file.filename or "unnamed").strip()
+    # Persist the original conversion request before validation/conversion. It
+    # remains in history even when a later step fails and the request-scoped
+    # transaction is rolled back.
+    await _persist_conversion_message(
+        project_id,
+        f"Convert uploaded document: {filename}",
+        status_value="requested",
+        session=session,
+    )
+
     # DOC-UPLOAD 2.1.2 / 2.1.3 — Format allow-list (3.4), then the streaming size cap (3.5).
-    fmt = _resolve_upload_format(file.filename or "", file.content_type or "")
-    raw = await _read_upload_with_size_cap(file)
+    try:
+        fmt = _resolve_upload_format(file.filename or "", file.content_type or "")
+        raw = await _read_upload_with_size_cap(file)
+    except HTTPException as exc:
+        await _persist_conversion_message(
+            project_id,
+            f"Document conversion failed: {filename}\nStatus: failed ({exc.status_code})\nError: {exc.detail}",
+            status_value="failed",
+            session=session,
+        )
+        raise
 
     status_value = "processed"
     error_message = None
@@ -322,29 +381,72 @@ async def upload_document(
             error_message = exc.detail
             markdown = ""
         else:
+            await _persist_conversion_message(
+                project_id,
+                f"Document conversion failed: {filename}\nStatus: failed ({exc.status_code})\nError: {exc.detail}",
+                status_value="failed",
+                session=session,
+            )
             raise
+    except Exception as exc:
+        logger.exception("Unexpected document conversion failure for %s", filename)
+        await _persist_conversion_message(
+            project_id,
+            f"Document conversion failed: {filename}\nStatus: failed (500)\nError: {str(exc) or type(exc).__name__}",
+            status_value="failed",
+            session=session,
+        )
+        raise
 
     # DOC-UPLOAD 2.1.6 — Token count off-thread (tiktoken BPE over the whole document):
     #                 measured for display/budget purposes only — it never truncates or
     #                 blocks the save.
-    token_count = await asyncio.to_thread(count_tokens, markdown)
-    # DOC-UPLOAD 2.1.7 — Persist the immutable knowledge record (4.1): full markdown,
-    #                 size, tokens, status, and extraction_status 'not_extracted'.
-    doc = await DocumentRepository.create(
-        str(project_id),
-        {
-            "original_filename": (file.filename or "unnamed").strip(),
-            "original_format": fmt["original_format"],
-            "mime_type": fmt["mime_type"],
-            "content_markdown": markdown,
-            "file_size_bytes": len(raw),
-            "token_count": token_count,
-            "status": status_value,
-            "uploaded_by": "user",
-            "extraction_status": "not_extracted",
-        },
-        session,
-    )
+    try:
+        token_count = await asyncio.to_thread(count_tokens, markdown)
+        # DOC-UPLOAD 2.1.7 — Persist the immutable knowledge record (4.1): full markdown,
+        #                 size, tokens, status, and extraction_status 'not_extracted'.
+        doc = await DocumentRepository.create(
+            str(project_id),
+            {
+                "original_filename": filename,
+                "original_format": fmt["original_format"],
+                "mime_type": fmt["mime_type"],
+                "content_markdown": markdown,
+                "file_size_bytes": len(raw),
+                "token_count": token_count,
+                "status": status_value,
+                "uploaded_by": "user",
+                "extraction_status": "not_extracted",
+            },
+            session,
+        )
+    except Exception as exc:
+        await session.rollback()
+        await _persist_conversion_message(
+            project_id,
+            f"Document conversion failed: {filename}\nStatus: failed (500)\nError: {str(exc) or type(exc).__name__}",
+            status_value="failed",
+            session=session,
+        )
+        raise
+
+    # Commit the document and its final transcript status together before any
+    # best-effort realtime notification can fail.
+    if error_message:
+        doc["message"] = error_message  # surfaced via extra=allow on the schema
+        await _persist_conversion_message(
+            project_id,
+            f"Document conversion failed: {filename}\nStatus: failed\nError: {error_message}",
+            status_value="failed",
+            session=session,
+        )
+    else:
+        await _persist_conversion_message(
+            project_id,
+            f"Document conversion completed: {filename}\nStatus: processed",
+            status_value="processed",
+            session=session,
+        )
 
     # DOC-UPLOAD 2.1.8 — SSE "document_uploaded" (EVENTS flow) so other tabs/windows refresh
     #                 their knowledge lists.
@@ -368,8 +470,6 @@ async def upload_document(
         token_count,
         status_value,
     )
-    if error_message:
-        doc["message"] = error_message  # surfaced via extra=allow on the schema
     return doc
 # ==========================================
 # LIST + DETAIL — READ-ONLY KNOWLEDGE ACCESS
@@ -749,9 +849,23 @@ async def process_document(
         },
     )
 
-    run = await _run_extraction_by_chunks(
-        project_id, document_id, content_markdown, token_count
-    )
+    try:
+        run = await _run_extraction_by_chunks(
+            project_id, document_id, content_markdown, token_count
+        )
+    except Exception:
+        # A failed/oversized LLM run must not leave the row looking as though a
+        # reviewable draft exists. No pending action has been created yet, so
+        # returning to knowledge-only is the truthful, retryable state.
+        await DocumentRepository.update_extraction_status(
+            document_id, project_id, "not_extracted", session
+        )
+        await event_manager.publish(
+            project_id,
+            "document_extraction_failed",
+            {"project_id": project_id, "document_id": document_id},
+        )
+        raise
 
     doc_draft = accumulate_document_draft(run["chunks"])
     current_state = await RequirementStateRepository.get_by_project_id(project_id, session)

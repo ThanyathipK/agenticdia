@@ -55,14 +55,80 @@ def _clean(value: Any) -> str:
     return str(value or "").strip().replace("\r", " ").replace("\n", " ")
 
 
+# PENDING DOCUMENT-VERSION LABEL — written into the cover's VERSION field and
+# the Version History row when the caller does not know the semver YET (the
+# semver of a snapshot can only be computed once the filled document exists,
+# because the document's own changes feed compute_section_changes). The caller
+# then resolves the semver (version_service.resolve_document_semver) and calls
+# stamp_version_label() to swap this marker for the real label BEFORE the
+# document is stored or exported. The marker is letters-only, so it survives
+# escape_latex, pandoc and LaTeX compilation untouched when unstamped.
+PENDING_VERSION_LABEL = "PENDINGSEMVER"
+
+
+def version_history_sentence(history_context: Optional[str]) -> str:
+    """Return one short, natural sentence for the current PRD version.
+
+    ``history_context`` is a multi-line digest of previous versions. It must
+    never be copied into one table cell; version, date, and author already
+    have dedicated columns in the document.
+    """
+    context = str(history_context or "").strip().lower()
+    if not context or context.startswith("no previous"):
+        return "Initial PRD created."
+    return "PRD updated with the latest requirements."
+
+
+def _one_sentence(value: Any, fallback: str = "PRD updated.") -> str:
+    """Collapse a ledger description to one short, readable sentence."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return fallback
+    first = re.match(r"^.*?[.!?](?=\s|$)", text)
+    sentence = first.group(0) if first else text
+    if len(sentence) > 140:
+        sentence = sentence[:137].rsplit(" ", 1)[0].rstrip(".,;:") + "..."
+    elif sentence[-1] not in ".!?":
+        sentence += "."
+    return sentence
+
+
+def _previous_version_rows(history_context: Optional[str]) -> List[tuple[str, str, str, str]]:
+    """Parse the newest-first ledger digest into chronological table rows."""
+    rows: List[tuple[str, str, str, str]] = []
+    pattern = re.compile(r"^-\s*v([^\s]+)\s+\(([^,]+),\s*([^)]+)\):\s*(.*)$")
+    for line in str(history_context or "").splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        version, timestamp, author, description = match.groups()
+        display_author = {"automated_agent": "System", "user": "User"}.get(
+            author.strip(), author.strip(),
+        )
+        rows.append((version, timestamp.strip()[:10], display_author, _one_sentence(description)))
+    rows.reverse()
+    return rows
+
+
+def stamp_version_label(document: str, label: str) -> str:
+    """Replace every :data:`PENDING_VERSION_LABEL` marker in ``document`` with
+    ``label`` (LaTeX-escaped), returning the stamped document.
+
+    Pure string replacement — it never fails; a document without the marker
+    is returned unchanged. Callers use it to stamp the ledger's semver into
+    the cover + Version History section after resolving it.
+    """
+    return (document or "").replace(PENDING_VERSION_LABEL, escape_latex(label))
+
+
 # ---------------------------------------------------------------------------
 # Section fillers - each replaces the blank/marker inside the SAME skeleton
 # ---------------------------------------------------------------------------
-def _fill_cover(body: str, project_id: str, project_name: str, version: int,
+def _fill_cover(body: str, project_id: str, project_name: str, version_label: str,
                 author: str, today: str) -> str:
     body = body.replace(r"\prdfield{PMO\_NO}", escape_latex(project_id[:8].upper()), 1)
     body = body.replace(r"\prdfield{PMO\_NAME}", escape_latex(project_name), 1)
-    body = body.replace(r"\prdfield{VERSION}", escape_latex(f"V{version}.0"), 1)
+    body = body.replace(r"\prdfield{VERSION}", escape_latex(version_label), 1)
     body = body.replace(r"\prdfield{STATUS}", "Draft", 1)
     body = body.replace(r"\prdfield{LAST\_UPDATE}", escape_latex(today), 1)
     body = body.replace(r"\prdfield{AUTHOR}", escape_latex(author or "Product Owner"), 1)
@@ -89,15 +155,23 @@ def _fill_stakeholders(body: str, actors: List[Any]) -> str:
     return body
 
 
-def _fill_version_history(body: str, version: int, author: str, today: str,
-                          version_summary: str) -> str:
-    desc = escape_latex(version_summary or "Initial approved version")
-    body = body.replace(
-        "V1.0 & & & \\\\",
-        f"V{version}.0 & {escape_latex(today)} & {escape_latex(author or 'Product Owner')} & {desc} \\\\",
-        1,
+def _fill_version_history(body: str, version_label: str, author: str, today: str,
+                          version_summary: str,
+                          history_context: Optional[str] = None) -> str:
+    """Write one row for every prior version plus the current version."""
+    rows = _previous_version_rows(history_context)
+    rows.append((
+        version_label,
+        today,
+        author or "Product Owner",
+        _one_sentence(version_summary, "Initial PRD created."),
+    ))
+    rendered = "\n  \\hline\n".join(
+        "  " + " & ".join(escape_latex(value) for value in row) + " \\\\"
+        for row in rows
     )
-    return body
+    placeholder = "  V1.0 & & & \\\\\n  \\hline\n  & & & \\\\\n  \\hline"
+    return body.replace(placeholder, rendered + "\n  \\hline", 1)
 
 
 def _fill_reviews(body: str, actors: List[Any]) -> str:
@@ -129,7 +203,8 @@ def _fill_business_overview(body: str, data: Dict[str, Any],
     problems = [_clean(p) for p in (data.get("problem_statement") or [])
                 if str(p or "").strip()] or ["TBD"]
     problem_cell = r"\prdfield{" + "".join(
-        f"{i + 1}. {escape_latex(p)}\\\\{'[0.15cm]' if i == 0 else ''}"
+        f"{i + 1}. {escape_latex(p)}"
+        + (r"\newline " if i < len(problems) - 1 else "")
         for i, p in enumerate(problems)
     ) + "}"
 
@@ -141,8 +216,10 @@ def _fill_business_overview(body: str, data: Dict[str, Any],
             return r"\prdfield{TBD}"
         parts = []
         for idx, item in enumerate(cleaned):
-            gap = "[0.15cm]" if idx == 0 else ""
-            parts.append(f"{idx + 1}. {item}\\\\{gap}")
+            parts.append(
+                f"{idx + 1}. {item}"
+                + (r"\newline " if idx < len(cleaned) - 1 else "")
+            )
         return r"\prdfield{" + "".join(parts) + "}"
 
     target = [
@@ -156,7 +233,7 @@ def _fill_business_overview(body: str, data: Dict[str, Any],
     rows = [
         (
             r"^  Introduction",
-            f"  Introduction \\&\\\\ Executive Summary & {epic} \\\\",
+            f"  Introduction \\&\\newline Executive Summary & {epic} \\\\",
         ),
         (
             r"^  Problem Statement",
@@ -176,7 +253,7 @@ def _fill_business_overview(body: str, data: Dict[str, Any],
         ),
         (
             r"^  Target Audience",
-            f"  Target Audience \\&\\\\ user Personas & {target_cell} \\\\",
+            f"  Target Audience \\&\\newline user Personas & {target_cell} \\\\",
         ),
     ]
     return _rewrite_rows(body, rows)
@@ -226,7 +303,7 @@ AC 1.2:} \\"""
         acs = [escape_latex(_clean(a)) for a in (story.get("acceptance_criteria") or [])
                if str(a or "").strip()] or [r"\prdfield{TBD}"]
         ac_block = "\\\\".join(f"AC {idx}.{j}: {ac}" for j, ac in enumerate(acs, start=1))
-        rows.append(f"    & & {fr_block} & {ac_block} \\\\")
+        rows.append(f"    & & \\rule{{0pt}}{{2.1cm}}{fr_block} & {ac_block} \\\\")
     # Each row already ends with a complete ``\\`` terminator; rows are
     # separated by a plain newline.  Joining with ``'\<newline>'`` used to
     # emit ``\\\<newline>`` between rows - the stray odd backslash leaked
@@ -257,16 +334,16 @@ def _fill_product_scope(body: str, data: Dict[str, Any]) -> str:
     # unique in the template - the Scope Definition label uses \multirow{2}.)
     span = max(1, len(stories)) + 2
     body = re.sub(
-        r"\\multirow\{3\}\{\*\}",
+        r"\\multirow(?:\[t\])?\{3\}\{\*\}",
         lambda _m: "\\multirow{" + str(span) + "}{*}",
         body,
         count=1,
     )
 
     _ANCHOR_FR_ROW = (
-        r"""    & & \shortstack{FR 1.1: The system\\"""
+        r"""    & & \rule{0pt}{2.1cm}\normalsize\sffamily\shortstack{FR 1.1: The system\\"""
         + "\n"
-        + r"""must\ldots} & \shortstack{AC 1.1:\\"""
+        + r"""must\ldots} & \normalsize\sffamily\shortstack{AC 1.1:\\"""
         + "\n"
         + r"""AC 1.2:} \\"""
     )
@@ -309,19 +386,19 @@ def _fill_product_scope(body: str, data: Dict[str, Any]) -> str:
     # stays mid-line and latex_service._keep_in_cell_rowbreaks classifies it
     # as an in-cell break ("<br>") instead of a row terminator.
     inner = (
-        BS + "prdlbl{Scope In}" + BS + BS + " "
+        BS + "rule{0pt}{4.2cm}" + BS + "prdlbl{Scope In}" + BS + BS + " "
         + in_lines + " "
         + BS + "prdlbl{Scope out}" + BS + BS + " "
         + out_lines
         + "}}"
     )
     scope_block = (
-        BS + "multicolumn{3}{c}{" + BS + "parbox{11.5cm}{%" + NL
+        BS + "multicolumn{3}{L{12.55cm}|}{" + BS + "parbox{12.15cm}{%" + NL
         + "        " + inner + " " + BS + BS
     )
 
     _SCOPE_ROW_RE = re.compile(
-        r"\\multicolumn\{3\}\{c\}\{\\parbox\{11\.5cm\}\{%\s*\\shortstack\{.*?\}\}\} \\\\",
+        r"\\multicolumn\{3\}\{L\{12\.55cm\}\|\}\{\\parbox\{12\.15cm\}\{%\s*\\rule\{0pt\}\{4\.2cm\}\\shortstack(?:\[l\])?\{.*?\}\}\} \\\\",
         re.S,
     )
     if _SCOPE_ROW_RE.search(body):
@@ -338,23 +415,23 @@ def _fill_tech_appendix(body: str, narrative: Optional[Dict[str, str]]) -> str:
     rows = [
         (
             r"^  Non-Functional",
-            f"  Non-Functional\\\\ Requirements & {_cell('non_functional', r'\prdfield{TBD}')} \\\\",
+            f"  Non-Functional\\newline Requirements & {_cell('non_functional', r'\prdfield{TBD}')} \\\\",
         ),
         (
             r"^  Expected\\",
-            f"  Expected\\\\ TPS/Customer\\\\ volume & {_cell('tps_volume', r'\prdfield{TBD}')} \\\\",
+            f"  Expected\\newline TPS/Customer\\newline volume & {_cell('tps_volume', r'\prdfield{TBD}')} \\\\",
         ),
         (
             r"^  Growth\\",
-            f"  Growth\\\\ prediction\\\\ Y0Y\\% & {_cell('growth', r'\prdfield{TBD}')} \\\\",
+            f"  Growth\\newline prediction\\newline Y0Y\\% & {_cell('growth', r'\prdfield{TBD}')} \\\\",
         ),
         (
             r"^  Launch",
-            f"  Launch \\&\\\\ Rollout Plan & {_cell('launch_plan', r'\prdfield{TBD}')} \\\\",
+            f"  Launch \\&\\newline Rollout Plan & {_cell('launch_plan', r'\prdfield{TBD}')} \\\\",
         ),
         (
             r"^  Open",
-            f"  Open\\\\ Questions \\&\\\\ Risks & {_cell('open_questions', r'\prdfield{TBD}')} \\\\",
+            f"  Open\\newline Questions \\&\\newline Risks & {_cell('open_questions', r'\prdfield{TBD}')} \\\\",
         ),
         (
             r"^  Assumptions",
@@ -414,19 +491,31 @@ def fill_template_body(
     data: Optional[Dict[str, Any]] = None,
     narrative: Optional[Dict[str, str]] = None,
     version_summary: str = "",
+    version_history: Optional[str] = None,
+    version_label: Optional[str] = None,
 ) -> str:
     """Return the official Krungsri template BODY with its blanks filled from
     the project dataset. ``data`` maps: ``business_goals``, ``actors``,
     ``requirements`` (with nested ``user_stories`` + ``acceptance_criteria``)
     or flat ``user_stories`` / ``acceptance_criteria``, ``epic_name``,
-    ``scope_in``, ``scope_out``, ``problem_statement``."""
+    ``scope_in``, ``scope_out``, ``problem_statement``.
+
+    ``version_label`` is the display version stamped into the cover's VERSION
+    field and the Version History row. When omitted it falls back to the
+    legacy ``V{version}.0`` derived from the integer version; callers that
+    must show the ledger's semver pass :data:`PENDING_VERSION_LABEL` here and
+    stamp the resolved semver with :func:`stamp_version_label` afterwards.
+    """
     data = data or {}
     today = today or _date.today().isoformat()
+    version_label = (version_label or "").strip() or f"V{version}.0"
 
     body = load_prd_latex_template_body()
-    body = _fill_cover(body, project_id, project_name, version, author, today)
+    body = _fill_cover(body, project_id, project_name, version_label, author, today)
     body = _fill_stakeholders(body, data.get("actors") or [])
-    body = _fill_version_history(body, version, author, today, version_summary)
+    body = _fill_version_history(
+        body, version_label, author, today, version_summary, version_history,
+    )
     body = _fill_reviews(body, data.get("actors") or [])
     body = _fill_business_overview(body, data, narrative)
     body = _fill_product_scope(body, data)
