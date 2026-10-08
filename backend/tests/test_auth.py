@@ -583,6 +583,6 @@ async def test_owner_can_manage_their_own_project(client, db_session):
 
     assert (await client.put(f"/api/projects/{pid}", json={"name": "Mine 2"}, headers=headers)).status_code == 200
     assert (await client.put(f"/api/projects/{pid}/pin", json={"is_pinned": True}, headers=headers)).status_code == 200
-    assert (await client.put(f"/api/projects/{pid}/status", json={"status": "approved"}, headers=headers)).status_code == 200
+    assert (await client.put(f"/api/projects/{pid}/status", json={"status": "in_review_hpo"}, headers=headers)).status_code == 200
     assert (await client.delete(f"/api/projects/{pid}", headers=headers)).status_code == 200
     assert (await client.get("/api/projects", headers=headers)).json() == []

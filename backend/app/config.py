@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     def async_database_url(self) -> str:
         url = (self.DATABASE_URL or "").strip()
         if not url:
+            if not self.ALLOW_SQLITE_FALLBACK:
+                raise RuntimeError(
+                    "DATABASE_URL is empty and ALLOW_SQLITE_FALLBACK is false. "
+                    "Configure the Supabase PostgreSQL connection string before startup."
+                )
+            logger.warning(
+                "DATABASE_URL is empty. Falling back to the local SQLite database (%s); "
+                "data written now will NOT reach Supabase.",
+                SQLITE_FALLBACK_URL,
+            )
             return SQLITE_FALLBACK_URL
         # Unfilled template placeholder (copied verbatim from .env.example).
         # Never hand this to the driver: asyncpg only reports it as the cryptic
@@ -247,6 +257,13 @@ class Settings(BaseSettings):
     MEMORY_DEDUPE_SIMILARITY: float = 0.92
     # Cap on facts extracted from a single chat turn (token-budget hygiene).
     MEMORY_MAX_FACTS_PER_TURN: int = 8
+
+    # Reusable banking knowledge retrieval. Embeddings use the same local model
+    # as semantic memory; lexical scoring remains available while it is offline.
+    BANKING_RAG_CHUNK_TOKENS: int = 700
+    BANKING_RAG_CHUNK_OVERLAP: int = 100
+    BANKING_RAG_TOP_K: int = 6
+    BANKING_RAG_MAX_CONTEXT_TOKENS: int = 3500
 
     # SSE pub/sub reliability (see app/event_manager.py).
 

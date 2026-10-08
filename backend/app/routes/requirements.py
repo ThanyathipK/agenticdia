@@ -524,7 +524,7 @@ async def post_process_requirements(
     if current_task is not None:
         workflow_cancellations.register(str(request.project_id), current_task)
     try:
-        return await _process_requirements_pipeline(request, session)
+        return await _process_requirements_pipeline(request, session, current_user)
     except asyncio.CancelledError:
         # Hard-cancel from the Stop button. CancelledError is a BaseException,
         # so the pipeline's `except Exception -> HTTP 500` guard never swallows
@@ -550,6 +550,7 @@ async def post_process_requirements(
 async def _process_requirements_pipeline(
     request: ProcessRequirementsRequest,
     session: AsyncSession,
+    current_user: AuthenticatedUser,
 ) -> ProcessRequirementsResponse:
     """
     Asynchronously invokes the LangGraph multi-agent workflow (prd_workflow)
@@ -887,6 +888,28 @@ async def _process_requirements_pipeline(
                 req_state["version_number"] = reqs["version"]
 
     # Formulate initial state corresponding to AgentState TypedDict
+    knowledge_documents = []
+    if request.target_agent == "auditor":
+        knowledge_documents = await DocumentRepository.get_validation_context(request.project_id, session)
+        try:
+            from app.banking_knowledge_service import build_audit_retrieval_query, retrieve_banking_knowledge
+
+            banking_context = await retrieve_banking_knowledge(
+                current_user.id,
+                str(request.project_id),
+                build_audit_retrieval_query(req_state or {}),
+                session,
+            )
+            knowledge_documents.extend(banking_context)
+            logger.info(
+                "[BANKING RAG] Retrieved %d approved knowledge chunk(s) for project %s",
+                len(banking_context), request.project_id,
+            )
+        except Exception as rag_err:
+            # Project documents still provide the established audit evidence
+            # path if the reusable corpus or embedding service is unavailable.
+            logger.warning("[BANKING RAG] Retrieval unavailable; continuing without it: %s", rag_err)
+
     initial_state = {
         "project_id": request.project_id,
         "raw_input": request.raw_input or "",
@@ -912,12 +935,12 @@ async def _process_requirements_pipeline(
         # browser sends only document metadata, so loading the canonical text
         # here prevents stale/tampered client content and makes a document-only
         # project auditable without requiring extraction first.
-        "knowledge_documents": (
-            await DocumentRepository.get_validation_context(request.project_id, session)
-            if request.target_agent == "auditor"
-            else []
-        ),
-        "db_session": session  # Pass the active session to workflow nodes
+        "knowledge_documents": knowledge_documents,
+        "db_session": session,  # Pass the active session to workflow nodes
+        # Architect output follows the same confirmation contract as gathered
+        # requirements.  Section/version writes happen in confirm_action, not
+        # while merely building the preview.
+        "stage_artifacts_only": request.target_agent == "architect",
     }
 
     try:
@@ -1019,7 +1042,13 @@ async def _process_requirements_pipeline(
             "audit_version_reviewed": req_state.get("version_number", 1),
             "clarification_questions": req_state.get("clarification_questions", []),
             "passed_checks": final_state.get("audit_result", {}).get("passed_checks", []),
-            "failed_checks": final_state.get("audit_result", {}).get("failed_checks", [])
+            "failed_checks": final_state.get("audit_result", {}).get("failed_checks", []),
+            "findings": final_state.get("audit_result", {}).get("findings", []),
+            "source_references": final_state.get("audit_result", {}).get("source_references", []),
+            "verdict": final_state.get("audit_result", {}).get("verdict", req_state.get("audit_verdict", "needs_clarification")),
+            "project_context": final_state.get("audit_result", {}).get("project_context", req_state.get("audit_project_context", {})),
+            "checklist_id": final_state.get("audit_result", {}).get("checklist_id", req_state.get("audit_checklist_id", "banking-core")),
+            "checklist_version": final_state.get("audit_result", {}).get("checklist_version", req_state.get("audit_checklist_version", "1.0.0")),
         }
 
         # Notify SSE subscribers that the workflow produced new state / a pending merge.
@@ -1072,7 +1101,7 @@ async def _process_requirements_pipeline(
         logger.error(f"Workflow produced no usable structured output for project {request.project_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The model failed to produce a valid structured response. Please retry the generation.",
+            detail="The audit or generation could not complete. Please try again. Your previous saved results have not been replaced.",
         )
     except Exception as e:
         logger.error(f"Multi-agent workflow execution failed for project {request.project_id}: {str(e)}")

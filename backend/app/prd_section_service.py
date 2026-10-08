@@ -426,6 +426,7 @@ async def sync_sections_from_prd(
     *,
     changed_by: str = "automated_agent",
     change_summary: Optional[str] = None,
+    selected_section_keys: Optional[Set[str]] = None,
 ) -> Optional[str]:
     """
     Merge a freshly generated PRD into the project's stored sections.
@@ -474,7 +475,10 @@ async def sync_sections_from_prd(
         for s in await PRDSectionRepository.get_by_project(project_id, session)
     }
 
+    selected = set(selected_section_keys) if selected_section_keys is not None else None
     for order, part in enumerate(parts, start=1):
+        if selected is not None and part["section_key"] not in selected:
+            continue
         row = existing.get(part["section_key"])
         if row is None:
             defaults = next(
@@ -508,6 +512,7 @@ async def sync_sections_from_prd(
     stitched = stitch_markdown(list(existing.values()))
     logger.info(
         "[PRD SECTIONS] Synced %d generated parts into %d stored sections for project %s",
-        len(parts), len(existing), project_id,
+        len(parts) if selected is None else len([p for p in parts if p["section_key"] in selected]),
+        len(existing), project_id,
     )
     return stitched

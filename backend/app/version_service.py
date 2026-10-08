@@ -26,6 +26,7 @@ from app.prd_section_service import split_markdown_sections
 from app.repositories.prd import PRDVersionRepository
 from app.repositories.prd_section import PRDSectionRepository
 from app.repositories.requirement_state import RequirementStateRepository
+from app.review_service import mark_revised_if_approved
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,15 @@ async def record_prd_version(
         "changed_sections": changed,
         "semver": semver,
     }, session, version_number=version_number)
+
+    if any(item.get("change_kind") in {CHANGE_CREATED, CHANGE_UPDATED, CHANGE_REMOVED} for item in changed):
+        await mark_revised_if_approved(
+            project_id,
+            session,
+            reason="The approved PRD content changed and requires review again.",
+            actor_name=generated_by,
+            actor_role="automated_agent" if change_type == "ai" else "editor",
+        )
 
     # Keep the project's current version number in lock-step with the ledger so
     # the stamped document label (cover + Version History show this row's

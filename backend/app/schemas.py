@@ -233,6 +233,10 @@ class ProjectSummary(BaseModel):
         "draft",
         description="User-editable workflow status: 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised'.",
     )
+    last_approved_prd_version: Optional[int] = None
+    last_approved_audit_version: Optional[int] = None
+    last_approved_by: Optional[str] = None
+    last_approved_at: Optional[str] = None
     updated_at: Optional[str] = Field(
         None,
         description="ISO-8601 timestamp of the last project update (drives the dashboard 'Updated' column).",
@@ -272,6 +276,22 @@ class ProjectStatusRequest(BaseModel):
         ...,
         description="New workflow status: 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised'.",
     )
+    comment: Optional[str] = Field(None, max_length=2000, description="Optional review or change-request note.")
+
+
+class ProjectReviewEventResponse(BaseModel):
+    id: str
+    project_id: str
+    from_status: str
+    to_status: str
+    action: str
+    comment: Optional[str] = None
+    actor_id: Optional[str] = None
+    actor_name: str
+    actor_role: str
+    prd_version_number: Optional[int] = None
+    audit_version_reviewed: Optional[int] = None
+    created_at: Optional[str] = None
 
 
 # --------------------------------------------------------------------------
@@ -352,6 +372,7 @@ class ClarificationQuestionDetail(BaseModel):
     question_text: Optional[str] = Field(None, description="Human-readable question.")
     user_answer: Optional[str] = Field(None, description="Stakeholder resolution text, if answered.")
     is_resolved: Optional[bool] = Field(None, description="Whether the question has been resolved.")
+    source_references: List[Dict[str, Any]] = Field(default_factory=list, description="Knowledge-base evidence supporting the question.")
 
 
 class RequirementDetail(BaseModel):
@@ -670,6 +691,79 @@ class StructuredRequirementsDetail(BaseModel):
     requirements: Optional[List[RequirementDetail]] = Field(default_factory=list, description="Requirement entries with nested stories.")
 
 
+class AuditSourceReference(BaseModel):
+    """A traceable citation into an uploaded knowledge-base document."""
+    document_id: Optional[str] = None
+    document_name: str
+    section: Optional[str] = None
+    excerpt: Optional[str] = None
+
+
+class AuditRecommendationDetail(BaseModel):
+    """Actionable, non-authoritative wording proposed for one finding."""
+    summary: str
+    proposed_requirement_text: Optional[str] = None
+    proposed_acceptance_criteria: List[str] = Field(default_factory=list)
+    expected_benefit: Optional[str] = None
+
+    @field_validator("proposed_acceptance_criteria", mode="before")
+    @classmethod
+    def _coerce_single_acceptance_criterion(cls, value: Any) -> Any:
+        """Repair the common local-model shape of one criterion as a string.
+
+        This is lossless and avoids repeating a multi-minute audit solely to
+        obtain ``[value]`` instead of ``value``. Other malformed shapes remain
+        rejected by Pydantic.
+        """
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return [cleaned] if cleaned else []
+        return value
+
+
+class AuditFindingDetail(BaseModel):
+    """One evidence-backed issue found by the Auditor."""
+    rule_id: str = "ADHOC"
+    finding_type: str
+    severity: str = "medium"
+    category: str
+    target_requirement_id: Optional[str] = None
+    description: str
+    source_references: List[AuditSourceReference] = Field(default_factory=list)
+    evidence_status: str = "supported"
+    applicability: str = "unknown"
+    impact: str = "warning"
+    confidence: float = 0.5
+    rationale: Optional[str] = None
+    recommendation: Optional[AuditRecommendationDetail] = None
+
+
+class AuditProjectContext(BaseModel):
+    """Auditor's visible, correctable classification of the project."""
+    business_segment: str = "unknown"
+    product_domain: str = "unknown"
+    solution_type: str = "unknown"
+    financial_transaction: Optional[bool] = None
+    external_integration: Optional[bool] = None
+    sensitive_data: Optional[bool] = None
+    delivery_stage: str = "unknown"
+    confidence: float = 0.0
+
+
+class AuditorOutput(BaseModel):
+    """Strict structured output expected from each Auditor LLM pass."""
+    is_valid: bool = False
+    audit_version_reviewed: int = 1
+    passed_checks: List[str] = Field(default_factory=list)
+    failed_checks: List[str] = Field(default_factory=list)
+    findings: List[AuditFindingDetail] = Field(default_factory=list)
+    clarification_questions: List[ClarificationQuestionDetail] = Field(default_factory=list)
+    verdict: str = "needs_clarification"
+    project_context: AuditProjectContext = Field(default_factory=AuditProjectContext)
+    checklist_id: str = "banking-core"
+    checklist_version: str = "1.0.0"
+
+
 class AuditResultDetail(BaseModel):
     """Typed ``audit_result`` block returned by the compliance auditor node."""
     model_config = ConfigDict(extra="allow")
@@ -680,7 +774,13 @@ class AuditResultDetail(BaseModel):
     audit_version_reviewed: Optional[int] = Field(None, description="Version reviewed by the auditor.")
     passed_checks: List[str] = Field(default_factory=list, description="Passed compliance checks.")
     failed_checks: List[str] = Field(default_factory=list, description="Failed compliance checks.")
+    findings: List[AuditFindingDetail] = Field(default_factory=list, description="Evidence-backed audit findings.")
+    source_references: List[AuditSourceReference] = Field(default_factory=list, description="Distinct sources used by the audit.")
     clarification_questions: List[ClarificationQuestionDetail] = Field(default_factory=list, description="Questions surfaced by the audit.")
+    verdict: str = Field("needs_clarification", description="pass, pass_with_warnings, needs_clarification, or fail.")
+    project_context: AuditProjectContext = Field(default_factory=AuditProjectContext)
+    checklist_id: str = Field("banking-core", description="Canonical checklist used for the audit.")
+    checklist_version: str = Field("1.0.0", description="Immutable checklist version used for the audit.")
 
 
 class ProcessRequirementsResponse(BaseModel):

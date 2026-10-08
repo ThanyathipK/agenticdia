@@ -66,6 +66,10 @@ def serialize_project(p: ProjectModel, *, match_snippet: Optional[str] = None) -
         "is_pinned": bool(p.is_pinned) if p.is_pinned is not None else False,
         "is_flagged": bool(p.is_flagged) if p.is_flagged is not None else False,
         "status": p.status or "draft",
+        "last_approved_prd_version": p.last_approved_prd_version,
+        "last_approved_audit_version": p.last_approved_audit_version,
+        "last_approved_by": uid(p.last_approved_by),
+        "last_approved_at": dt_iso_or_none(p.last_approved_at),
         "updated_at": dt_iso_or_none(p.updated_at),
     }
     if match_snippet:
@@ -183,6 +187,7 @@ def serialize_clarification_question(
         "question_text": cq.question_text,
         "user_answer": cq.user_answer,
         "is_resolved": cq.is_resolved,
+        "source_references": cq.source_references or [],
     }
 
 
@@ -195,6 +200,12 @@ def serialize_audit_result(ar: AuditResultModel, project_id) -> Dict[str, Any]:
         "audit_version_reviewed": ar.audit_version_reviewed,
         "passed_checks": ar.passed_checks,
         "failed_checks": ar.failed_checks,
+        "findings": ar.findings or [],
+        "source_references": ar.source_references or [],
+        "verdict": ar.verdict or "needs_clarification",
+        "project_context": ar.project_context or {},
+        "checklist_id": ar.checklist_id or "banking-core",
+        "checklist_version": ar.checklist_version or "1.0.0",
     }
 
 

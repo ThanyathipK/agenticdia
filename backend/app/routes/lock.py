@@ -22,6 +22,7 @@ from app.schemas import (
     ImpactAnalysisResponse,
 )
 from app.event_manager import event_manager
+from app.review_service import governed_state_changed, mark_revised_if_approved
 
 logger = logging.getLogger("app.routes.lock")
 
@@ -373,7 +374,50 @@ async def confirm_action(
     #               data). Reuses the PROJECT 8.2.2 repository step: create-if-missing,
     #               else partial update that rebuilds the child tables from the lists
     #               supplied in the draft. Committed by the request's get_db on success.
+    previous_state = await RequirementStateRepository.get_by_project_id(project_id, session)
     persisted_state = await RequirementStateRepository.save_or_update(project_id, proposed_changes, session)
+
+    # Architect output is staged without touching the section/version stores.
+    # Materialize its sections only at this confirmation boundary so Cancel
+    # truly leaves all governed PRD artifacts unchanged.
+    if (
+        action.get("workflow_stage") == "COMPLETED"
+        and isinstance(proposed_changes, dict)
+        and (proposed_changes.get("generated_prd") or "").strip()
+    ):
+        try:
+            from app.prd_section_service import sync_sections_from_prd
+
+            stitched_prd = await sync_sections_from_prd(
+                project_id,
+                proposed_changes["generated_prd"],
+                session,
+                changed_by="automated_agent",
+            )
+            if stitched_prd:
+                proposed_changes = {**proposed_changes, "generated_prd": stitched_prd}
+                persisted_state = await RequirementStateRepository.save_or_update(
+                    project_id,
+                    {"generated_prd": stitched_prd},
+                    session,
+                )
+        except Exception as section_err:
+            # Keep the existing fail-soft behavior: a section bookkeeping
+            # problem must not discard a confirmed, exportable document.
+            logger.error(
+                "[MERGE CONFIRM] Failed to materialize staged PRD sections for project %s: %s",
+                project_id,
+                section_err,
+            )
+    if governed_state_changed(previous_state, proposed_changes):
+        await mark_revised_if_approved(
+            project_id,
+            session,
+            reason="Approved requirements changed through a confirmed merge.",
+            actor_id=current_user.id,
+            actor_name=current_user.full_name,
+            actor_role=current_user.role,
+        )
 
     # 3b. Document-extraction merges (INSERT_CHUNKED_REQUIREMENTS): flip the
     # source document's extraction flag and append the audit-log entry. The

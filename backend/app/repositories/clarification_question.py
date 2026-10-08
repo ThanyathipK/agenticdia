@@ -96,7 +96,9 @@ class ClarificationQuestionRepository:
                     project_id=pid,
                     requirement_code=UNASSIGNED_REQUIREMENT_CODE,
                     title="Untitled Requirement",
-                    status="active",
+                    # Internal anchor for document-only audits; never surface
+                    # it as a product requirement.
+                    status="archived",
                     is_locked=False,
                     locked_by=None,
                     locked_at=None
@@ -134,7 +136,8 @@ class ClarificationQuestionRepository:
             target_user_story_id=story_id_val,
             question_text=data.get("question_text", ""),
             user_answer=data.get("user_answer"),
-            is_resolved=data.get("is_resolved", False)
+            is_resolved=data.get("is_resolved", False),
+            source_references=data.get("source_references", []),
         )
         session.add(cq)
         await session.flush()

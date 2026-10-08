@@ -40,7 +40,7 @@ export interface UseProjectsResult {
   /** Flags/unflags a project (dashboard ★ marker) — independent of pinning. */
   handleToggleFlag: (projectId: string) => Promise<void>;
   /** Sets the project's user-editable workflow status (dashboard table), optimistically. */
-  handleUpdateProjectStatus: (projectId: string, status: ProjectStatus) => Promise<void>;
+  handleUpdateProjectStatus: (projectId: string, status: ProjectStatus, comment?: string) => Promise<boolean>;
   /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
   isCreateModalOpen: boolean;
   setIsCreateModalOpen: Dispatch<SetStateAction<boolean>>;
@@ -331,24 +331,27 @@ export function useProjects(isAuthenticated: boolean, authUserId: string | null)
   //                restores the previous status value.
   //                Chain: 7.5.1 → 7.5.2 (api.updateProjectStatus) → route 7.5.3
   //                (allowed-status validation) → repository 7.5.4.
-  const handleUpdateProjectStatus = async (projectIdToUpdate: string, newStatus: ProjectStatus) => {
+  const handleUpdateProjectStatus = async (projectIdToUpdate: string, newStatus: ProjectStatus, comment?: string): Promise<boolean> => {
     const previousStatus = projects.find(p => p.id === projectIdToUpdate)?.status;
     setProjects(prev =>
       prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: newStatus } : p))
     );
     try {
       // PROJECT 7.5.2 — API boundary → PUT /api/projects/{id}/status (route 7.5.3).
-      const updated = await api.updateProjectStatus(projectIdToUpdate, newStatus);
+      const updated = await api.updateProjectStatus(projectIdToUpdate, newStatus, comment);
       setProjects(prev =>
         prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: updated.status, updated_at: updated.updated_at } : p))
       );
+      setProjectContextMenu(null);
+      return true;
     } catch (err) {
       setProjects(prev =>
         prev.map(p => (p.id === projectIdToUpdate ? { ...p, status: previousStatus } : p))
       );
       handleError('Failed to update the project status.', err);
+      setProjectContextMenu(null);
+      return false;
     }
-    setProjectContextMenu(null);
   };
 
   return {

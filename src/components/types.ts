@@ -39,6 +39,7 @@ export interface ClarificationQuestion {
   question_text: string;
   user_answer?: string | null;
   is_resolved?: boolean;
+  source_references?: import('../api/types').AuditSourceReferencePayload[];
 }
 
 export interface AuditResult {
@@ -47,6 +48,12 @@ export interface AuditResult {
   passed_checks: string[];
   failed_checks: string[];
   clarification_questions?: ClarificationQuestion[];
+  findings?: import('../api/types').AuditFindingPayload[];
+  source_references?: import('../api/types').AuditSourceReferencePayload[];
+  verdict?: 'pass' | 'pass_with_warnings' | 'needs_clarification' | 'fail';
+  project_context?: import('../api/types').AuditProjectContextPayload;
+  checklist_id?: string;
+  checklist_version?: string;
 }
 
 export interface ChatMessage {

@@ -389,31 +389,52 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         }]);
       }
 
-      const isValid = receivedAudit.is_valid;
+      const verdict = receivedAudit.verdict || (receivedAudit.is_valid ? 'pass' : 'fail');
+      const questions = receivedAudit.clarification_questions || [];
+      const questionTexts = questions.map(q => `• ${q.question_text}`).join('\n');
+      const findingTexts = (receivedAudit.findings || []).map(finding => {
+        const sources = finding.source_references
+          .map(source => `${source.document_name}${source.section ? ` — ${source.section}` : ''}`)
+          .join(', ');
+        const recommendation = finding.recommendation?.summary
+          ? `\n  ↳ **Suggested improvement:** ${finding.recommendation.summary}`
+          : '';
+        return `• **${finding.impact} · ${finding.category} (${finding.rule_id || 'ADHOC'}):** ${finding.description}${sources ? ` _(Source: ${sources})_` : ''}${recommendation}`;
+      }).join('\n');
+      const context = receivedAudit.project_context;
+      const contextText = context
+        ? `**Inferred context:** ${context.business_segment} · ${context.product_domain} · ${context.solution_type} · ${context.delivery_stage} (${Math.round(context.confidence * 100)}% confidence)`
+        : '';
+      const auditCouldNotComplete = receivedAudit.failed_checks.includes('AUDIT_PARSE_ERROR');
       // AUDIT 5.3 — Failure branch: the assistant bubble carries the questions and
       //            `isPendingClarifications` + `auditResultSnapshot`, which is what
       //            renders the embedded clarification form (AUDIT 5.3.1). The sync
       //            status tells the user the audit is pending, not failed hard.
-      if (isValid === false) {
-        const questions = receivedAudit.clarification_questions || [];
-        const questionTexts = questions.map(q => `• ${q.question_text}`).join('\n');
-        const warningContent = ` **Compliance Audit Alert (Auditor Agent):**\nTechnical gaps or missing security constraints were detected in your specifications against our checklist.\n\n**Pending Clarifications:**\n${questionTexts || 'None specified'}`;
+      if (verdict === 'fail' || verdict === 'needs_clarification') {
+        const title = auditCouldNotComplete
+          ? '⚠️ Requirements Audit Could Not Complete'
+          : verdict === 'fail' ? '⛔ Requirements Audit Failed' : '❓ Requirements Audit Needs Clarification';
+        const warningContent = auditCouldNotComplete
+          ? `**${title}**\n\n${findingTexts || 'Please run Validate again.'}`
+          : `**${title}**\n${contextText}\n\n**Findings:**\n${findingTexts || 'No blocking finding was established.'}\n\n**Pending Clarifications:**\n${questionTexts || 'None specified'}`;
 
         store.setMessages(prev => [...prev, {
           id: `audit-failed-${Date.now()}`,
           role: 'assistant',
           content: warningContent,
           timestamp: nowTime(),
-          isPendingClarifications: true,
+          isPendingClarifications: questions.length > 0,
           auditResultSnapshot: receivedAudit,
         }]);
 
-        store.setSyncStatus('Audit Pending. Clarifications required.');
+        store.setSyncStatus(auditCouldNotComplete
+          ? 'Audit could not complete. Please retry.'
+          : verdict === 'fail' ? 'Audit failed: mandatory blockers found.' : 'Audit needs clarification.');
       } else {
         // AUDIT 5.4 — Success branch: a positive verdict bubble (no clarification
         //            form). The audit is still only STAGED — the user's Save in the
         //            ConfirmationPanel is what persists the verdict (CONFIRM 3.3).
-        const successContent = `**Compliance Audit Passed!**\nRequirements have successfully validated against all retail banking security and regulatory checks. Ready for PRD compilation.`;
+        const successContent = `**${verdict === 'pass_with_warnings' ? 'Requirements Audit Passed with Warnings' : 'Requirements Audit Passed'}**\n${contextText}\n\n${findingTexts || 'All clearly applicable mandatory controls are covered.'}`;
         store.setMessages(prev => [...prev, {
           id: `audit-passed-${Date.now()}`,
           role: 'assistant',
@@ -421,7 +442,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           timestamp: nowTime(),
         }]);
 
-        store.setSyncStatus('Completed. Zero compliance violations.');
+        store.setSyncStatus(verdict === 'pass_with_warnings' ? 'Passed with non-blocking warnings.' : 'Audit passed.');
       }
 
       store.setAuditResult(receivedAudit);

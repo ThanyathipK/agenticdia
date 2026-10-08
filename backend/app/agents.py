@@ -1,6 +1,7 @@
 import logging
 import json
 import re
+import copy
 from typing import TypedDict, Dict, Any, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
@@ -8,7 +9,10 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository
-from app.schemas import GatheredRequirements, MermaidDiagramResult
+from app.schemas import AuditorOutput, GatheredRequirements, MermaidDiagramResult
+from app.document_processor import document_budget, split_markdown_into_chunks
+from app.input_validation import count_body_tokens, count_tokens
+from app.audit_checklist import load_active_audit_checklist
 from app.prompt_loader import load_prompt
 from app.llm_factory import build_llm, llm, parser
 from app.llm_utils import invoke_llm_structured
@@ -46,6 +50,20 @@ logger = logging.getLogger("app.agents")
 # while an architecture flowchart for a larger project can easily need more
 # headroom (truncated Mermaid is unrenderable).
 diagram_llm = build_llm(max_tokens=4096)
+# Keep generation bounded; incomplete responses fail without staging a verdict.
+auditor_llm = build_llm(max_tokens=3500)
+ACTIVE_AUDIT_CHECKLIST = load_active_audit_checklist()
+
+AUDITOR_FORMAT_INSTRUCTIONS = """Return one compact JSON object with exactly these top-level keys:
+is_valid (boolean), audit_version_reviewed (integer), verdict (pass|pass_with_warnings|needs_clarification|fail),
+project_context ({business_segment, product_domain, solution_type, financial_transaction, external_integration,
+sensitive_data, delivery_stage, confidence}), passed_checks (string[]), failed_checks (string[]), findings (array),
+clarification_questions (array), checklist_id (string), checklist_version (string). Each finding is {rule_id,
+finding_type, severity, category, target_requirement_id, description, source_references, evidence_status,
+applicability, impact, confidence, rationale, recommendation}. recommendation is either null or {summary,
+proposed_requirement_text, proposed_acceptance_criteria, expected_benefit}. Each source reference
+is {document_id, document_name, section, excerpt}. Each question is {checklist_category, target_user_story_id,
+question_text, is_resolved, source_references}. Use null when unknown. Output JSON only, with no markdown or commentary."""
 
 # ==========================================
 # STATE MANAGEMENT
@@ -99,6 +117,13 @@ class AgentState(TypedDict, total=False):
     # its DB work — which is how "Generate PRD" used to drop human-owned PRD
     # parts (the architect's section sync never ran).
     db_session: Optional[AsyncSession]
+    # Optional dependency-graph write scope. Absent means the established full
+    # Architect run; present limits section writes and diagram regeneration.
+    regeneration_scope: Optional[Dict[str, Any]]
+    # Normal Generate-PRD requests are previews until the user confirms their
+    # pending action.  In that path the Architect may compute artifacts but
+    # must not persist sections/version rows ahead of confirmation.
+    stage_artifacts_only: bool
 
 async def get_or_init_requirement_state(project_id: str, session: Optional[AsyncSession] = None, current_version: int = 1) -> RequirementState:
     """
@@ -1702,6 +1727,139 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
         }
 
 
+def _dedupe_dicts(items: List[Dict[str, Any]], key_fields: tuple[str, ...]) -> List[Dict[str, Any]]:
+    """Stable de-duplication for overlapping audit chunks."""
+    seen = set()
+    output = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = tuple(str(item.get(field) or "").strip().casefold() for field in key_fields)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+_DOCUMENT_INJECTION_RE = re.compile(
+    r"(?i)(ignore\s+(?:all\s+)?(?:previous|prior|auditor|system|developer)|"
+    r"return\s+(?:a\s+)?(?:critical|fake|pass|fail)|"
+    r"override\s+(?:the\s+)?(?:prompt|instructions)|"
+    r"(?:system|developer)\s+(?:prompt|message))"
+)
+
+
+def _prepare_audit_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Treat uploaded text as data and redact obvious prompt-injection lines."""
+    prepared = []
+    for document in documents:
+        body = str(document.get("content_markdown") or "")
+        suspicious = False
+        safe_lines = []
+        for line in body.splitlines():
+            if _DOCUMENT_INJECTION_RE.search(line):
+                suspicious = True
+                safe_lines.append("[Potential prompt-injection instruction redacted]")
+            else:
+                safe_lines.append(line)
+        prepared.append({
+            **document,
+            "content_markdown": "\n".join(safe_lines),
+            "prompt_injection_redacted": suspicious,
+        })
+    return prepared
+
+
+def _merge_audit_passes(results: List[Dict[str, Any]], current_version: int) -> Dict[str, Any]:
+    """Merge chunk output and enforce the risk-based verdict deterministically."""
+    passed = {str(check) for result in results for check in result.get("passed_checks", [])}
+    findings = _dedupe_dicts(
+        [finding for result in results for finding in result.get("findings", [])],
+        ("finding_type", "category", "target_requirement_id", "description"),
+    )
+    questions = _dedupe_dicts(
+        [question for result in results for question in result.get("clarification_questions", [])],
+        ("checklist_category", "target_user_story_id", "question_text"),
+    )
+    sources = _dedupe_dicts(
+        [source for finding in findings for source in finding.get("source_references", [])]
+        + [source for question in questions for source in question.get("source_references", [])],
+        ("document_id", "document_name", "section", "excerpt"),
+    )
+    for finding in findings:
+        finding["rule_id"] = str(finding.get("rule_id") or "ADHOC").upper()
+        finding["applicability"] = str(finding.get("applicability") or "unknown").lower()
+        finding["impact"] = str(finding.get("impact") or "warning").lower()
+        try:
+            finding["confidence"] = max(0.0, min(1.0, float(finding.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            finding["confidence"] = 0.5
+
+    impact_rank = {"blocking": 0, "warning": 1, "suggestion": 2}
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    findings.sort(key=lambda item: (
+        impact_rank.get(item.get("impact"), 3),
+        severity_rank.get(str(item.get("severity") or "").lower(), 4),
+        -item.get("confidence", 0.0),
+    ))
+
+    blocking = [
+        finding for finding in findings
+        if finding["applicability"] == "applicable_required"
+        and finding["impact"] == "blocking"
+        and finding["confidence"] >= 0.7
+        and finding.get("evidence_status") == "supported"
+    ]
+    failed = {str(finding.get("category") or "Mandatory control") for finding in blocking}
+    contexts = [result.get("project_context") for result in results if isinstance(result.get("project_context"), dict)]
+    project_context = max(contexts, key=lambda item: float(item.get("confidence") or 0.0), default={})
+    if blocking:
+        verdict = "fail"
+    elif questions:
+        verdict = "needs_clarification"
+    elif findings:
+        verdict = "pass_with_warnings"
+    else:
+        verdict = "pass"
+    return {
+        # Compatibility boolean: only substantiated mandatory blockers fail.
+        "is_valid": not blocking,
+        "verdict": verdict,
+        "project_context": project_context,
+        "audit_version_reviewed": current_version,
+        "passed_checks": sorted(passed - failed),
+        "failed_checks": sorted(failed),
+        "findings": findings,
+        "source_references": sources,
+        "clarification_questions": questions,
+        "checklist_id": ACTIVE_AUDIT_CHECKLIST.checklist_id,
+        "checklist_version": ACTIVE_AUDIT_CHECKLIST.version,
+    }
+
+
+def _validate_audit_output(output, documents):
+    """Reject malformed results or invented citations before staging an audit."""
+    required = {"is_valid", "findings", "clarification_questions"}
+    if not isinstance(output, dict) or not required.issubset(output):
+        return False
+    parsed = AuditorOutput.model_validate(output).model_dump()
+    allowed_rule_ids = ACTIVE_AUDIT_CHECKLIST.rule_ids | {"ADHOC"}
+    if any(finding.get("rule_id", "ADHOC").upper() not in allowed_rule_ids for finding in parsed["findings"]):
+        return False
+    sources = {doc["document_id"]: doc for doc in documents}
+    for item in parsed["findings"] + parsed["clarification_questions"]:
+        for ref in item.get("source_references", []):
+            doc = sources.get(ref.get("document_id"))
+            if not doc or ref.get("document_name") != doc["filename"]:
+                return False
+            body = " ".join(doc.get("content_markdown", "").split())
+            excerpt = " ".join((ref.get("excerpt") or "").split())
+            if excerpt and excerpt not in body:
+                return False
+    return True
+
+
 # AUDIT 1.0 — Auditor node (graph position: ROUTING 1.2 for target_agent="auditor",
 #             ROUTING 4.1 for a classify COMMAND, or the on-demand AUDIT 5.1 request).
 #             Reads:  project_id, structured_requirements, current_version, db_session(†)
@@ -1717,7 +1875,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     """
     Runs compliance, safety, and business rule audits on structured drafts.
     Reads from and writes to the centralized RequirementState object via persistence service.
-    Only audits newly created or modified user stories to save API costs and maintain consistency.
+    Reviews all active stories, including unchanged ones affected by new policies.
     """
     logger.info("Executing auditor_node to audit compliance.")
     project_id = state.get("project_id", "PROJ-UNKNOWN")
@@ -1725,6 +1883,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     # Use session from state if available, otherwise let function create one
     db_session = state.get("db_session")
     req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
+    req_state = copy.deepcopy(req_state)
     
     passed_structured = state.get("structured_requirements") or {}
     if passed_structured:
@@ -1768,9 +1927,9 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     #             change_type created/updated (or missing) are sent to the LLM;
     #             `unchanged` stories are tracked separately so their existing
     #             unresolved questions can be carried over in AUDIT 2.2.
-    to_audit_stories = [story for story in all_stories if story.get("change_type") in ["created", "updated", None]]
-    unchanged_stories = [story for story in all_stories if story.get("change_type") == "unchanged"]
-    knowledge_documents = state.get("knowledge_documents") or []
+    to_audit_stories = [story for story in all_stories if story.get("status", "active") == "active"]
+    unchanged_stories = []  # Full-board reviews replace previous audit questions.
+    knowledge_documents = _prepare_audit_documents(state.get("knowledge_documents") or [])
     
     logger.info(f"Auditor Node: {len(to_audit_stories)} stories to audit, {len(unchanged_stories)} unchanged stories.")
     
@@ -1781,13 +1940,18 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
     if not to_audit_stories and not knowledge_documents:
         logger.info("Auditor Node: All user stories are unchanged. Skipping LLM execution and keeping existing validation status.")
         is_valid = req_state.get("validation_status") == "valid"
-        fallback_checks = ["Idempotency", "Security", "Audit Logging", "Database Consistency", "Network Timeouts", "Financial Regulatory Compliance", "Edge-Case Failure Handling"]
         result = {
             "is_valid": is_valid,
+            "verdict": req_state.get("audit_verdict", "pass" if is_valid else "needs_clarification"),
+            "project_context": req_state.get("audit_project_context", {}),
             "audit_version_reviewed": current_version,
-            "passed_checks": fallback_checks if is_valid else [],
-            "failed_checks": [] if is_valid else fallback_checks,
-            "clarification_questions": req_state.get("clarification_questions", [])
+            "passed_checks": req_state.get("passed_checks", []),
+            "failed_checks": req_state.get("failed_checks", []),
+            "findings": req_state.get("audit_findings", []),
+            "source_references": req_state.get("audit_source_references", []),
+            "clarification_questions": req_state.get("clarification_questions", []),
+            "checklist_id": req_state.get("audit_checklist_id", ACTIVE_AUDIT_CHECKLIST.checklist_id),
+            "checklist_version": req_state.get("audit_checklist_version", ACTIVE_AUDIT_CHECKLIST.version),
         }
         
         req_state["current_workflow_state"] = "auditor_node"
@@ -1805,38 +1969,79 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         "epic_name": epic_name,
         "version": req_state["version_number"],
         "user_stories": to_audit_stories,
+        "requirement_context": [
+            {key: value for key, value in requirement.items() if key != "user_stories"}
+            for requirement in requirements
+        ],
+        "business_goals": req_state.get("business_goals", []),
+        "actors": req_state.get("actors", []),
         # Knowledge documents are evidence for validation, not requirements.
         # Keeping them in a separate field ensures Validate can cross-reference
         # their actual content without silently converting/persisting anything.
         "knowledge_base_documents": knowledge_documents,
     }
 
-    # The upload limit is intentionally larger than the LLM context window.
-    # Fail clearly before inference rather than truncating a document and
-    # returning a misleading validation verdict. Users can explicitly Extract
-    # a very large document first, which already has chunked processing.
-    from app.input_validation import validate_body_budget
-    validate_body_budget(structured_reqs_for_prompt, "Validation context")
-    
     prompt = PromptTemplate(
         template=load_prompt("auditor"),
-        input_variables=["structured_requirements", "current_version"]
+        input_variables=["structured_requirements", "current_version", "audit_scope", "format_instructions", "audit_checklist"]
     )
     
-    # AUDIT 2.1 — Prompt chain for the compliance audit. DISCREPANCY (documented, not
-    #             changed): this uses a raw `prompt | llm | parser` chain instead of the
-    #             shared invoke_llm_structured helper (GATHERING 3.2 / INTENT 2.6), so
-    #             the auditor has NO raw-JSON retry and no reasoning-content recovery —
-    #             its only safety net is the AUDIT 2.6 fallback. The prompt file
-    #             (prompts/auditor.md) is not annotated: its text reaches the model.
-    chain = prompt | llm | parser
-    
     try:
-        req_json_str = json.dumps(structured_reqs_for_prompt, ensure_ascii=False)
-        result = await chain.ainvoke({
-            "structured_requirements": req_json_str,
-            "current_version": current_version
-        })
+        # Keep the existing token-aware document strategy: a normal project is
+        # audited in one pass, while oversized knowledge documents are split
+        # into ordered, overlapping chunks. No content is silently truncated.
+        base_payload = {**structured_reqs_for_prompt, "knowledge_base_documents": []}
+        base_tokens = count_body_tokens(base_payload)
+        available = max(256, min(document_budget(), document_budget() - base_tokens))
+        document_parts = []
+        for doc in knowledge_documents:
+            body = str(doc.get("content_markdown") or "")
+            chunks = split_markdown_into_chunks(
+                body,
+                chunk_size=available,
+                token_count=count_tokens(body),
+            ) or [""]
+            for index, chunk in enumerate(chunks, start=1):
+                document_parts.append({
+                    **doc,
+                    "content_markdown": chunk,
+                    "chunk": f"{index}/{len(chunks)}",
+                })
+
+        contexts = []
+        if not document_parts:
+            contexts = [base_payload]
+        elif count_body_tokens(structured_reqs_for_prompt) <= document_budget():
+            contexts = [structured_reqs_for_prompt]
+        else:
+            contexts = [{**base_payload, "knowledge_base_documents": [part]} for part in document_parts]
+
+        # A full Pydantic JSON schema added thousands of prompt tokens and made
+        # the local model generate long, slow answers. The compact contract is
+        # still validated by AuditorOutput on the structured fallback path.
+        format_instructions = AUDITOR_FORMAT_INSTRUCTIONS
+        partial_results = []
+        for index, context in enumerate(contexts, start=1):
+            partial_results.append(await invoke_llm_structured(
+                auditor_llm,
+                prompt,
+                AuditorOutput,
+                variables={
+                    "structured_requirements": json.dumps(context, ensure_ascii=False),
+                    "current_version": current_version,
+                    "audit_scope": f"pass {index} of {len(contexts)}",
+                    "audit_checklist": json.dumps(ACTIVE_AUDIT_CHECKLIST.prompt_payload(), ensure_ascii=False),
+                    "format_instructions": "Output ONLY raw JSON. No markdown.",
+                },
+                description=f"auditor pass {index}/{len(contexts)}",
+                format_instructions=format_instructions,
+                validate=lambda output: _validate_audit_output(
+                    output, context["knowledge_base_documents"]
+                ),
+            ))
+            partial_results[-1] = AuditorOutput.model_validate(partial_results[-1]).model_dump()
+
+        result = _merge_audit_passes(partial_results, current_version)
         
         # Merge new questions with existing unresolved questions targeting unchanged user stories
         # AUDIT 2.2 — Question reconciliation: unresolved questions that target
@@ -1854,25 +2059,37 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         combined_questions = preserved_questions + new_questions
         result["clarification_questions"] = combined_questions
         
-        # Determine overall validity
-        # AUDIT 2.3 — Validity rule: the verdict is derived SOLELY from "no
-        #             clarification questions remain", so a model that reports
-        #             findings without raising questions still passes (documented).
-        is_valid = len(combined_questions) == 0
-        result["is_valid"] = is_valid
+        # Only substantiated, clearly applicable mandatory blockers fail the
+        # compatibility boolean. Unknown applicability asks for clarification;
+        # recommendations remain non-blocking.
+        is_valid = bool(result.get("is_valid"))
+        if combined_questions and result.get("verdict") != "fail":
+            result["verdict"] = "needs_clarification"
         
         # Modify only its own fields in RequirementState in memory
         req_state["clarification_questions"] = combined_questions
         req_state["validation_status"] = "valid" if is_valid else "invalid"
         req_state["passed_checks"] = result.get("passed_checks", [])
         req_state["failed_checks"] = result.get("failed_checks", [])
+        req_state["audit_findings"] = result.get("findings", [])
+        req_state["audit_source_references"] = result.get("source_references", [])
+        req_state["audit_verdict"] = result.get("verdict", "needs_clarification")
+        req_state["audit_project_context"] = result.get("project_context", {})
+        req_state["audit_checklist_id"] = result.get("checklist_id", ACTIVE_AUDIT_CHECKLIST.checklist_id)
+        req_state["audit_checklist_version"] = result.get("checklist_version", ACTIVE_AUDIT_CHECKLIST.version)
+        req_state["_record_audit_run"] = True
         req_state["current_workflow_state"] = "auditor_node"
 
-        if is_valid:
-            auditor_msg = "✅ **Compliance Audit Passed!**\nRequirements have successfully validated against all retail banking security and regulatory checks. Ready for PRD compilation."
-        else:
+        verdict = result.get("verdict")
+        if verdict == "pass":
+            auditor_msg = "✅ **Requirements Audit Passed.**\nAll clearly applicable mandatory controls are covered."
+        elif verdict == "pass_with_warnings":
+            auditor_msg = "✅ **Requirements Audit Passed with warnings.**\nNo mandatory blocking gap was found; review the non-blocking recommendations."
+        elif verdict == "needs_clarification":
             q_texts = "\n".join([f"• {q.get('question_text')}" for q in combined_questions if isinstance(q, dict)])
-            auditor_msg = f"⚠️ **Compliance Audit Alert (Auditor Agent):**\nTechnical gaps or missing security constraints were detected in your specifications against our checklist.\n\n**Pending Clarifications:**\n{q_texts or 'None specified'}"
+            auditor_msg = f"❓ **Requirements Audit Needs Clarification.**\nNo unsupported assumption was treated as a failure.\n\n**Questions:**\n{q_texts or 'Please review the uncertain applicability.'}"
+        else:
+            auditor_msg = "⛔ **Requirements Audit Failed.**\nOne or more clearly applicable mandatory controls have substantiated blocking gaps."
 
         # AUDIT 2.4 — Auditor chat turn (conversation_messages, role="auditor",
         #             intent="AUDIT"): pass or the bulleted clarification list. The
@@ -1882,6 +2099,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             project_id=project_id,
             role="auditor",
             message=auditor_msg,
+            session=db_session,
             workflow_state="auditor_node",
             intent="AUDIT"
         )
@@ -1890,38 +2108,9 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             "requirement_state": req_state,
             "audit_result": result
         }
-    except Exception as e:
-        logger.error(f"Error parsing structured response in auditor_node: {str(e)}")
-        # AUDIT 2.6 — Parse-error fallback (the only recovery the raw chain has):
-        #             the audit is reported as INVALID with failed_checks
-        #             ["AUDIT_PARSE_ERROR"] and one system-error question. NOTE
-        #             (documented, not changed): `target_user_story_id` is the sentinel
-        #             string "ALL", not a story UUID — the repository's
-        #             _resolve_story_id (AUDIT 4.4) cannot resolve it, so the linkage
-        #             degrades to NULL.
-        fallback_audit = {
-            "is_valid": False,
-            "audit_version_reviewed": current_version,
-            "passed_checks": [],
-            "failed_checks": ["AUDIT_PARSE_ERROR"],
-            "clarification_questions": [
-                {
-                    "checklist_category": "System Error",
-                    "target_user_story_id": "ALL",
-                    "question_text": f"The Auditor workflow encountered a parsing error: {str(e)}."
-                }
-            ]
-        }
-        req_state["clarification_questions"] = fallback_audit["clarification_questions"]
-        req_state["validation_status"] = "invalid"
-        req_state["passed_checks"] = []
-        req_state["failed_checks"] = ["AUDIT_PARSE_ERROR"]
-        req_state["current_workflow_state"] = "auditor_node"
-        
-        return {
-            "requirement_state": req_state,
-            "audit_result": fallback_audit
-        }
+    except Exception:
+        logger.exception("Auditor could not complete; no verdict will be staged")
+        raise RuntimeError("Audit could not complete. Please run Validate again.") from None
 
 # ARCHITECT 2.0 — Architect node (graph position: ROUTING 1.2 for
 #             target_agent="architect", ROUTING 4.1 for a COMMAND, or the on-demand
@@ -1949,6 +2138,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     
     # Use session from state if available, otherwise let function create one
     db_session = state.get("db_session")
+    regeneration_scope = state.get("regeneration_scope") or None
     req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     
     passed_structured = state.get("structured_requirements") or {}
@@ -2037,7 +2227,8 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     #             hand-rolled section list) deliberately FAIL this test so they get
     #             migrated to the template instead of being served forever.
     if (
-        not to_build_stories
+        not regeneration_scope
+        and not to_build_stories
         and existing_prd
         and existing_diagrams
         and (
@@ -2154,7 +2345,8 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     #             raw Mermaid using the same dataset; 4.2 sanitizes it; 4.3 keeps the
     #             previously stored diagram when the model fails or returns something
     #             that is not a flowchart — a diagram hiccup can never lose the PRD.
-    fresh_diagram = await _generate_flow_diagram(project_id, req_state, data)
+    regenerate_diagram = regeneration_scope is None or bool(regeneration_scope.get("regenerate_diagram"))
+    fresh_diagram = await _generate_flow_diagram(project_id, req_state, data) if regenerate_diagram else ""
     req_state["generated_diagrams"] = fresh_diagram or req_state.get("generated_diagrams", "")
     req_state["current_workflow_state"] = "architect_node"
 
@@ -2174,9 +2366,10 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     # carries ``db_session`` (it is declared in AgentState), but guard anyway:
     # when the node runs outside the graph without a session, open a short-lived
     # one so human-owned parts are PRESERVED and the version is still recorded.
-    write_session = db_session
+    stage_artifacts_only = bool(state.get("stage_artifacts_only"))
+    write_session = None if stage_artifacts_only else db_session
     owns_write_session = False
-    if write_session is None:
+    if write_session is None and not stage_artifacts_only:
         from app.database import AsyncSessionLocal
         write_session = AsyncSessionLocal()
         owns_write_session = True
@@ -2191,11 +2384,12 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         #             keeps the legacy V{n}.0 label; the stamp itself is a plain
         #             string replace, so the pending marker can never leak out.
         from app.version_service import resolve_document_semver
+        version_read_session = write_session or db_session
         semver_label = await resolve_document_semver(
-            project_id, write_session,
+            project_id, version_read_session,
             document=req_state["generated_prd"],
             change_type="ai",
-        ) if write_session else None
+        ) if version_read_session else None
 
         from app.prd_filler import stamp_version_label
         req_state["generated_prd"] = stamp_version_label(
@@ -2209,9 +2403,22 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
                 merged_markdown = await sync_sections_from_prd(
                     project_id, req_state["generated_prd"], write_session,
                     changed_by="automated_agent",
+                    selected_section_keys=(
+                        set(regeneration_scope.get("section_keys") or [])
+                        if regeneration_scope is not None else None
+                    ),
                 )
                 if merged_markdown:
                     req_state["generated_prd"] = merged_markdown
+                elif regeneration_scope is not None:
+                    # A scoped run must never fall back to persisting the full
+                    # freshly-filled candidate when section normalization
+                    # fails: doing so would silently rewrite out-of-scope
+                    # sections. Reassemble the stored parts instead.
+                    from app.prd_section_service import assemble_document_markdown
+                    stored_markdown = await assemble_document_markdown(project_id, write_session)
+                    if stored_markdown:
+                        req_state["generated_prd"] = stored_markdown
             except Exception as section_sync_err:
                 # Never fail PRD generation because of section bookkeeping.
                 logger.error(
@@ -2255,6 +2462,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         project_id=project_id,
         role="architect",
         message=architect_msg,
+        session=db_session,
         workflow_state="architect_node",
         intent="PRD_GENERATION"
     )
@@ -2266,7 +2474,8 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     return {
         "requirement_state": req_state,
         "prd_markdown": req_state["generated_prd"],
-        "mermaid_diagram": req_state["generated_diagrams"]
+        "mermaid_diagram": req_state["generated_diagrams"],
+        "diagram_regenerated": bool(fresh_diagram),
     }
 
 # ==========================================

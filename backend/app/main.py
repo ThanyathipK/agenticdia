@@ -14,6 +14,8 @@ from app.rate_limit import verify_single_worker_guarantee
 from app.routes import auth, chat, projects, requirements, lock, events, documents
 from app.routes import prd_sections
 from app.routes import traceability
+from app.routes import operational
+from app.routes import banking_knowledge
 from app.llm_client import check_lm_studio_health
 
 # Logger initialization
@@ -124,6 +126,14 @@ openapi_tags = [
         "name": "Traceability",
         "description": "Derived Requirement Traceability Matrix linking requirements, user stories, acceptance criteria, PRD sections and diagrams.",
     },
+    {
+        "name": "Operational Governance",
+        "description": "Project health, audit history, dependency graphs, and scoped regeneration.",
+    },
+    {
+        "name": "Banking Knowledge",
+        "description": "Reusable approved banking guidance and relevance retrieval for audits.",
+    },
 ]
 
 # Instantiate FastAPI application
@@ -202,6 +212,8 @@ app.include_router(prd_sections.router, tags=["PRD Sections"])
 # Derived Requirement Traceability Matrix (requirements <-> stories <-> criteria
 # <-> PRD sections <-> diagrams)
 app.include_router(traceability.router, tags=["Traceability"])
+app.include_router(operational.router, tags=["Operational Governance"])
+app.include_router(banking_knowledge.router, tags=["Banking Knowledge"])
 
 
 # ==========================================

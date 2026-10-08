@@ -71,7 +71,7 @@ export interface ProjectState {
   /** Flags/unflags a project (dashboard ★ marker) — independent of pinning. */
   handleToggleFlag: (projectId: string) => Promise<void>;
   /** Sets the project's user-editable workflow status (dashboard table), optimistically. */
-  handleUpdateProjectStatus: (projectId: string, status: ProjectStatus) => Promise<void>;
+  handleUpdateProjectStatus: (projectId: string, status: ProjectStatus, comment?: string) => Promise<boolean>;
   /** Whether the styled "New Project" modal is shown (replaces native prompt()). */
   isCreateModalOpen: boolean;
   setIsCreateModalOpen: Dispatch<SetStateAction<boolean>>;

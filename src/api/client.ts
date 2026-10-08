@@ -31,12 +31,21 @@ import type {
   ProcessRequirementsResponse,
   ProjectCreated,
   ProjectDeleteResponse,
+  ProjectReviewEventPayload,
+  ProjectHealthPayload,
+  AuditRunPayload,
+  AuditWaiverPayload,
   ProjectStatus,
   ProjectSummary,
   RequirementPayload,
   RequirementStatePayload,
   UploadedDocumentPayload,
   TraceabilityPayload,
+  ArtifactReferencePayload,
+  DependencyGraphPayload,
+  RegenerationPlanPayload,
+  RegenerationResultPayload,
+  BankingKnowledgeDocumentPayload,
 } from './types';
 
 // ============================================================================
@@ -251,8 +260,26 @@ export const api = {
   // PROJECT 7.5.2 — API client for the dashboard workflow-status dropdown
   //                 (PROJECT 7.5.1 → route PROJECT 7.5.3).
   // Dashboard workflow status (user-editable via the status badge dropdown).
-  updateProjectStatus: (projectId: string, status: ProjectStatus) =>
-    put<ProjectSummary>(`/api/projects/${projectId}/status`, { status }),
+  updateProjectStatus: (projectId: string, status: ProjectStatus, comment?: string) =>
+    put<ProjectSummary>(`/api/projects/${projectId}/status`, { status, comment }),
+  getProjectReviewHistory: (projectId: string) =>
+    get<ProjectReviewEventPayload[]>(`/api/projects/${projectId}/review-history`),
+  getProjectHealth: (projectId: string) =>
+    get<ProjectHealthPayload>(`/api/projects/${projectId}/health`),
+  getAuditHistory: (projectId: string) =>
+    get<AuditRunPayload[]>(`/api/projects/${projectId}/audit-history`),
+  getAuditWaivers: (projectId: string) =>
+    get<AuditWaiverPayload[]>(`/api/projects/${projectId}/waivers`),
+  createAuditWaiver: (projectId: string, payload: {
+    rule_id: string;
+    target_requirement_id?: string | null;
+    reason: string;
+    compensating_control?: string;
+    owner: string;
+    expires_at: string;
+  }) => post<AuditWaiverPayload>(`/api/projects/${projectId}/waivers`, payload),
+  revokeAuditWaiver: (projectId: string, waiverId: string, reason: string) =>
+    post<AuditWaiverPayload>(`/api/projects/${projectId}/waivers/${waiverId}/revoke`, { reason }),
 
   // ---- Requirement state --------------------------------------------------
   // PROJECT 2.2 — API client for the full project-state read that opens a
@@ -413,6 +440,39 @@ export const api = {
   // Criteria <-> PRD sections <-> diagrams. See backend/app/traceability_service.py.
   getTraceability: (projectId: string) =>
     get<TraceabilityPayload>(`/api/project/${projectId}/traceability`),
+  getDependencyGraph: (projectId: string) =>
+    get<DependencyGraphPayload>(`/api/projects/${projectId}/dependency-graph`),
+  planRegeneration: (projectId: string, changedArtifacts: ArtifactReferencePayload[]) =>
+    post<RegenerationPlanPayload>(`/api/projects/${projectId}/regeneration/plan`, {
+      changed_artifacts: changedArtifacts,
+    }),
+  executeRegeneration: (projectId: string, changedArtifacts: ArtifactReferencePayload[]) =>
+    post<RegenerationResultPayload>(`/api/projects/${projectId}/regeneration`, {
+      changed_artifacts: changedArtifacts,
+      confirm: true,
+    }),
+
+  // ---- Reusable banking knowledge -----------------------------------------
+  listBankingKnowledge: () =>
+    get<BankingKnowledgeDocumentPayload[]>('/api/banking-knowledge'),
+  getBankingKnowledge: (documentId: string) =>
+    get<BankingKnowledgeDocumentPayload>(`/api/banking-knowledge/${documentId}`),
+  uploadBankingKnowledge: (
+    file: File,
+    metadata: { title: string; document_type: string; jurisdiction: string; tags: string },
+  ) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('title', metadata.title);
+    formData.append('document_type', metadata.document_type);
+    formData.append('jurisdiction', metadata.jurisdiction);
+    formData.append('tags', metadata.tags);
+    return postFormData<BankingKnowledgeDocumentPayload>('/api/banking-knowledge/upload', formData);
+  },
+  approveBankingKnowledge: (documentId: string) =>
+    post<BankingKnowledgeDocumentPayload>(`/api/banking-knowledge/${documentId}/approve`),
+  retireBankingKnowledge: (documentId: string) =>
+    post<BankingKnowledgeDocumentPayload>(`/api/banking-knowledge/${documentId}/retire`),
 
   // ---- Health --------------------------------------------------------------
   // CHAT 6.3 — Readiness probe (GET /api/health → routes/chat.py get_health_status

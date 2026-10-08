@@ -19,12 +19,14 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 
 - **Multi-agent LangGraph workflow** — `router_node`, `requirement_matcher_node`, `gatherer_node`, `auditor_node`, `architect_node` (on-demand execution driven by a persisted workflow state machine)
 - **Local-first inference** — OpenAI-compatible calls to `http://localhost:1234/v1`; no API keys, no cloud dependency
-- **7-point banking compliance audit** — the Auditor validates against a mandatory banking checklist and raises clarification questions when coverage is incomplete
+- **Versioned banking compliance audit** — the Auditor evaluates a structured 12-rule checklist with stable rule IDs, evidence-aware applicability, actionable recommendations, and the exact checklist version persisted with every result
 - **Automated PRD + Mermaid diagrams** — the Architect synthesizes a full Product Requirements Document and flow diagrams
 - **Document knowledge base & extraction** — upload DOCX / PDF / Markdown / TXT briefs (≤ `MAX_UPLOAD_MB`); they are converted to canonical markdown, then an explicit, user-triggered extraction feeds them through the Gatherer (one pass, or chunked passes with overlap, single-tokenized chunking, and bounded concurrency up to `DOCUMENT_EXTRACTION_CONCURRENCY`) into a **single staged pending action** — nothing is written until you confirm. Live chunk progress streams over SSE (`chunk X/N`) without extra project-state downloads
 - **Server-side PRD export** — the generated LaTeX PRD (`template-krungsrinimble.tex`) downloads as **DOCX** (native `python-docx` renderer) and **PDF** (headless LibreOffice, with a Tectonic fallback), so PDF and Word output always match
 - **Version snapshot ledger** — every accepted state bump is an immutable, versioned PRD record (integer `version` + display `semver`) with line-level diffs against any earlier version and append-only restore
 - **Human-in-the-loop** — LLM changes are staged as *pending actions*; you confirm or cancel before anything is written to the database
+- **Governed review lifecycle** — projects follow enforced Draft → HPO Review → PO Review → Approved transitions; approval is tied to immutable PRD/audit versions, every transition is append-only, and later governed content changes automatically reopen the project as Revised
+- **Operational project health** — dashboard health rolls up traceability coverage, audit freshness/findings, unresolved questions, PRD review state, approval evidence, and active waivers; confirmed audits form an immutable run ledger with new/resolved/reopened finding comparisons
 - **Workflow Stop button** — an in-flight `process-requirements` run can be cancelled server-side (`POST /api/process-requirements/cancel`); partial work is discarded, never persisted
 - **Generic artifact locking** — lock/unlock projects, epics, requirements, user stories, acceptance criteria, clarification questions, PRD documents, and individual PRD sections; optimistic UI with automatic rollback
 - **Real-time updates** — Server-Sent Events push state changes to the dashboard instead of polling
@@ -33,6 +35,8 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 - **JWT authentication & role-based accounts** — self-service sign-up (`SIGNUP_ENABLED`, canonical roles only), `POST /api/auth/login` (OAuth2 password flow), `/api/auth/me`, password change, and bcrypt-hashed credentials stored in `users.password_hash`; projects are **scoped to the signed-in owner**, so each account sees only its own workspace
 - **Semantic memory across sessions** — after every chat turn a small LLM pass distils durable facts/decisions ("project requires SSO"), embeds them via the local `LM_STUDIO_EMBEDDING_MODEL`, and stores them in `semantic_memories`; later turns recall the top-k by blended cosine relevance + recency decay (hard-capped at `MEMORY_CONTEXT_MAX_TOKENS`) — entirely **fail-open**, so memory can never break a chat turn
 - **Requirement Traceability Matrix** — derived, read-only view linking Requirements ↔ User Stories ↔ Acceptance Criteria ↔ PRD sections ↔ diagrams, with a project-wide coverage/gap report
+- **Dependency-aware partial regeneration** — a persisted artifact graph links requirements → stories → criteria → PRD sections/diagrams; the Traceability tab previews the transitive blast radius and regenerates only affected, unlocked AI-owned targets while recording each scoped run
+- **Reusable Banking RAG** — upload banking policies, regulations, standards, and best practices once; sources remain draft until explicitly approved, are chunked and embedded locally, and only the most relevant approved chunks are supplied to future audits (with lexical fallback and an immutable retrieval trail)
 - **Impact analysis before you confirm** — `GET /api/pending-actions/{action_id}/impact` predicts what a staged change touches (stories, PRD sections, diagrams) so reviewers see *what changes* and *what is affected*, including `DANGLING` references to non-existent `REQ-`/`US-` codes
 - **Part-level PRD editing & versioning** — a PRD is stored as nine independently editable, lockable, versioned parts (`prd_sections` / `prd_section_versions`); human-owned sections (`ai_generatable=false`) and locked parts survive every AI regeneration untouched, and per-part reverts append a new version instead of rewriting history
 
@@ -362,6 +366,9 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `MEMORY_RELEVANCE_WEIGHT` / `MEMORY_RECENCY_HALF_LIFE_DAYS` | `0.7` / `30.0` | Recall score = `weight · cosine + (1 − weight) · 0.5^(age_days / half_life)` |
 | `MEMORY_DEDUPE_SIMILARITY` | `0.92` | Cosine threshold above which a new fact refreshes the existing memory instead of inserting a near-duplicate |
 | `MEMORY_MAX_FACTS_PER_TURN` | `8` | Ceiling on facts stored from a single turn |
+| `BANKING_RAG_CHUNK_TOKENS` / `BANKING_RAG_CHUNK_OVERLAP` | `700` / `100` | Chunk size and overlap used when indexing reusable banking documents |
+| `BANKING_RAG_TOP_K` | `6` | Maximum approved banking-knowledge chunks retrieved for one audit |
+| `BANKING_RAG_MAX_CONTEXT_TOKENS` | `3500` | Hard token ceiling for reusable banking evidence added to one audit |
 | `DEBUG` | `false` | Enables uvicorn `--reload` and SQL echo |
 | `APP_NAME` | `Enterprise Requirements Architecture Core` | Display name used in health/docs |
 
@@ -402,7 +409,7 @@ In a normal requirement pass the map is: **Router → Matcher → Gatherer** (pr
 | **router_node** | Classifies each message as `CHAT`, `QUESTION`, `COMMAND`, or `REQUIREMENT` with a confidence score and reason (heuristic fallback). Below the confidence floor it asks a clarifying question instead of guessing. |
 | **requirement_matcher_node** | Maps the message to existing user stories (e.g. `US-001`) and proposes `NEW / UPDATE / DELETE / CLARIFY` via `requirement-matcher` + semantic change detection; low-confidence matches stop the workflow rather than mutate the wrong story. A ticket code the model invented (absent from the backlog) is discarded and forces clarification instead of driving a mutation. |
 | **gatherer_node** | Parses the requirement text into structured **user stories + acceptance criteria**; sanitizes and re-codes the LLM output, then reconciles it against previously persisted stories (create / update / archive / unchanged) using the merge service. |
-| **auditor_node** | Runs the **7-point banking compliance checklist** over changed stories, marks validation status, and emits clarification questions for anything ambiguous or non-compliant. `is_valid` is recomputed in code as *“no open questions remain”*, and every new question is merged with the previously unresolved ones. |
+| **auditor_node** | Evaluates all active stories and project evidence against the versioned structured banking checklist. Only substantiated mandatory blockers fail; uncertain applicability produces clarification questions, while warnings and best-practice recommendations remain non-blocking. |
 | **architect_node** | Synthesizes the final **PRD markdown** and a **Mermaid diagram** from the *audited* dataset only, honouring human-owned/locked PRD parts. Skips the LLM entirely when nothing changed. |
 | **delete_requirement_node** | Handles `DELETE_REQUIREMENT` intent to archive/remove a requirement, asking for disambiguation when the target is unclear. |
 
@@ -550,6 +557,19 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 |--------|------|-------------|
 | `GET` | `/api/project/{project_id}/traceability` | Derived Requirement Traceability Matrix — one row per requirement linking stories, acceptance criteria, PRD sections and diagrams, plus project-wide coverage/gap report |
 | `GET` | `/api/pending-actions/{action_id}/impact?project_id=...` | Predict what a staged change touches (stories, PRD sections, diagrams) before the reviewer clicks Save — includes change predictions and `DANGLING` references to non-existent `REQ-`/`US-` codes |
+| `GET` | `/api/projects/{project_id}/dependency-graph` | Rebuild and return the persisted directed artifact dependency graph |
+| `POST` | `/api/projects/{project_id}/regeneration/plan` | Traverse the graph from changed artifacts and preview affected stories, writable sections, protected sections, and diagrams |
+| `POST` | `/api/projects/{project_id}/regeneration` | Confirm and execute the dependency-scoped regeneration plan; locked and human-owned sections remain untouched |
+
+### Reusable Banking Knowledge
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/banking-knowledge` | List the signed-in owner's reusable banking documents |
+| `POST` | `/api/banking-knowledge/upload` | Upload PDF, DOCX, Markdown, or text as a chunked draft knowledge source |
+| `GET` | `/api/banking-knowledge/{document_id}` | Read one owner-scoped knowledge document |
+| `POST` | `/api/banking-knowledge/{document_id}/approve` | Approve a source so Banking RAG can retrieve it during audits |
+| `POST` | `/api/banking-knowledge/{document_id}/retire` | Retire a source from future retrieval without deleting its audit history |
 
 ### PRD & Versioning
 

@@ -39,6 +39,7 @@ from app.schemas import (
     ProjectPinRequest,
     ProjectFlagRequest,
     ProjectStatusRequest,
+    ProjectReviewEventResponse,
     RequirementStateResponse,
     ConversationMessageResponse,
     PRDVersionResponse,
@@ -50,6 +51,9 @@ from app.prd_section_service import ensure_sections_seeded, assemble_document_ma
 from app.repositories.prd_section import PRDSectionRepository
 from app.prompt_loader import load_prd_template, load_prd_latex_template
 from app.event_manager import event_manager
+from app.review_service import ReviewTransitionError, get_review_history, transition_project
+from app.review_service import governed_state_changed, mark_revised_if_approved
+from app.repositories.base import serialize_project
 
 logger = logging.getLogger("app.routes.projects")
 
@@ -437,15 +441,46 @@ async def set_project_status(
             detail=f"Invalid status '{payload.status}'. Allowed: {', '.join(sorted(allowed))}",
         )
 
-    # PROJECT 7.5.4 — Repository UPDATE of status only (owner-scoped, no lock gate).
-    updated = await ProjectRepository.update_status(project_id, payload.status, db, user_id=UUID(current_user.id))
-    if not updated:
-        raise HTTPException(status_code=404, detail="Project not found")
+    # Lifecycle changes are commands, not arbitrary labels: the service enforces
+    # legal transitions and approval prerequisites and appends the review event.
+    try:
+        project = await transition_project(
+            project_id,
+            payload.status,
+            db,
+            actor_id=current_user.id,
+            actor_name=current_user.full_name,
+            actor_role=current_user.role,
+            comment=payload.comment,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Project not found") from None
+    except ReviewTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    updated = serialize_project(project)
     await event_manager.publish(project_id, "project_updated", {
         "project_id": project_id,
         "status": payload.status,
     })
     return updated
+
+
+@router.get(
+    "/api/projects/{project_id}/review-history",
+    response_model=List[ProjectReviewEventResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def project_review_history(
+    project_id: str,
+    current_user: AuthenticatedUser = Depends(require_project_owner),
+    db: AsyncSession = Depends(get_db),
+) -> List[ProjectReviewEventResponse]:
+    """Return the append-only lifecycle history for the caller's project."""
+    try:
+        UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format") from None
+    return await get_review_history(project_id, db)
 
 
 # PROJECT 2.3 — Route: GET /api/project/{project_id} (opening a project).
@@ -633,7 +668,17 @@ async def update_project_requirement_state(
     # PROJECT 8.2.2 — Repository write: RequirementStateRepository.save_or_update
     #                (create-if-missing, else partial field update; child tables
     #                re-derived when requirements/stories/AC lists are supplied).
+    previous_state = await RequirementStateRepository.get_by_project_id(project_id, session)
     state = await RequirementStateRepository.save_or_update(project_id, updates, session)
+    if governed_state_changed(previous_state, updates):
+        await mark_revised_if_approved(
+            project_id,
+            session,
+            reason="Approved requirements changed through a direct edit.",
+            actor_id=current_user.id,
+            actor_name=current_user.full_name,
+            actor_role=current_user.role,
+        )
 
     # If the update includes a new generated_prd (e.g. legacy manual section edit
     # fallback), record an immutable PRD version so the version ledger never

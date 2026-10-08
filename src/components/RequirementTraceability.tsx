@@ -16,6 +16,7 @@ import {
   RefreshCw,
   ScrollText,
   ShieldAlert,
+  Sparkles,
   UserCircle2,
 } from 'lucide-react';
 import { api, detailFromJsonError } from '../api/client';
@@ -23,8 +24,10 @@ import type {
   StaleCodeReference,
   TraceabilityPayload,
   TraceabilityRow,
+  DependencyGraphPayload,
+  RegenerationPlanPayload,
 } from '../api/types';
-import { handleError } from './Toast';
+import { handleError, notify } from './Toast';
 
 interface RequirementTraceabilityProps {
   projectId: string | null;
@@ -142,15 +145,25 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
   const [matrix, setMatrix] = useState<TraceabilityPayload | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [dependencyGraph, setDependencyGraph] = useState<DependencyGraphPayload | null>(null);
+  const [selectedArtifacts, setSelectedArtifacts] = useState<Set<string>>(new Set());
+  const [regenerationPlan, setRegenerationPlan] = useState<RegenerationPlanPayload | null>(null);
+  const [isPlanning, setIsPlanning] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
 
   const loadMatrix = useCallback(async (id: string): Promise<void> => {
     setIsLoading(true);
     setLoadError(null);
     try {
-      const payload = await api.getTraceability(id);
+      const [payload, graph] = await Promise.all([
+        api.getTraceability(id),
+        api.getDependencyGraph(id),
+      ]);
       setMatrix(payload);
+      setDependencyGraph(graph);
     } catch (err) {
       setMatrix(null);
+      setDependencyGraph(null);
       // Surface the REAL reason: a stale backend (404 — route not registered),
       // a server error (500 — detail carries the message), or a network issue.
       const statusCode = (err as { response?: { status?: unknown } } | null)?.response?.status;
@@ -165,6 +178,57 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
       setIsLoading(false);
     }
   }, []);
+
+  const selectableNodes = (dependencyGraph?.nodes ?? []).filter(
+    (node) => node.artifact_type === 'requirement' || node.artifact_type === 'user_story',
+  );
+
+  const artifactRefs = () => selectableNodes
+    .filter((node) => selectedArtifacts.has(node.id))
+    .map((node) => ({ artifact_type: node.artifact_type, artifact_key: node.artifact_key }));
+
+  const planRegeneration = async (): Promise<void> => {
+    const refs = artifactRefs();
+    if (!projectId || refs.length === 0) return;
+    setIsPlanning(true);
+    try {
+      setRegenerationPlan(await api.planRegeneration(projectId, refs));
+    } catch (error) {
+      handleError('Could not calculate the regeneration scope.', error);
+    } finally {
+      setIsPlanning(false);
+    }
+  };
+
+  const executeRegeneration = async (): Promise<void> => {
+    const refs = artifactRefs();
+    if (!projectId || refs.length === 0 || !regenerationPlan) return;
+    const confirmed = window.confirm(
+      `Regenerate ${regenerationPlan.summary.sections} PRD section(s)` +
+      `${regenerationPlan.summary.diagrams ? ' and the architecture diagram' : ''}? Locked and human-owned sections will be preserved.`,
+    );
+    if (!confirmed) return;
+    setIsRegenerating(true);
+    try {
+      const result = await api.executeRegeneration(projectId, refs);
+      if (result.status === 'failed') {
+        throw new Error(result.error_message || 'Scoped regeneration failed.');
+      }
+      notify(
+        result.status === 'no_changes'
+          ? 'No downstream artifact required regeneration.'
+          : 'Affected artifacts regenerated successfully.',
+        'success',
+      );
+      setSelectedArtifacts(new Set());
+      setRegenerationPlan(null);
+      await loadMatrix(projectId);
+    } catch (error) {
+      handleError('Could not regenerate the affected artifacts.', error);
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
 
   useEffect(() => {
     if (!projectId) return;
@@ -238,6 +302,85 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
         </button>
       </div>
 
+      {/* Persisted dependency graph + partial-regeneration controls */}
+      {dependencyGraph && (
+        <div className="bg-white border border-outline rounded-2xl p-4.5 shadow-sm space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-bold text-on-surface">
+                <Network className="w-4 h-4 text-primary" /> Artifact dependency graph
+              </div>
+              <p className="mt-1 text-xs text-on-surface-variant">
+                {dependencyGraph.summary.nodes} artifacts · {dependencyGraph.summary.edges} relationships. Select changed inputs to calculate their downstream write scope.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={selectedArtifacts.size === 0 || isPlanning || isRegenerating}
+              onClick={() => void planRegeneration()}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isPlanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
+              Preview affected artifacts
+            </button>
+          </div>
+
+          <div className="max-h-44 overflow-y-auto rounded-xl border border-outline bg-slate-50 p-2.5">
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {selectableNodes.map((node) => (
+                <label key={node.id} className="flex cursor-pointer items-start gap-2 rounded-lg bg-white p-2 text-xs hover:bg-primary/[0.04]">
+                  <input
+                    type="checkbox"
+                    checked={selectedArtifacts.has(node.id)}
+                    onChange={() => {
+                      setSelectedArtifacts((current) => {
+                        const next = new Set(current);
+                        if (next.has(node.id)) next.delete(node.id); else next.add(node.id);
+                        return next;
+                      });
+                      setRegenerationPlan(null);
+                    }}
+                    className="mt-0.5 accent-primary"
+                  />
+                  <span className="min-w-0">
+                    <span className="font-mono font-bold text-primary">{node.artifact_key}</span>
+                    <span className="ml-1 text-on-surface-variant">{node.label}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {regenerationPlan && (
+            <div className="rounded-xl border border-primary/25 bg-primary/[0.04] p-3 text-xs space-y-2">
+              <div className="flex flex-wrap gap-1.5">
+                {chip(`${regenerationPlan.summary.stories} affected stories`, 'bg-blue-50 text-blue-800 border-blue-200')}
+                {chip(`${regenerationPlan.summary.sections} PRD sections`, 'bg-violet-50 text-violet-800 border-violet-200')}
+                {chip(`${regenerationPlan.summary.diagrams} diagrams`, 'bg-cyan-50 text-cyan-800 border-cyan-200')}
+                {regenerationPlan.summary.skipped_sections > 0 && chip(`${regenerationPlan.summary.skipped_sections} protected`, 'bg-amber-50 text-amber-800 border-amber-200')}
+              </div>
+              {regenerationPlan.regenerate_prd_sections.length > 0 && (
+                <p><span className="font-semibold">Will update:</span> {regenerationPlan.regenerate_prd_sections.join(', ')}</p>
+              )}
+              {regenerationPlan.skipped_prd_sections.length > 0 && (
+                <p className="text-amber-800"><span className="font-semibold">Preserved:</span> {regenerationPlan.skipped_prd_sections.join(', ')}</p>
+              )}
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  disabled={isRegenerating || (regenerationPlan.summary.sections === 0 && regenerationPlan.summary.diagrams === 0)}
+                  onClick={() => void executeRegeneration()}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isRegenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  Regenerate affected artifacts
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Coverage-gap panel */}
       {gapCount > 0 && (
         <div className="bg-white border border-amber-200 rounded-2xl p-4.5 shadow-sm space-y-2.5">
@@ -310,4 +453,3 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
     </div>
   );
 };
-

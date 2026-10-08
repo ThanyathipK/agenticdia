@@ -267,18 +267,31 @@ export function useProjectSync(
             store.setAuditResult(prev => {
               const currentQsStr = JSON.stringify(prev.clarification_questions || []);
               const newQsStr = JSON.stringify(payload.clarification_questions || []);
+              const currentFindingsStr = JSON.stringify(prev.findings || []);
+              const newFindingsStr = JSON.stringify(payload.audit_findings || []);
               const isPassed = payload.validation_status === 'valid';
 
-              const newPassed = isPassed ? ['Financial Regulatory Compliance', 'Security & Data Masking'] : [];
-              const newFailed = !isPassed ? ['Idempotency & De-duplication', 'Network Timeouts & Retry Strategies'] : [];
+              const newPassed = payload.passed_checks || [];
+              const newFailed = payload.failed_checks || [];
 
-              if (prev.is_valid !== isPassed || currentQsStr !== newQsStr) {
+              if (
+                prev.is_valid !== isPassed ||
+                currentQsStr !== newQsStr ||
+                currentFindingsStr !== newFindingsStr ||
+                prev.checklist_version !== payload.audit_checklist_version
+              ) {
                 return {
                   is_valid: isPassed,
                   audit_version_reviewed: payload.version_number || 1,
                   clarification_questions: payload.clarification_questions || [],
                   passed_checks: newPassed,
                   failed_checks: newFailed,
+                  findings: payload.audit_findings || [],
+                  source_references: payload.audit_source_references || [],
+                  verdict: payload.audit_verdict || (isPassed ? 'pass' : 'needs_clarification'),
+                  project_context: payload.audit_project_context,
+                  checklist_id: payload.audit_checklist_id,
+                  checklist_version: payload.audit_checklist_version,
                 };
               }
               return prev;

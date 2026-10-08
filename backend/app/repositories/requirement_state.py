@@ -159,6 +159,8 @@ class RequirementStateRepository:
         #             requirement_state.clarification_questions, which is what the
         #             CLARIFY 1.1/1.2 forms list and CLARIFY 3.4 later indexes.
         cqs = await ClarificationQuestionRepository.get_by_project(str(project_id), session)
+        audits = await AuditResultRepository.get_by_project(str(project_id), session)
+        latest_audit = audits[0] if audits else {}
 
         # The preview must ALWAYS surface the latest PRD version, so resolve the
         # document from the NEWEST stored row (at or before the current version)
@@ -171,16 +173,32 @@ class RequirementStateRepository:
         latest_prd = await PRDDocumentRepository.get_latest_for_project(
             str(project_id), session, max_version=version_num
         )
-        if latest_prd:
-            generated_prd = latest_prd["prd_markdown"]
-            generated_diagrams = latest_prd["mermaid_diagram"]
+        latest_ledger = await PRDVersionRepository.get_latest(str(project_id), session)
+
+        # Pick the newest NON-EMPTY document.  Requirement merges can create an
+        # empty prd_documents row at an older version while a later Architect /
+        # regeneration stores the real document in the immutable ledger and on
+        # requirement_states.  Treating mere row existence as authoritative made
+        # both the PRD and Mermaid preview disappear after reload.
+        document_prd = (latest_prd or {}).get("prd_markdown") or ""
+        ledger_prd = (latest_ledger or {}).get("generated_prd") or ""
+        model_prd = model.generated_prd or ""
+        document_version = int((latest_prd or {}).get("version") or 0)
+        ledger_version = int((latest_ledger or {}).get("version_number") or 0)
+        if ledger_prd and ledger_version >= document_version:
+            generated_prd = ledger_prd
         else:
-            # No prd_documents rows at all — fall back to the newest immutable
-            # version-ledger snapshot so the preview still shows the latest
-            # generated document. (The ledger does not store diagrams.)
-            latest_ledger = await PRDVersionRepository.get_latest(str(project_id), session)
-            generated_prd = (latest_ledger or {}).get("generated_prd") or ""
-            generated_diagrams = ""
+            generated_prd = document_prd or model_prd or ledger_prd
+
+        # The version ledger currently stores only PRD text.  Prefer the newest
+        # document diagram when present, then the materialized state written by
+        # Architect/regeneration.  Never replace a real diagram with an older
+        # empty document field.
+        generated_diagrams = (
+            (latest_prd or {}).get("mermaid_diagram")
+            or model.generated_diagrams
+            or ""
+        )
 
         return {
             "project_id": str(model.project_id),
@@ -192,6 +210,14 @@ class RequirementStateRepository:
             "acceptance_criteria": all_acceptance_criteria if all_acceptance_criteria else [],
             "clarification_questions": cqs if cqs else [],
             "validation_status": model.validation_status,
+            "passed_checks": latest_audit.get("passed_checks", []),
+            "failed_checks": latest_audit.get("failed_checks", []),
+            "audit_findings": latest_audit.get("findings", []),
+            "audit_source_references": latest_audit.get("source_references", []),
+            "audit_verdict": latest_audit.get("verdict", "needs_clarification"),
+            "audit_project_context": latest_audit.get("project_context", {}),
+            "audit_checklist_id": latest_audit.get("checklist_id", "banking-core"),
+            "audit_checklist_version": latest_audit.get("checklist_version", "1.0.0"),
             "generated_prd": generated_prd if generated_prd else "",
             "generated_diagrams": generated_diagrams if generated_diagrams else "",
             "current_workflow_state": model.current_workflow_state,
@@ -689,6 +715,22 @@ class RequirementStateRepository:
                 if ar_ids:
                     stmt_del_cq = delete(ClarificationQuestionModel).where(ClarificationQuestionModel.audit_result_id.in_(ar_ids))
                     await session.execute(stmt_del_cq)
+            else:
+                # Document-only projects have no visible requirement. Remove
+                # questions through the project-scoped internal audit anchor.
+                stmt_ar_ids = (
+                    select(AuditResultModel.id)
+                    .join(RequirementModel)
+                    .where(RequirementModel.project_id == project_id)
+                )
+                res_ar_ids = await session.execute(stmt_ar_ids)
+                ar_ids = res_ar_ids.scalars().all()
+                if ar_ids:
+                    await session.execute(
+                        delete(ClarificationQuestionModel).where(
+                            ClarificationQuestionModel.audit_result_id.in_(ar_ids)
+                        )
+                    )
 
             for cq in updates["clarification_questions"]:
                 await ClarificationQuestionRepository.create(str(project_id), {
@@ -696,7 +738,8 @@ class RequirementStateRepository:
                     "target_user_story_id": cq.get("target_user_story_id"),
                     "question_text": cq.get("question_text", ""),
                     "user_answer": cq.get("user_answer"),
-                    "is_resolved": cq.get("is_resolved", False)
+                    "is_resolved": cq.get("is_resolved", False),
+                    "source_references": cq.get("source_references", []),
                 }, session, requirement_id=first_active_req_id)
 
         # 4. Propagation for PRD & Diagrams
@@ -728,26 +771,56 @@ class RequirementStateRepository:
                 }, session)
 
         # 5. Propagation for Audit Results
-        if "validation_status" in updates and updates["validation_status"] is not None and first_active_req_id:
+        if (
+            "validation_status" in updates
+            and updates["validation_status"] is not None
+            and any(key in updates for key in (
+                "passed_checks", "failed_checks", "audit_findings", "audit_source_references",
+                "audit_verdict", "audit_project_context",
+                "audit_checklist_id", "audit_checklist_version",
+            ))
+        ):
             passed = updates.get("passed_checks", [])
             failed = updates.get("failed_checks", [])
+            findings = updates.get("audit_findings", [])
+            source_references = updates.get("audit_source_references", [])
+            verdict = updates.get("audit_verdict", "needs_clarification")
+            project_context = updates.get("audit_project_context", {})
+            checklist_id = updates.get("audit_checklist_id", "banking-core")
+            checklist_version = updates.get("audit_checklist_version", "1.0.0")
             is_valid = updates["validation_status"] == "valid"
 
             ar_list = await AuditResultRepository.get_by_project(str(project_id), session, requirement_id=first_active_req_id)
             if not ar_list:
-                await AuditResultRepository.create(str(project_id), {
+                current_audit = await AuditResultRepository.create(str(project_id), {
                     "is_valid": is_valid,
                     "audit_version_reviewed": version_num,
                     "passed_checks": passed,
-                    "failed_checks": failed
+                    "failed_checks": failed,
+                    "findings": findings,
+                    "source_references": source_references,
+                    "verdict": verdict,
+                    "project_context": project_context,
+                    "checklist_id": checklist_id,
+                    "checklist_version": checklist_version,
                 }, session, requirement_id=first_active_req_id)
             else:
-                await AuditResultRepository.update(ar_list[0]["id"], str(project_id), {
+                current_audit = await AuditResultRepository.update(ar_list[0]["id"], str(project_id), {
                     "is_valid": is_valid,
                     "audit_version_reviewed": version_num,
-                    "passed_checks": passed if passed else ar_list[0]["passed_checks"],
-                    "failed_checks": failed if failed else ar_list[0]["failed_checks"]
+                    "passed_checks": updates.get("passed_checks", ar_list[0]["passed_checks"]),
+                    "failed_checks": updates.get("failed_checks", ar_list[0]["failed_checks"]),
+                    "findings": findings,
+                    "source_references": source_references,
+                    "verdict": verdict,
+                    "project_context": project_context,
+                    "checklist_id": checklist_id,
+                    "checklist_version": checklist_version,
                 }, session)
+
+            if updates.get("_record_audit_run") and current_audit:
+                from app.audit_history_service import record_audit_run
+                await record_audit_run(str(project_id), current_audit, session)
 
         await session.flush()
         await session.refresh(model)

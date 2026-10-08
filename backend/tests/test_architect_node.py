@@ -148,3 +148,31 @@ async def test_architect_raises_on_empty_dataset(monkeypatch):
             "current_version": 2,
             "structured_requirements": {},
         })
+
+
+@pytest.mark.asyncio
+async def test_architect_preview_does_not_write_sections_or_version(monkeypatch):
+    """Generate PRD is staged; governed artifact writes begin only on Save."""
+    _patch(monkeypatch, REQ_STATE)
+    request_session = object()
+
+    async def fake_semver(*args, **kwargs):
+        return "1.0.0"
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("preview attempted to persist a governed artifact")
+
+    monkeypatch.setattr("app.version_service.resolve_document_semver", fake_semver)
+    monkeypatch.setattr("app.version_service.record_prd_version", forbidden)
+    monkeypatch.setattr("app.prd_section_service.sync_sections_from_prd", forbidden)
+
+    result = await agents.architect_node({
+        "project_id": "p1",
+        "current_version": 2,
+        "structured_requirements": {},
+        "db_session": request_session,
+        "stage_artifacts_only": True,
+    })
+
+    assert "1.0.0" in result["prd_markdown"]
+    assert result["mermaid_diagram"].startswith("flowchart TD")

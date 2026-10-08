@@ -22,6 +22,10 @@ export interface ProjectSummary {
   is_flagged?: boolean;
   /** User-editable workflow status ('draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised') shown on the dashboard table. */
   status?: string;
+  last_approved_prd_version?: number | null;
+  last_approved_audit_version?: number | null;
+  last_approved_by?: string | null;
+  last_approved_at?: string | null;
   /** ISO-8601 timestamp of the last project update (dashboard 'Updated' column). */
   updated_at?: string | null;
   /** Short excerpt of a matching conversation message, present only when the project matched via message content. */
@@ -31,10 +35,80 @@ export interface ProjectSummary {
 /** Request body for setting a project's user-editable workflow status (dashboard table). */
 export interface ProjectStatusRequest {
   status: ProjectStatus;
+  comment?: string;
 }
 
 /** Workflow statuses editable from the dashboard projects table. */
 export type ProjectStatus = 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised';
+
+export interface ProjectReviewEventPayload {
+  id: string;
+  project_id: string;
+  from_status: ProjectStatus;
+  to_status: ProjectStatus;
+  action: string;
+  comment?: string | null;
+  actor_id?: string | null;
+  actor_name: string;
+  actor_role: string;
+  prd_version_number?: number | null;
+  audit_version_reviewed?: number | null;
+  created_at?: string | null;
+}
+
+export interface ProjectHealthPayload {
+  project_id: string;
+  status: 'ready' | 'attention_required' | 'blocked' | 'approved';
+  workflow_status: ProjectStatus;
+  coverage_percent: number;
+  metrics: {
+    total_requirements: number;
+    traced_requirements: number;
+    blocking_findings: number;
+    warnings: number;
+    suggestions: number;
+    unresolved_questions: number;
+    pending_prd_sections: number;
+    active_waivers: number;
+  };
+  audit: { verdict?: string | null; version_reviewed?: number | null; checklist_version?: string | null; stale: boolean; updated_at?: string | null };
+  approval: { prd_version?: number | null; audit_version?: number | null; approved_at?: string | null };
+  issues: Array<{ kind: string; label: string; count: number; destination: string; severity: string }>;
+  generated_at: string;
+}
+
+export interface AuditWaiverPayload {
+  id: string;
+  project_id: string;
+  rule_id: string;
+  target_requirement_id?: string | null;
+  reason: string;
+  compensating_control?: string | null;
+  owner: string;
+  approved_by?: string | null;
+  approved_by_name: string;
+  expires_at: string;
+  status: 'active' | 'expired' | 'revoked' | string;
+  revoked_reason?: string | null;
+  revoked_at?: string | null;
+  created_at?: string | null;
+}
+
+export interface AuditRunPayload {
+  id: string;
+  project_id: string;
+  run_number: number;
+  audit_version_reviewed: number;
+  is_valid: boolean;
+  verdict: string;
+  findings: Array<AuditFindingPayload & { finding_key: string; lifecycle: 'new' | 'reopened' | 'unchanged'; waiver?: AuditWaiverPayload | null }>;
+  passed_checks: string[];
+  failed_checks: string[];
+  checklist_id: string;
+  checklist_version: string;
+  comparison: { new: string[]; reopened: string[]; unchanged: string[]; resolved: string[] };
+  created_at?: string | null;
+}
 
 export interface ProjectCreated {
   id: string;
@@ -100,6 +174,46 @@ export interface ClarificationQuestionPayload {
   question_text: string;
   user_answer?: string | null;
   is_resolved?: boolean;
+  source_references?: AuditSourceReferencePayload[];
+}
+
+export interface AuditSourceReferencePayload {
+  document_id?: string | null;
+  document_name: string;
+  section?: string | null;
+  excerpt?: string | null;
+}
+
+export interface AuditFindingPayload {
+  rule_id: string;
+  finding_type: string;
+  severity: string;
+  category: string;
+  target_requirement_id?: string | null;
+  description: string;
+  source_references: AuditSourceReferencePayload[];
+  evidence_status: string;
+  applicability: 'applicable_required' | 'applicable_recommended' | 'not_applicable' | 'unknown';
+  impact: 'blocking' | 'warning' | 'suggestion';
+  confidence: number;
+  rationale?: string | null;
+  recommendation?: {
+    summary: string;
+    proposed_requirement_text?: string | null;
+    proposed_acceptance_criteria: string[];
+    expected_benefit?: string | null;
+  } | null;
+}
+
+export interface AuditProjectContextPayload {
+  business_segment: string;
+  product_domain: string;
+  solution_type: string;
+  financial_transaction?: boolean | null;
+  external_integration?: boolean | null;
+  sensitive_data?: boolean | null;
+  delivery_stage: string;
+  confidence: number;
 }
 
 export interface AuditResultPayload {
@@ -109,7 +223,13 @@ export interface AuditResultPayload {
   audit_version_reviewed?: number;
   passed_checks: string[];
   failed_checks: string[];
+  findings?: AuditFindingPayload[];
+  source_references?: AuditSourceReferencePayload[];
   clarification_questions?: ClarificationQuestionPayload[];
+  verdict?: 'pass' | 'pass_with_warnings' | 'needs_clarification' | 'fail';
+  project_context?: AuditProjectContextPayload;
+  checklist_id?: string;
+  checklist_version?: string;
 }
 
 // ----------------------------------------------------------------------------
@@ -237,6 +357,14 @@ export type RequirementsField =
   | undefined;
 
 export interface RequirementStatePayload {
+  passed_checks?: string[];
+  failed_checks?: string[];
+  audit_findings?: AuditFindingPayload[];
+  audit_source_references?: AuditSourceReferencePayload[];
+  audit_verdict?: AuditResultPayload['verdict'];
+  audit_project_context?: AuditProjectContextPayload;
+  audit_checklist_id?: string;
+  audit_checklist_version?: string;
   project_id?: string;
   project_name?: string | null;
   requirements?: RequirementsField;
@@ -582,6 +710,77 @@ export interface TraceabilityPayload {
   rows: TraceabilityRow[];
   diagrams: TraceabilityDiagram[];
   coverage: TraceabilityCoverage;
+}
+
+export type DependencyArtifactType =
+  | 'requirement'
+  | 'user_story'
+  | 'acceptance_criterion'
+  | 'prd_section'
+  | 'diagram';
+
+export interface ArtifactReferencePayload {
+  artifact_type: DependencyArtifactType;
+  artifact_key: string;
+}
+
+export interface DependencyGraphPayload {
+  project_id: string;
+  nodes: Array<{
+    id: string;
+    artifact_type: DependencyArtifactType;
+    artifact_key: string;
+    label: string;
+    metadata: Record<string, unknown>;
+  }>;
+  edges: Array<{
+    source: string;
+    target: string;
+    relationship: string;
+    evidence: Record<string, unknown>;
+  }>;
+  summary: { nodes: number; edges: number; requirements: number; stories: number; sections: number; diagrams: number };
+  rebuilt_at: string;
+}
+
+export interface RegenerationPlanPayload {
+  project_id: string;
+  changed_artifacts: ArtifactReferencePayload[];
+  affected_user_stories: string[];
+  regenerate_prd_sections: string[];
+  skipped_prd_sections: string[];
+  regenerate_diagrams: string[];
+  affected_node_ids: string[];
+  summary: { stories: number; sections: number; skipped_sections: number; diagrams: number };
+}
+
+export interface RegenerationResultPayload {
+  run_id: string;
+  status: 'completed' | 'no_changes' | 'failed' | string;
+  plan: RegenerationPlanPayload;
+  generated_prd?: string;
+  generated_diagrams?: string;
+  error_message?: string;
+}
+
+export interface BankingKnowledgeDocumentPayload {
+  id: string;
+  title: string;
+  original_filename: string;
+  original_format: string;
+  mime_type?: string | null;
+  document_type: string;
+  jurisdiction: string;
+  tags: string[];
+  version: number;
+  status: 'draft' | 'approved' | 'retired' | string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  content_markdown?: string;
+  chunk_count?: number;
+  embedding_status?: 'ready' | 'lexical_only';
 }
 
 // ----------------------------------------------------------------------------

@@ -63,12 +63,34 @@ class ProjectModel(Base):
     # User-editable workflow status shown on the dashboard table
     # ('draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised').
     status = Column(String(50), nullable=False, default="draft", server_default="draft")
+    last_approved_prd_version = Column(Integer, nullable=True)
+    last_approved_audit_version = Column(Integer, nullable=True)
+    last_approved_by = Column(GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    last_approved_at = Column(DateTime(timezone=True), nullable=True)
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
     lock_reason = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class ProjectReviewEventModel(Base):
+    """Append-only lifecycle transition history for a project."""
+    __tablename__ = "project_review_events"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_status = Column(String(50), nullable=False)
+    to_status = Column(String(50), nullable=False)
+    action = Column(String(50), nullable=False)
+    comment = Column(Text, nullable=True)
+    actor_id = Column(GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    actor_name = Column(String(255), nullable=False)
+    actor_role = Column(String(100), nullable=False)
+    prd_version_number = Column(Integer, nullable=True)
+    audit_version_reviewed = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class EpicModel(Base):
     __tablename__ = "epics"
@@ -155,8 +177,160 @@ class AuditResultModel(Base):
     is_valid = Column(Boolean, nullable=False, default=False)
     passed_checks = Column(JSON, nullable=False, default=list)
     failed_checks = Column(JSON, nullable=False, default=list)
+    findings = Column(JSON, nullable=False, default=list)
+    source_references = Column(JSON, nullable=False, default=list)
+    verdict = Column(String(50), nullable=False, default="needs_clarification")
+    project_context = Column(JSON, nullable=False, default=dict)
+    checklist_id = Column(String(100), nullable=False, default="banking-core", server_default="banking-core")
+    checklist_version = Column(String(30), nullable=False, default="1.0.0", server_default="1.0.0")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class AuditRunModel(Base):
+    """Immutable project-level snapshot of one confirmed Auditor execution."""
+    __tablename__ = "audit_runs"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    audit_result_id = Column(GUID, ForeignKey("audit_results.id", ondelete="SET NULL"), nullable=True)
+    run_number = Column(Integer, nullable=False)
+    audit_version_reviewed = Column(Integer, nullable=False)
+    is_valid = Column(Boolean, nullable=False, default=False)
+    verdict = Column(String(50), nullable=False)
+    findings = Column(JSON, nullable=False, default=list)
+    passed_checks = Column(JSON, nullable=False, default=list)
+    failed_checks = Column(JSON, nullable=False, default=list)
+    source_references = Column(JSON, nullable=False, default=list)
+    project_context = Column(JSON, nullable=False, default=dict)
+    checklist_id = Column(String(100), nullable=False)
+    checklist_version = Column(String(30), nullable=False)
+    comparison = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("project_id", "run_number", name="uq_audit_runs_project_number"),)
+
+
+class AuditWaiverModel(Base):
+    """Governed exception for one stable audit rule and optional target artifact."""
+    __tablename__ = "audit_waivers"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    rule_id = Column(String(100), nullable=False)
+    target_requirement_id = Column(String(100), nullable=True)
+    reason = Column(Text, nullable=False)
+    compensating_control = Column(Text, nullable=True)
+    owner = Column(String(255), nullable=False)
+    approved_by = Column(GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_by_name = Column(String(255), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(30), nullable=False, default="active", server_default="active")
+    revoked_reason = Column(Text, nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ArtifactDependencyModel(Base):
+    """Persisted directed edge in a project's artifact dependency graph."""
+    __tablename__ = "artifact_dependencies"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(50), nullable=False)
+    source_key = Column(String(255), nullable=False)
+    target_type = Column(String(50), nullable=False)
+    target_key = Column(String(255), nullable=False)
+    relationship = Column(String(50), nullable=False)
+    evidence = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "source_type", "source_key", "target_type", "target_key", "relationship",
+            name="uq_artifact_dependencies_edge",
+        ),
+        Index("idx_artifact_dependencies_source", "project_id", "source_type", "source_key"),
+        Index("idx_artifact_dependencies_target", "project_id", "target_type", "target_key"),
+    )
+
+
+class RegenerationRunModel(Base):
+    """Audit record for one dependency-scoped regeneration request."""
+    __tablename__ = "regeneration_runs"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by = Column(String(255), nullable=False)
+    trigger_artifacts = Column(JSON, nullable=False, default=list)
+    plan = Column(JSON, nullable=False, default=dict)
+    status = Column(String(30), nullable=False, default="planned", server_default="planned")
+    regenerated_sections = Column(JSON, nullable=False, default=list)
+    skipped_locked_sections = Column(JSON, nullable=False, default=list)
+    diagram_regenerated = Column(Boolean, nullable=False, default=False, server_default="false")
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class BankingKnowledgeDocumentModel(Base):
+    """Reusable, owner-scoped banking guidance or compliance source."""
+    __tablename__ = "banking_knowledge_documents"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    owner_user_id = Column(GUID, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    original_filename = Column(String(255), nullable=False)
+    original_format = Column(String(20), nullable=False)
+    mime_type = Column(String(100), nullable=True)
+    document_type = Column(String(100), nullable=False, default="best_practice", server_default="best_practice")
+    jurisdiction = Column(String(100), nullable=False, default="global", server_default="global")
+    tags = Column(JSON, nullable=False, default=list)
+    content_markdown = Column(Text, nullable=False)
+    content_checksum = Column(String(64), nullable=False)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    status = Column(String(30), nullable=False, default="draft", server_default="draft")
+    approved_by = Column(GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "content_checksum", name="uq_banking_knowledge_owner_checksum"),
+    )
+
+
+class BankingKnowledgeChunkModel(Base):
+    """Searchable chunk belonging to a reusable banking document."""
+    __tablename__ = "banking_knowledge_chunks"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    document_id = Column(GUID, ForeignKey("banking_knowledge_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    heading = Column(String(500), nullable=True)
+    content = Column(Text, nullable=False)
+    token_count = Column(Integer, nullable=False, default=0)
+    embedding = Column(JSON, nullable=False, default=list)
+    embedding_model = Column(String(100), nullable=False, default="", server_default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_banking_knowledge_chunk_index"),
+    )
+
+
+class BankingKnowledgeRetrievalModel(Base):
+    """Audit trail of banking knowledge retrieved for one project audit."""
+    __tablename__ = "banking_knowledge_retrievals"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_user_id = Column(GUID, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    query_text = Column(Text, nullable=False)
+    retrieved_chunks = Column(JSON, nullable=False, default=list)
+    embedding_used = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class ClarificationQuestionModel(Base):
     __tablename__ = "clarification_questions"
@@ -168,6 +342,7 @@ class ClarificationQuestionModel(Base):
     question_text = Column(Text, nullable=False)
     user_answer = Column(Text, nullable=True)
     is_resolved = Column(Boolean, nullable=False, default=False)
+    source_references = Column(JSON, nullable=False, default=list)
     is_locked = Column(Boolean, nullable=False, default=False)
     locked_by = Column(String(100), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)

@@ -121,13 +121,18 @@ export function toStructuredRequirementsFromGathered(
 
 export function toAuditResult(payload: RequirementStatePayload): AuditResult {
   const isPassed = payload.validation_status === 'valid';
-  const isFailed = payload.validation_status === 'invalid';
   return {
     is_valid: isPassed,
     audit_version_reviewed: payload.version_number || 1,
     clarification_questions: payload.clarification_questions || [],
-    passed_checks: isPassed ? [...DEFAULT_PASSED_CHECKS] : [],
-    failed_checks: isFailed ? [...DEFAULT_FAILED_CHECKS] : [],
+    passed_checks: payload.passed_checks || [],
+    failed_checks: payload.failed_checks || [],
+    findings: payload.audit_findings || [],
+    source_references: payload.audit_source_references || [],
+    verdict: payload.audit_verdict || (isPassed ? 'pass' : 'needs_clarification'),
+    project_context: payload.audit_project_context,
+    checklist_id: payload.audit_checklist_id,
+    checklist_version: payload.audit_checklist_version,
   };
 }
 
@@ -141,6 +146,12 @@ export function toAuditResultFromPayload(
     audit_version_reviewed: typeof a.audit_version_reviewed === 'number' ? a.audit_version_reviewed : 1,
     passed_checks: Array.isArray(a.passed_checks) ? a.passed_checks : [],
     failed_checks: Array.isArray(a.failed_checks) ? a.failed_checks : [],
+    findings: Array.isArray(a.findings) ? a.findings : [],
+    source_references: Array.isArray(a.source_references) ? a.source_references : [],
+    verdict: a.verdict || (a.is_valid ? 'pass' : 'fail'),
+    project_context: a.project_context,
+    checklist_id: a.checklist_id,
+    checklist_version: a.checklist_version,
     clarification_questions: Array.isArray(a.clarification_questions) ? a.clarification_questions : [],
   };
 }

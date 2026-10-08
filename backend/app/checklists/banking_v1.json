@@ -1,0 +1,140 @@
+{
+  "checklist_id": "banking-core",
+  "name": "Banking Requirements Core Controls",
+  "version": "1.0.0",
+  "jurisdiction": "organization-neutral",
+  "rules": [
+    {
+      "rule_id": "BANK-IDEMPOTENCY-001",
+      "category": "Idempotency and de-duplication",
+      "title": "Prevent duplicate processing",
+      "description": "Define idempotency and de-duplication behavior for retried or repeated transaction requests.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["moves money", "creates a financial instruction", "accepts retryable commands"],
+      "expected_evidence": ["idempotency key scope", "duplicate-detection window", "repeat-response behavior"],
+      "remediation_guidance": "Specify the idempotency key, its scope and lifetime, and the result returned for a duplicate request."
+    },
+    {
+      "rule_id": "BANK-SECURITY-001",
+      "category": "Security and sensitive data",
+      "title": "Protect sensitive data",
+      "description": "Define appropriate protection for sensitive data in logs, transit, and storage.",
+      "classification": "required_when_applicable",
+      "default_severity": "critical",
+      "applicability_hints": ["handles personal data", "handles credentials", "handles financial data"],
+      "expected_evidence": ["data classification", "masking requirements", "encryption requirements"],
+      "remediation_guidance": "Identify sensitive fields and state the required masking and encryption behavior for each processing context."
+    },
+    {
+      "rule_id": "BANK-AUDIT-001",
+      "category": "Audit logging and traceability",
+      "title": "Maintain an immutable activity trail",
+      "description": "Capture who performed a material action, what changed, and when it occurred.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["changes financial state", "changes entitlements", "performs an administrative action"],
+      "expected_evidence": ["actor identity", "timestamp", "before and after state", "retention or immutability expectation"],
+      "remediation_guidance": "State the events that must be audited and the actor, timestamp, outcome, and change details retained for each event."
+    },
+    {
+      "rule_id": "BANK-CONSISTENCY-001",
+      "category": "Atomicity and rollback",
+      "title": "Preserve consistent transaction state",
+      "description": "Define atomicity, rollback, and recovery behavior when a multi-step operation fails.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["updates multiple records", "coordinates multiple systems", "posts a financial transaction"],
+      "expected_evidence": ["transaction boundary", "partial-failure behavior", "rollback or compensation behavior"],
+      "remediation_guidance": "Identify the consistency boundary and specify rollback or compensating actions for every partial-failure point."
+    },
+    {
+      "rule_id": "BANK-RESILIENCE-001",
+      "category": "Timeouts, retries, and circuit breaking",
+      "title": "Bound dependency failures",
+      "description": "Define timeout, retry, backoff, and circuit-breaking behavior for fallible dependencies.",
+      "classification": "required_when_applicable",
+      "default_severity": "medium",
+      "applicability_hints": ["calls an external service", "depends on a remote system", "processes asynchronously"],
+      "expected_evidence": ["timeout behavior", "bounded retry policy", "terminal failure outcome"],
+      "remediation_guidance": "Specify bounded timeouts and retries, including the user-visible or operational outcome after retries are exhausted."
+    },
+    {
+      "rule_id": "BANK-REGULATORY-001",
+      "category": "Regulatory compliance",
+      "title": "Identify applicable obligations",
+      "description": "Identify and satisfy financial regulations explicitly applicable to the product and jurisdiction.",
+      "classification": "required_when_applicable",
+      "default_severity": "critical",
+      "applicability_hints": ["a supplied policy names an obligation", "the jurisdiction is known", "a stakeholder confirms applicability"],
+      "expected_evidence": ["named obligation", "jurisdiction", "mapped requirement or control"],
+      "remediation_guidance": "Confirm the jurisdiction and applicable obligation, then map it to a testable requirement and supporting evidence."
+    },
+    {
+      "rule_id": "BANK-FAILURE-001",
+      "category": "Failure and edge-case handling",
+      "title": "Define material failure outcomes",
+      "description": "Describe behavior for relevant business and technical failure states.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["has decision branches", "moves money", "depends on external or stateful processing"],
+      "expected_evidence": ["failure conditions", "user-visible outcome", "recovery or escalation path"],
+      "remediation_guidance": "Add testable outcomes for each material business rejection, technical failure, timeout, and interrupted flow."
+    },
+    {
+      "rule_id": "BANK-B2B-001",
+      "category": "B2B and API controls",
+      "title": "Govern partner and API access",
+      "description": "Define relevant authentication, isolation, replay, versioning, quota, webhook, and partner-lifecycle controls.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["partner integration", "public or private API", "multi-tenant service"],
+      "expected_evidence": ["authentication model", "tenant boundary", "interface lifecycle", "service limits"],
+      "remediation_guidance": "Specify the partner identity, tenant boundary, interface contract, usage limits, and onboarding and offboarding behavior."
+    },
+    {
+      "rule_id": "BANK-CORPORATE-001",
+      "category": "Corporate banking entitlements",
+      "title": "Control delegated corporate actions",
+      "description": "Define legal-entity scope, delegated users, entitlements, approvals, and bulk-processing behavior.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["corporate banking", "delegated user", "maker-checker", "bulk instruction"],
+      "expected_evidence": ["legal-entity boundary", "role or entitlement model", "approval matrix", "item and batch status"],
+      "remediation_guidance": "Define who may create, review, approve, and release each action and how item and batch outcomes are represented."
+    },
+    {
+      "rule_id": "BANK-LIFECYCLE-001",
+      "category": "Transaction lifecycle",
+      "title": "Cover the full financial lifecycle",
+      "description": "Define applicable authorization, posting, reversal, settlement, reconciliation, repair, fee, FX, limit, and date behavior.",
+      "classification": "required_when_applicable",
+      "default_severity": "high",
+      "applicability_hints": ["moves money", "posts a balance", "settles or reconciles a transaction"],
+      "expected_evidence": ["transaction states", "reversal behavior", "reconciliation ownership", "amount and date rules"],
+      "remediation_guidance": "Document the applicable transaction states and the transition, ownership, and recovery behavior for each state."
+    },
+    {
+      "rule_id": "BANK-OPERATIONS-001",
+      "category": "Data and operational readiness",
+      "title": "Define operational safeguards",
+      "description": "Address applicable data lifecycle, observability, recovery, capacity, rollout, and support responsibilities.",
+      "classification": "required_when_applicable",
+      "default_severity": "medium",
+      "applicability_hints": ["delivery readiness", "production readiness", "operationally critical service"],
+      "expected_evidence": ["monitoring and alerting", "support ownership", "recovery objectives", "retention or residency"],
+      "remediation_guidance": "State measurable operational expectations and assign ownership for monitoring, recovery, rollout, and support."
+    },
+    {
+      "rule_id": "BANK-READINESS-001",
+      "category": "Product and delivery readiness",
+      "title": "Meet stage-appropriate requirement quality",
+      "description": "Provide the scope, outcomes, dependencies, risks, decisions, testability, and sign-off appropriate to the delivery stage.",
+      "classification": "required_when_applicable",
+      "default_severity": "medium",
+      "applicability_hints": ["all projects, calibrated to delivery stage"],
+      "expected_evidence": ["problem and value", "scope", "measurable outcome", "dependencies", "testable acceptance"],
+      "remediation_guidance": "Add only the missing artifacts expected at the current delivery stage, with measurable outcomes and clear ownership."
+    }
+  ]
+}

@@ -50,6 +50,10 @@ CREATE TABLE projects (
     is_pinned BOOLEAN NOT NULL DEFAULT FALSE, -- Pinned chats/projects float to the top of the sidebar
     is_flagged BOOLEAN NOT NULL DEFAULT FALSE, -- Dashboard ★ flag marker; independent of sidebar pinning
     status VARCHAR(50) NOT NULL DEFAULT 'draft', -- Dashboard workflow status: 'draft' | 'in_review_hpo' | 'in_review_po' | 'approved' | 'revised'
+    last_approved_prd_version INTEGER,
+    last_approved_audit_version INTEGER,
+    last_approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    last_approved_at TIMESTAMPTZ,
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
@@ -62,6 +66,23 @@ CREATE TRIGGER handle_updated_at_projects
     BEFORE UPDATE ON projects
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE project_review_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    from_status VARCHAR(50) NOT NULL,
+    to_status VARCHAR(50) NOT NULL,
+    action VARCHAR(50) NOT NULL,
+    comment TEXT,
+    actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    actor_name VARCHAR(255) NOT NULL,
+    actor_role VARCHAR(100) NOT NULL,
+    prd_version_number INTEGER,
+    audit_version_reviewed INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_project_review_events_project_id ON project_review_events(project_id);
 
 -- ==========================================
 -- 3. EPICS TABLE
@@ -181,6 +202,12 @@ CREATE TABLE audit_results (
     is_valid BOOLEAN NOT NULL DEFAULT FALSE,
     passed_checks JSONB NOT NULL DEFAULT '[]'::jsonb, -- Structured passed rule details
     failed_checks JSONB NOT NULL DEFAULT '[]'::jsonb, -- Structured failed rule details
+    findings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_references JSONB NOT NULL DEFAULT '[]'::jsonb,
+    verdict VARCHAR(50) NOT NULL DEFAULT 'needs_clarification',
+    project_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checklist_id VARCHAR(100) NOT NULL DEFAULT 'banking-core',
+    checklist_version VARCHAR(30) NOT NULL DEFAULT '1.0.0',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -189,6 +216,47 @@ CREATE TRIGGER handle_updated_at_audit_results
     BEFORE UPDATE ON audit_results
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE audit_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    audit_result_id UUID REFERENCES audit_results(id) ON DELETE SET NULL,
+    run_number INTEGER NOT NULL,
+    audit_version_reviewed INTEGER NOT NULL,
+    is_valid BOOLEAN NOT NULL DEFAULT FALSE,
+    verdict VARCHAR(50) NOT NULL,
+    findings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    passed_checks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    failed_checks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_references JSONB NOT NULL DEFAULT '[]'::jsonb,
+    project_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checklist_id VARCHAR(100) NOT NULL,
+    checklist_version VARCHAR(30) NOT NULL,
+    comparison JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_audit_runs_project_number UNIQUE (project_id, run_number)
+);
+
+CREATE INDEX idx_audit_runs_project_id ON audit_runs(project_id);
+
+CREATE TABLE audit_waivers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    rule_id VARCHAR(100) NOT NULL,
+    target_requirement_id VARCHAR(100),
+    reason TEXT NOT NULL,
+    compensating_control TEXT,
+    owner VARCHAR(255) NOT NULL,
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_by_name VARCHAR(255) NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'active',
+    revoked_reason TEXT,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_audit_waivers_project_id ON audit_waivers(project_id);
 
 -- ==========================================
 -- 7. CLARIFICATION QUESTIONS TABLE
@@ -202,6 +270,7 @@ CREATE TABLE clarification_questions (
     question_text TEXT NOT NULL,
     user_answer TEXT, -- Nullable until answered by Business Stakeholder
     is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    source_references JSONB NOT NULL DEFAULT '[]'::jsonb,
     is_locked BOOLEAN NOT NULL DEFAULT FALSE,
     locked_by VARCHAR(100),
     locked_at TIMESTAMPTZ,
@@ -408,3 +477,95 @@ CREATE TABLE semantic_memories (
 
 CREATE INDEX idx_semantic_memories_project_id ON semantic_memories(project_id);
 CREATE INDEX idx_semantic_memories_source_message_id ON semantic_memories(source_message_id);
+
+-- ==========================================
+-- 14. ARTIFACT DEPENDENCY GRAPH
+-- ==========================================
+CREATE TABLE artifact_dependencies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_type VARCHAR(50) NOT NULL,
+    source_key VARCHAR(255) NOT NULL,
+    target_type VARCHAR(50) NOT NULL,
+    target_key VARCHAR(255) NOT NULL,
+    relationship VARCHAR(50) NOT NULL,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_artifact_dependencies_edge UNIQUE (project_id, source_type, source_key, target_type, target_key, relationship)
+);
+
+CREATE INDEX idx_artifact_dependencies_project_id ON artifact_dependencies(project_id);
+CREATE INDEX idx_artifact_dependencies_source ON artifact_dependencies(project_id, source_type, source_key);
+CREATE INDEX idx_artifact_dependencies_target ON artifact_dependencies(project_id, target_type, target_key);
+
+CREATE TABLE regeneration_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    requested_by VARCHAR(255) NOT NULL,
+    trigger_artifacts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status VARCHAR(30) NOT NULL DEFAULT 'planned',
+    regenerated_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+    skipped_locked_sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+    diagram_regenerated BOOLEAN NOT NULL DEFAULT FALSE,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_regeneration_runs_project_id ON regeneration_runs(project_id);
+
+-- ==========================================
+-- 15. REUSABLE BANKING KNOWLEDGE + RAG
+-- ==========================================
+CREATE TABLE banking_knowledge_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    original_filename VARCHAR(255) NOT NULL,
+    original_format VARCHAR(20) NOT NULL,
+    mime_type VARCHAR(100),
+    document_type VARCHAR(100) NOT NULL DEFAULT 'best_practice',
+    jurisdiction VARCHAR(100) NOT NULL DEFAULT 'global',
+    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+    content_markdown TEXT NOT NULL,
+    content_checksum VARCHAR(64) NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    status VARCHAR(30) NOT NULL DEFAULT 'draft',
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_banking_knowledge_owner_checksum UNIQUE (owner_user_id, content_checksum)
+);
+
+CREATE INDEX idx_banking_knowledge_documents_owner_user_id ON banking_knowledge_documents(owner_user_id);
+
+CREATE TABLE banking_knowledge_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES banking_knowledge_documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    heading VARCHAR(500),
+    content TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    embedding JSONB NOT NULL DEFAULT '[]'::jsonb,
+    embedding_model VARCHAR(100) NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_banking_knowledge_chunk_index UNIQUE (document_id, chunk_index)
+);
+
+CREATE INDEX idx_banking_knowledge_chunks_document_id ON banking_knowledge_chunks(document_id);
+
+CREATE TABLE banking_knowledge_retrievals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    query_text TEXT NOT NULL,
+    retrieved_chunks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    embedding_used BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_banking_knowledge_retrievals_project_id ON banking_knowledge_retrievals(project_id);
+CREATE INDEX idx_banking_knowledge_retrievals_owner_user_id ON banking_knowledge_retrievals(owner_user_id);
