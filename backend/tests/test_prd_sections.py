@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -50,7 +50,7 @@ from app.repositories.prd_section import (
     PRDSectionVersionRepository,
 )
 from app.repositories.requirement_state import RequirementStateRepository
-from app.routes.prd_sections import update_prd_section
+from app.routes.prd_sections import list_prd_sections, update_prd_section
 from app.schemas import PrdSectionUpdate
 
 
@@ -167,6 +167,22 @@ def _section_content(document: str, section_key: str) -> str:
         p["content"] for p in split_markdown_sections(document)
         if p["section_key"] == section_key
     )
+
+
+@pytest.mark.asyncio
+async def test_list_sections_returns_preview_without_writing(db_session):
+    session, project_id = db_session
+    before = await session.scalar(select(func.count()).select_from(PRDSectionModel))
+    user = AuthenticatedUser(
+        id=str(uuid.uuid4()), email="owner@example.com", full_name="Owner", role="product_owner",
+    )
+
+    response = await list_prd_sections(project_id, user, session)
+
+    after = await session.scalar(select(func.count()).select_from(PRDSectionModel))
+    assert before == after == 0
+    assert len(response["sections"]) == 9
+    assert all(section["is_preview"] for section in response["sections"])
 
 
 # =====================================================================

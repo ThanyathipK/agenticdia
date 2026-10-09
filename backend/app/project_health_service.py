@@ -85,6 +85,25 @@ async def build_project_health(project_id: str, session: AsyncSession) -> dict[s
     total = int(coverage["total_requirements"] or 0)
     traced = int(coverage["traced_requirements"] or 0)
     coverage_percent = round((traced / total) * 100) if total else 0
+    total_stories = int(coverage["total_user_stories"] or 0)
+    story_covered = total - len(coverage["requirements_without_stories"])
+    criteria_covered = total_stories - len(coverage["stories_without_criteria"])
+    prd_covered = total - len(coverage["requirements_without_prd_sections"])
+    diagram_covered = total - len(coverage["requirements_without_diagram"])
+
+    def percent(covered: int, denominator: int) -> int:
+        return round((covered / denominator) * 100) if denominator else 0
+
+    coverage_breakdown = {
+        # "Fully traced" means a requirement has a story, every story has
+        # acceptance criteria, and the requirement/story is referenced by a
+        # PRD section. Diagram linkage is reported separately by design.
+        "requirement_traceability_percent": coverage_percent,
+        "requirements_with_stories_percent": percent(story_covered, total),
+        "stories_with_acceptance_criteria_percent": percent(criteria_covered, total_stories),
+        "requirements_with_prd_reference_percent": percent(prd_covered, total),
+        "requirements_with_diagram_reference_percent": percent(diagram_covered, total),
+    }
     issues: list[dict[str, Any]] = []
 
     def issue(kind: str, label: str, count: int, destination: str, severity: str = "warning") -> None:
@@ -115,9 +134,13 @@ async def build_project_health(project_id: str, session: AsyncSession) -> dict[s
         "project_id": project_id,
         "status": health_status,
         "workflow_status": project.status or "draft",
+        # Backward-compatible alias for requirement traceability. New clients
+        # should use the explicitly named value in coverage_breakdown.
         "coverage_percent": coverage_percent,
+        "coverage_breakdown": coverage_breakdown,
         "metrics": {
             "total_requirements": total,
+            "total_user_stories": total_stories,
             "traced_requirements": traced,
             "blocking_findings": blocking,
             "warnings": warnings,

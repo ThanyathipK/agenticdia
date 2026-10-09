@@ -25,6 +25,7 @@ before splitting; markdown sources pass through untouched.
 """
 import logging
 import re
+import uuid
 from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +71,47 @@ CANONICAL_KEYS = {c["section_key"] for c in CANONICAL_PRD_SECTIONS}
 # PRD-SECTION 3.1.1 — Accepted review_status values (validated at the route, PRD-SECTION
 #               2.2): a piecewise review tracker on each part, independent of locking.
 VALID_REVIEW_STATUSES = {"draft", "satisfied", "approved"}
+
+
+def preview_prd_sections(project_id: str, source_markdown: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Build the nine-section editor view without writing database rows.
+
+    The former GET route called :func:`ensure_sections_seeded`, making a read
+    mutate governance state and inflate pending-section health metrics. Write
+    endpoints still seed explicitly before their first mutation.
+    """
+    source = (source_markdown or "").strip()
+    if source:
+        try:
+            from app.latex_service import is_markdown_prd, prd_to_markdown
+            if not is_markdown_prd(source):
+                source = prd_to_markdown(source)
+        except Exception as exc:
+            logger.warning("Could not normalize PRD preview for %s: %s", project_id, exc)
+            source = ""
+    if not source:
+        from app.prompt_loader import load_prd_template
+        source = load_prd_template()
+
+    parts = {part["section_key"]: part for part in split_markdown_sections(source)}
+    namespace = uuid.UUID(str(project_id))
+    preview: List[Dict[str, Any]] = []
+    for defaults in CANONICAL_PRD_SECTIONS:
+        part = parts.get(defaults["section_key"], {})
+        preview.append({
+            **defaults,
+            "id": str(uuid.uuid5(namespace, f"prd-section:{defaults['section_key']}")),
+            "project_id": str(project_id),
+            "content": part.get("content", ""),
+            "review_status": "draft",
+            "locked_by": None,
+            "locked_at": None,
+            "version_number": None,
+            "created_at": "",
+            "updated_at": "",
+            "is_preview": True,
+        })
+    return preview
 
 
 # PRD-SECTION 3.2 — Heading → stable section key. This is a 1:1 PORT of the frontend's

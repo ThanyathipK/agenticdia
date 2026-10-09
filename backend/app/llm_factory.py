@@ -41,6 +41,8 @@ def build_llm(max_tokens: int = 3000) -> ChatOpenAI:
         "temperature": settings.TEMPERATURE,
         "max_tokens": max_tokens,  # Optimized for structured output
         "seed": 42,  # Deterministic sampling; declared as a first-class param (avoids model_kwargs warning)
+        "timeout": settings.LLM_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": 0,  # workflow-level retry/repair owns the latency budget
     }
 
     if settings.LM_STUDIO_DISABLE_THINKING:

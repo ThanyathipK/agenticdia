@@ -46,6 +46,7 @@ import type {
   RegenerationPlanPayload,
   RegenerationResultPayload,
   BankingKnowledgeDocumentPayload,
+  GenerationJobPayload,
 } from './types';
 
 // ============================================================================
@@ -343,6 +344,12 @@ export const api = {
   // has NO client method here (documented discrepancy, see CHAT 5.x).
   processRequirements: (request: ProcessRequirementsRequest, signal?: AbortSignal) =>
     post<ProcessRequirementsResponse>('/api/process-requirements', request, undefined, signal),
+  startArchitectJob: (request: ProcessRequirementsRequest) =>
+    post<GenerationJobPayload<ProcessRequirementsResponse>>('/api/process-requirements/background', request),
+  getGenerationJob: <T>(projectId: string, jobId: string) =>
+    get<GenerationJobPayload<T>>(`/api/projects/${projectId}/generation-jobs/${jobId}`),
+  cancelGenerationJob: (projectId: string, jobId: string) =>
+    post<GenerationJobPayload>(`/api/projects/${projectId}/generation-jobs/${jobId}/cancel`),
 
   // ---- PRD template ---------------------------------------------------------
   // Official Krungsri Nimble PRD LaTeX template served from
@@ -448,6 +455,11 @@ export const api = {
     }),
   executeRegeneration: (projectId: string, changedArtifacts: ArtifactReferencePayload[]) =>
     post<RegenerationResultPayload>(`/api/projects/${projectId}/regeneration`, {
+      changed_artifacts: changedArtifacts,
+      confirm: true,
+    }),
+  startRegenerationJob: (projectId: string, changedArtifacts: ArtifactReferencePayload[]) =>
+    post<GenerationJobPayload<RegenerationResultPayload>>(`/api/projects/${projectId}/regeneration/background`, {
       changed_artifacts: changedArtifacts,
       confirm: true,
     }),

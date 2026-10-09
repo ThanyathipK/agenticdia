@@ -150,6 +150,7 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
   const [regenerationPlan, setRegenerationPlan] = useState<RegenerationPlanPayload | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const [regenerationJobId, setRegenerationJobId] = useState<string | null>(null);
 
   const loadMatrix = useCallback(async (id: string): Promise<void> => {
     setIsLoading(true);
@@ -210,7 +211,17 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
     if (!confirmed) return;
     setIsRegenerating(true);
     try {
-      const result = await api.executeRegeneration(projectId, refs);
+      let job = await api.startRegenerationJob(projectId, refs);
+      setRegenerationJobId(job.id);
+      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        job = await api.getGenerationJob(projectId, job.id);
+      }
+      if (job.status === 'cancelled') throw new Error('Scoped regeneration was cancelled.');
+      if (job.status === 'failed' || !job.result) {
+        throw new Error(job.error_message || 'Scoped regeneration failed.');
+      }
+      const result = job.result;
       if (result.status === 'failed') {
         throw new Error(result.error_message || 'Scoped regeneration failed.');
       }
@@ -226,7 +237,17 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
     } catch (error) {
       handleError('Could not regenerate the affected artifacts.', error);
     } finally {
+      setRegenerationJobId(null);
       setIsRegenerating(false);
+    }
+  };
+
+  const cancelRegeneration = async (): Promise<void> => {
+    if (!projectId || !regenerationJobId) return;
+    try {
+      await api.cancelGenerationJob(projectId, regenerationJobId);
+    } catch (error) {
+      handleError('Could not cancel regeneration.', error);
     }
   };
 
@@ -366,6 +387,15 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
                 <p className="text-amber-800"><span className="font-semibold">Preserved:</span> {regenerationPlan.skipped_prd_sections.join(', ')}</p>
               )}
               <div className="flex justify-end">
+                {isRegenerating && regenerationJobId && (
+                  <button
+                    type="button"
+                    onClick={() => void cancelRegeneration()}
+                    className="mr-2 rounded-xl border border-error/40 px-3 py-2 text-xs font-bold text-error"
+                  >
+                    Stop regeneration
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={isRegenerating || (regenerationPlan.summary.sections === 0 && regenerationPlan.summary.diagrams === 0)}

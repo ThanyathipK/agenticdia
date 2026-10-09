@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, Text, func, ForeignKey, Boolean, UniqueConstraint, Index
+from sqlalchemy import Column, String, Integer, DateTime, JSON, Text, func, ForeignKey, Boolean, UniqueConstraint, Index, text
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 import uuid
@@ -272,6 +272,36 @@ class RegenerationRunModel(Base):
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class GenerationJobModel(Base):
+    """Persistent background execution record for long-running AI work."""
+    __tablename__ = "generation_jobs"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    project_id = Column(GUID, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by_user_id = Column(GUID, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_type = Column(String(30), nullable=False)
+    status = Column(String(30), nullable=False, default="queued", server_default="queued", index=True)
+    progress_stage = Column(String(100), nullable=False, default="queued", server_default="queued")
+    request_payload = Column(JSON, nullable=False, default=dict)
+    result_payload = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_generation_jobs_project_status", "project_id", "status"),
+        Index(
+            "uq_generation_jobs_active_project",
+            "project_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running', 'cancelling')"),
+            sqlite_where=text("status IN ('queued', 'running', 'cancelling')"),
+        ),
+    )
 
 
 class BankingKnowledgeDocumentModel(Base):

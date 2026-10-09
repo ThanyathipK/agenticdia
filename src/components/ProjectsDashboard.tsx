@@ -607,7 +607,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                                 'bg-emerald-50 text-emerald-700'
                               }`}
                             >
-                              {healthByProject[p.id].status.replaceAll('_', ' ')} · {healthByProject[p.id].coverage_percent}% covered
+                              {healthByProject[p.id].status.replaceAll('_', ' ')} · {healthByProject[p.id].coverage_breakdown.requirement_traceability_percent}% fully traced
                             </button>
                           )}
                         </td>
@@ -714,7 +714,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                                 'bg-emerald-50 text-emerald-700'
                               }`}
                             >
-                              {healthByProject[p.id].status.replaceAll('_', ' ')} · {healthByProject[p.id].coverage_percent}% covered
+                              {healthByProject[p.id].status.replaceAll('_', ' ')} · {healthByProject[p.id].coverage_breakdown.requirement_traceability_percent}% fully traced
                             </button>
                           )}
                         </div>
@@ -892,7 +892,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                 <div className="space-y-5">
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     {[
-                      ['Coverage', `${healthDetail.coverage_percent}%`],
+                      ['Fully traced requirements', `${healthDetail.coverage_breakdown.requirement_traceability_percent}%`],
                       ['Blocking', healthDetail.metrics.blocking_findings],
                       ['Open questions', healthDetail.metrics.unresolved_questions],
                       ['Active waivers', healthDetail.metrics.active_waivers],

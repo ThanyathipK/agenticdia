@@ -569,3 +569,29 @@ CREATE TABLE banking_knowledge_retrievals (
 
 CREATE INDEX idx_banking_knowledge_retrievals_project_id ON banking_knowledge_retrievals(project_id);
 CREATE INDEX idx_banking_knowledge_retrievals_owner_user_id ON banking_knowledge_retrievals(owner_user_id);
+
+-- ==========================================
+-- 16. PERSISTENT BACKGROUND GENERATION JOBS
+-- ==========================================
+CREATE TABLE generation_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    requested_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_type VARCHAR(30) NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'queued',
+    progress_stage VARCHAR(100) NOT NULL DEFAULT 'queued',
+    request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result_payload JSONB,
+    error_message TEXT,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_generation_jobs_project_id ON generation_jobs(project_id);
+CREATE INDEX idx_generation_jobs_requested_by_user_id ON generation_jobs(requested_by_user_id);
+CREATE INDEX idx_generation_jobs_status ON generation_jobs(status);
+CREATE INDEX idx_generation_jobs_project_status ON generation_jobs(project_id, status);
+CREATE UNIQUE INDEX uq_generation_jobs_active_project ON generation_jobs(project_id)
+    WHERE status IN ('queued', 'running', 'cancelling');

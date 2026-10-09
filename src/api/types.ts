@@ -60,15 +60,25 @@ export interface ProjectHealthPayload {
   project_id: string;
   status: 'ready' | 'attention_required' | 'blocked' | 'approved';
   workflow_status: ProjectStatus;
+  /** @deprecated Use coverage_breakdown.requirement_traceability_percent. */
   coverage_percent: number;
+  coverage_breakdown: {
+    requirement_traceability_percent: number;
+    requirements_with_stories_percent: number;
+    stories_with_acceptance_criteria_percent: number;
+    requirements_with_prd_reference_percent: number;
+    requirements_with_diagram_reference_percent: number;
+  };
   metrics: {
     total_requirements: number;
+    total_user_stories: number;
     traced_requirements: number;
     blocking_findings: number;
     warnings: number;
     suggestions: number;
     unresolved_questions: number;
     pending_prd_sections: number;
+    requirements_without_diagram: number;
     active_waivers: number;
   };
   audit: { verdict?: string | null; version_reviewed?: number | null; checklist_version?: string | null; stale: boolean; updated_at?: string | null };
@@ -761,6 +771,21 @@ export interface RegenerationResultPayload {
   generated_prd?: string;
   generated_diagrams?: string;
   error_message?: string;
+}
+
+export interface GenerationJobPayload<T = unknown> {
+  id: string;
+  project_id: string;
+  job_type: 'architect' | 'regeneration';
+  status: 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+  progress_stage: string;
+  result?: T | null;
+  error_message?: string | null;
+  cancel_requested: boolean;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  cancelled?: boolean;
 }
 
 export interface BankingKnowledgeDocumentPayload {

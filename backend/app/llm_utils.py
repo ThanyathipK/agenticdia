@@ -1,9 +1,14 @@
+import asyncio
 import json
 import logging
+import re
+import time
 from typing import Any, Callable, Dict, Optional, Type
 
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel
+
+from app.config import settings
 
 logger = logging.getLogger("app.llm_utils")
 
@@ -70,6 +75,29 @@ def strip_markdown_fences(text: str) -> str:
     return clean.strip()
 
 
+def parse_json_object(text: str) -> Dict[str, Any]:
+    """Parse safe, common local-model JSON variants without another LLM call.
+
+    Surrounding prose/fences and trailing commas are repaired. Truncated
+    strings or missing values remain errors because guessing would corrupt
+    requirements or audit evidence.
+    """
+    clean = strip_markdown_fences(text)
+    candidates = [clean]
+    first, last = clean.find("{"), clean.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(clean[first:last + 1])
+    for candidate in candidates:
+        for value in (candidate, re.sub(r",\s*([}\]])", r"\1", candidate)):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    raise json.JSONDecodeError("No complete JSON object found", clean, 0)
+
+
 def normalize_output(parsed_output: Any) -> Dict[str, Any]:
     """Convert a Pydantic model or mapping into a plain dict."""
     if hasattr(parsed_output, "model_dump"):
@@ -109,14 +137,31 @@ async def invoke_llm_structured(
     Returns the parsed result as a plain dict. Raises ``RuntimeError`` when both
     attempts fail so the caller can apply its own heuristic fallback.
     """
-    # Attempt 1: single raw invocation + JSON parsing
+    deadline = time.monotonic() + settings.LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS
+
+    async def bounded(awaitable):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Calls construct the coroutine before entering this helper. Close
+            # it when the shared budget is already exhausted to avoid an
+            # "unawaited coroutine" warning during timeout handling.
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise TimeoutError(f"{description} exceeded its total inference budget")
+        return await asyncio.wait_for(
+            awaitable,
+            timeout=min(settings.LLM_REQUEST_TIMEOUT_SECONDS, remaining),
+        )
+
+    # Attempt 1: single raw invocation + tolerant JSON parsing
     raw_failure = "unknown"
     try:
         raw_variables = {**variables, "format_instructions": format_instructions}
         raw_chain = prompt_template | llm
-        raw_response = await raw_chain.ainvoke(raw_variables)
-        clean_content = strip_markdown_fences(extract_llm_content(raw_response))
-        result = json.loads(clean_content)
+        raw_response = await bounded(raw_chain.ainvoke(raw_variables))
+        result = parse_json_object(extract_llm_content(raw_response))
+        result = schema.model_validate(result).model_dump()
         if validate is None or validate(result):
             logger.info(f"Successfully parsed {description} from raw LLM output.")
             return result
@@ -130,7 +175,7 @@ async def invoke_llm_structured(
     try:
         logger.info(f"Attempting .with_structured_output() for {description}.")
         chain = prompt_template | llm.with_structured_output(schema)
-        parsed_output = await chain.ainvoke(variables)
+        parsed_output = await bounded(chain.ainvoke(variables))
         result = normalize_output(parsed_output)
         if validate is None or validate(result):
             logger.info(f"Successfully obtained structured output for {description}.")

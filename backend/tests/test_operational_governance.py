@@ -83,6 +83,13 @@ async def test_project_health_returns_actionable_traceability_gaps(db_session, s
     health = await build_project_health(seeded_project, db_session)
     kinds = {issue["kind"] for issue in health["issues"]}
     assert health["coverage_percent"] == 0
+    assert health["coverage_breakdown"] == {
+        "requirement_traceability_percent": 0,
+        "requirements_with_stories_percent": 0,
+        "stories_with_acceptance_criteria_percent": 0,
+        "requirements_with_prd_reference_percent": 0,
+        "requirements_with_diagram_reference_percent": 0,
+    }
     assert "missing_stories" in kinds
     assert "missing_sections" in kinds
     assert "missing_diagrams" in kinds

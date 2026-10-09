@@ -28,6 +28,7 @@ from app.prd_section_service import (
     assemble_document_markdown,
     ensure_sections_seeded,
     merge_edited_section,
+    preview_prd_sections,
     sync_sections_from_prd,
 )
 from app.repositories import (
@@ -109,25 +110,40 @@ async def _get_section_or_404(section_key: str, project_id: str, session: AsyncS
     return section
 
 
+async def _ensure_sections_for_write(project_id: str, session: AsyncSession) -> None:
+    """Materialize preview-only sections at an explicit mutation boundary."""
+    existing = await PRDSectionRepository.get_by_project(project_id, session)
+    if existing:
+        return
+    state = await RequirementStateRepository.get_by_project_id(project_id, session)
+    await ensure_sections_seeded(
+        project_id,
+        session,
+        source_markdown=(state or {}).get("generated_prd") or "",
+    )
+
+
 # PRD-SECTION 2.1 — READ: all nine parts in document order (PRD-SECTION 1.1). Auth:
-#             AUTH 7.5. Seeds the parts on first access (PRD-SECTION 3.6) from the
-#             project's current markdown PRD, else the template skeleton — so the editor
-#             and the locks UI always have something to show.
+#             AUTH 7.5. This endpoint is strictly read-only: when no stored parts
+#             exist it returns deterministic preview rows without inserting them.
 @router.get("/api/project/{project_id}/prd/sections", response_model=PrdSectionListResponse, status_code=status.HTTP_200_OK)
 async def list_prd_sections(
     project_id: str,
     current_user: AuthenticatedUser = Depends(require_project_owner),
     session: AsyncSession = Depends(get_db),
 ) -> PrdSectionListResponse:
-    """List all PRD parts (the nine preview parts) in document order.
+    """List all PRD parts in document order without changing persistence.
 
-    Seeds the parts on first access: from the project's current markdown PRD
-    when one exists, otherwise from the official Krungsri template skeleton.
+    If no stored parts exist, deterministic preview rows are derived from the
+    current PRD (or the official template). The first mutation materializes
+    those rows through :func:`_ensure_sections_for_write`.
     """
     await _validate_project(project_id)
     state = await RequirementStateRepository.get_by_project_id(project_id, session)
     source = (state or {}).get("generated_prd") or ""
-    sections = await ensure_sections_seeded(project_id, session, source_markdown=source)
+    sections = await PRDSectionRepository.get_by_project(project_id, session)
+    if not sections:
+        sections = preview_prd_sections(project_id, source)
     return {"project_id": project_id, "sections": sections}
 
 
@@ -168,6 +184,7 @@ async def update_prd_section(
     await _validate_project(project_id)
     await _raise_if_project_locked(project_id, session)
     await _raise_if_document_locked(project_id, session)
+    await _ensure_sections_for_write(project_id, session)
 
     if payload.review_status and payload.review_status not in VALID_REVIEW_STATUSES:
         raise HTTPException(
@@ -337,6 +354,7 @@ async def revert_prd_section(
     await _validate_project(project_id)
     await _raise_if_project_locked(project_id, session)
     await _raise_if_document_locked(project_id, session)
+    await _ensure_sections_for_write(project_id, session)
 
     section = await _get_section_or_404(section_key, project_id, session)
     version = await PRDSectionVersionRepository.get_by_version_number(
@@ -408,6 +426,7 @@ async def lock_prd_section(
     await _validate_project(project_id)
     from app.lock_service import LockService, ArtifactLockError
 
+    await _ensure_sections_for_write(project_id, session)
     section = await _get_section_or_404(section_key, project_id, session)
     try:
         lock_info = await LockService.lock_artifact(
@@ -447,6 +466,7 @@ async def unlock_prd_section(
     await _validate_project(project_id)
     from app.lock_service import LockService
 
+    await _ensure_sections_for_write(project_id, session)
     section = await _get_section_or_404(section_key, project_id, session)
     try:
         lock_info = await LockService.unlock_artifact(
@@ -480,4 +500,12 @@ async def get_prd_section(
 ) -> PrdSectionResponse:
     """Fetch one PRD part (including its lock + review metadata)."""
     await _validate_project(project_id)
-    return await _get_section_or_404(section_key, project_id, session)
+    section = await PRDSectionRepository.get_by_key(section_key, project_id, session)
+    if section:
+        return section
+    state = await RequirementStateRepository.get_by_project_id(project_id, session)
+    preview = preview_prd_sections(project_id, (state or {}).get("generated_prd") or "")
+    match = next((item for item in preview if item["section_key"] == section_key), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"PRD section '{section_key}' not found")
+    return match

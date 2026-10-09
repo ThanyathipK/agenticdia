@@ -56,6 +56,23 @@ export interface UseChatResult {
 
 const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+const waitForPoll = (signal: AbortSignal, delayMs = 1000): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException('Generation cancelled', 'AbortError'));
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
 // --- Rate-limit (HTTP 429) awareness ---------------------------------------
 // A 429 from the backend is a transient "slow down" signal (Finding #39), NOT a
 // backend outage. These helpers let callers distinguish the two so they surface
@@ -122,7 +139,8 @@ const payloadTooLargeContent = (err: unknown): string => {
 // with a CanceledError — that is an intentional user action, NOT a failure, so
 // every handler surfaces a neutral "stopped" notice instead of an error toast.
 const isAbortError = (err: unknown): boolean =>
-  axios.isCancel(err) || (err as { code?: string })?.code === 'ERR_CANCELED';
+  axios.isCancel(err) || (err as { code?: string; name?: string })?.code === 'ERR_CANCELED'
+  || (err as { name?: string })?.name === 'AbortError';
 
 export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult {
   const [rawInput, setRawInput] = useState<string>('');
@@ -130,6 +148,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   // Abort controller for whichever agent request is currently in flight.
   // The Stop button aborts it; each handler creates a fresh controller per run.
   const abortRef = useRef<AbortController | null>(null);
+  const backgroundJobRef = useRef<string | null>(null);
 
   // (Chat auto-scroll moved into ChatPanel, which owns the scroll container:
   // it only follows the timeline while the user is near the bottom and shows a
@@ -524,7 +543,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     abortRef.current = controller;
 
     try {
-      const data = await api.processRequirements({
+      const request = {
         project_id: projectId,
         raw_input: '',
         // ARCHITECT 1.2 — The on-demand trigger: empty raw_input + target_agent
@@ -537,7 +556,19 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
         current_version: deps.currentVersion,
         version_history_summaries: buildVersionHistorySummaries(),
-      }, controller.signal);
+      };
+      let job = await api.startArchitectJob(request);
+      backgroundJobRef.current = job.id;
+      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
+        await waitForPoll(controller.signal);
+        job = await api.getGenerationJob(projectId, job.id);
+        store.setSyncStatus(`Compiling enterprise PRD document… ${job.progress_stage.replaceAll('_', ' ')}`);
+      }
+      if (job.status === 'cancelled') throw new DOMException('Generation cancelled', 'AbortError');
+      if (job.status === 'failed' || !job.result) {
+        throw new Error(job.error_message || 'Background PRD generation failed.');
+      }
+      const data = job.result;
 
       // ARCHITECT 1.5 — Response applied to UI state: the filled PRD markdown and the
       //            refreshed Mermaid diagram replace the stored ones, a success bubble
@@ -602,6 +633,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setSyncStatus('PRD generation failed. No document saved.');
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      backgroundJobRef.current = null;
       store.setIsLoading(false);
       store.setIsProcessing(false);
       store.setCurrentAgentNode(null);
@@ -617,13 +649,18 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     if (!controller) return;
     const projectId = deps.projectId;
     if (projectId) {
-      void api.cancelProcessRequirements(projectId).catch(() => {
+      const jobId = backgroundJobRef.current;
+      const cancellation = jobId
+        ? api.cancelGenerationJob(projectId, jobId)
+        : api.cancelProcessRequirements(projectId);
+      void cancellation.catch(() => {
         // Best-effort only: if this loses a race with completion (or fails),
         // the local abort below still unblocks the UI instantly.
       });
     }
     controller.abort();
     abortRef.current = null;
+    backgroundJobRef.current = null;
     store.setSyncStatus('Stopping generation...');
   };
 

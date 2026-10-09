@@ -26,8 +26,8 @@ Agentic AI turns plain-English banking product briefs into **audited, versioned,
 - **Version snapshot ledger** — every accepted state bump is an immutable, versioned PRD record (integer `version` + display `semver`) with line-level diffs against any earlier version and append-only restore
 - **Human-in-the-loop** — LLM changes are staged as *pending actions*; you confirm or cancel before anything is written to the database
 - **Governed review lifecycle** — projects follow enforced Draft → HPO Review → PO Review → Approved transitions; approval is tied to immutable PRD/audit versions, every transition is append-only, and later governed content changes automatically reopen the project as Revised
-- **Operational project health** — dashboard health rolls up traceability coverage, audit freshness/findings, unresolved questions, PRD review state, approval evidence, and active waivers; confirmed audits form an immutable run ledger with new/resolved/reopened finding comparisons
-- **Workflow Stop button** — an in-flight `process-requirements` run can be cancelled server-side (`POST /api/process-requirements/cancel`); partial work is discarded, never persisted
+- **Operational project health** — dashboard health separates fully traced requirements from story, acceptance-criteria, PRD-reference, and diagram-reference coverage, then rolls in audit freshness/findings, unresolved questions, PRD review state, approval evidence, and active waivers
+- **Persistent background generation** — Architect and scoped-regeneration jobs continue after a browser disconnect, are requeued after a server restart, and can be cancelled explicitly; partial work is rolled back
 - **Generic artifact locking** — lock/unlock projects, epics, requirements, user stories, acceptance criteria, clarification questions, PRD documents, and individual PRD sections; optimistic UI with automatic rollback
 - **Real-time updates** — Server-Sent Events push state changes to the dashboard instead of polling
 - **Rate limiting** — in-process sliding-window limiter guards the LLM-facing endpoints (chat, workflow, document extraction) with per-IP 429s (Finding #39)
@@ -347,6 +347,8 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `RATE_LIMIT_ENABLED` | `true` | Master switch for in-process sliding-window rate limiting on LLM-facing endpoints |
 | `RATE_LIMIT_CHAT_LIMIT` / `RATE_LIMIT_CHAT_WINDOW` | `30` / `60` | Max `/api/chat` requests per client IP per window (seconds) |
 | `RATE_LIMIT_WORKFLOW_LIMIT` / `RATE_LIMIT_WORKFLOW_WINDOW` | `60` / `60` | Max workflow-endpoint requests (`process-requirements`, `workflow-router`, `intent-detector`, `requirement-matcher`) per client IP per window (seconds) |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `180` | Maximum wall time for one local-model request before the structured-output fallback is attempted |
+| `LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS` | `300` | Shared wall-time budget across raw JSON parsing and the provider structured-output fallback |
 | `RATE_LIMIT_STORE` | `in-process` | Limiter backend. Only `in-process` exists today, and it **requires a single uvicorn worker** — the app refuses to boot with `--workers N` so the 429 budget can never silently scale by worker count |
 | `RATE_LIMIT_ALLOW_MULTI_PROCESS_IN_PROCESS` | `false` | Explicit opt-out: run N workers with the in-process store (each worker gets an independent budget — weaker posture; the app warns loudly at startup) |
 | `SSE_HISTORY_BUFFER_SIZE` | `1000` | Per-project ring buffer replayed to reconnecting SSE clients via `Last-Event-ID` |
@@ -544,6 +546,7 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/process-requirements` | Run the full LangGraph pipeline (`ProcessRequirementsRequest`); returns routed workflow, detected intent, structured requirements, audit result, PRD + diagram, and a pending-action id |
+| `POST` | `/api/process-requirements/background` | Queue persistent Architect generation and return a job immediately (`202`) |
 | `POST` | `/api/process-requirements/cancel?project_id=...` | Cancel an in-flight workflow run server-side (Stop button); returns `{"status": "cancelled"}` when a live task was stopped |
 | `POST` | `/api/workflow-router` | Classify a message → `CHAT / QUESTION / COMMAND / REQUIREMENT` |
 | `POST` | `/api/intent-detector` | Detect intent → `GENERAL_CHAT` or `REQUIREMENT_REQUEST` |
@@ -560,6 +563,9 @@ The backend is a FastAPI app; full interactive documentation (with request/respo
 | `GET` | `/api/projects/{project_id}/dependency-graph` | Rebuild and return the persisted directed artifact dependency graph |
 | `POST` | `/api/projects/{project_id}/regeneration/plan` | Traverse the graph from changed artifacts and preview affected stories, writable sections, protected sections, and diagrams |
 | `POST` | `/api/projects/{project_id}/regeneration` | Confirm and execute the dependency-scoped regeneration plan; locked and human-owned sections remain untouched |
+| `POST` | `/api/projects/{project_id}/regeneration/background` | Queue persistent dependency-scoped regeneration and return a job immediately (`202`) |
+| `GET` | `/api/projects/{project_id}/generation-jobs/{job_id}` | Poll persistent generation status and retrieve its completed result |
+| `POST` | `/api/projects/{project_id}/generation-jobs/{job_id}/cancel` | Cancel queued/running generation; user cancellation is terminal while shutdown-interrupted jobs are recoverable |
 
 ### Reusable Banking Knowledge
 

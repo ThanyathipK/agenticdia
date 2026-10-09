@@ -16,6 +16,7 @@ from app.routes import prd_sections
 from app.routes import traceability
 from app.routes import operational
 from app.routes import banking_knowledge
+from app.routes import generation_jobs
 from app.llm_client import check_lm_studio_health
 
 # Logger initialization
@@ -50,6 +51,14 @@ async def lifespan(app: FastAPI):
 
     await run_migrations()
     await seed_default_user()
+
+    # Persistent background work survives browser disconnects. Jobs left in a
+    # queued/running state by a process restart are safely requeued because the
+    # actual workflow writes are transaction-bound and idempotently staged.
+    from app.generation_job_service import recover_generation_jobs
+    recovered_jobs = await recover_generation_jobs()
+    if recovered_jobs:
+        logger.info("Recovered %d queued generation job(s) after restart.", recovered_jobs)
 
     # Backfill: parts whose newest history row is a human manual edit become
     # human-owned, so manual edits saved before the ownership flag existed are
@@ -93,6 +102,8 @@ async def lifespan(app: FastAPI):
 
     yield
     # Any graceful-shutdown / cleanup logic belongs here (after ``yield``).
+    from app.generation_job_service import shutdown_generation_jobs
+    await shutdown_generation_jobs()
     logger.info("Application shutdown complete.")
 
 
@@ -214,6 +225,7 @@ app.include_router(prd_sections.router, tags=["PRD Sections"])
 app.include_router(traceability.router, tags=["Traceability"])
 app.include_router(operational.router, tags=["Operational Governance"])
 app.include_router(banking_knowledge.router, tags=["Banking Knowledge"])
+app.include_router(generation_jobs.router, tags=["Background Generation Jobs"])
 
 
 # ==========================================
