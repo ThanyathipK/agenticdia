@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # "[YOUR_SECRET_KEY_CHANGE_IN_PRODUCTION]" — falls back to the development
     # secret with a loud startup warning (see app/auth.py).
     JWT_SECRET_KEY: str = ""
-    JWT_EXPIRATION_MINUTES: int = 60
+    JWT_EXPIRATION_MINUTES: int = 720
 
     # Gate for ``POST /api/auth/register`` (documented in .env.example, and
     # previously dead config: the endpoint was callable no matter what this
@@ -144,8 +144,8 @@ class Settings(BaseSettings):
     # Bound one provider call and the complete raw+fallback structured-output
     # sequence. Background jobs may outlive browser requests, but model work
     # must still terminate predictably.
-    LLM_REQUEST_TIMEOUT_SECONDS: float = 180.0
-    LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS: float = 300.0
+    LLM_REQUEST_TIMEOUT_SECONDS: float = 600.0
+    LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS: float = 660.0
     # Qwen3.x models are REASONING models: they first emit a long `reasoning_content`
     # chain-of-thought and only then the real answer. With a bounded max_tokens the
     # model can exhaust the whole budget thinking and return an EMPTY `content`

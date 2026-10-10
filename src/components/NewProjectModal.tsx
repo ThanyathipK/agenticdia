@@ -65,25 +65,21 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
       onClick={() => { if (!isCreating) onClose(); }}
     >
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="w-[320px] max-w-[calc(100vw-1.5rem)] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
+        className="w-[400px] max-w-[calc(100vw-1.5rem)] bg-white border border-outline rounded-[16px] shadow-[0_12px_28px_rgba(43,36,32,0.14)] p-6 focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-label="Create new project"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2.5 mb-4">
-          <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
-            <Plus className="w-4 h-4 text-primary" />
-          </div>
+        <div className="flex items-center gap-2.5 mb-5">
           <div className="min-w-0 flex-1">
-            <h3 className="text-[13px] font-bold text-on-surface">New Project</h3>
-            <p className="text-[11px] text-on-surface-variant">Name your project to get started</p>
+            <h3 className="text-[18px] font-bold text-on-surface">New Project</h3>
           </div>
         </div>
 
@@ -98,10 +94,10 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleSubmit();
           }}
-          placeholder="Project name"
+          placeholder="e.g. Smart Budget Planner"
           maxLength={40}
           aria-invalid={!!error}
-          className={`w-full bg-white border rounded-xl px-3 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none transition-colors ${
+          className={`w-full h-[42px] bg-[#faf9f7] border rounded-[10px] px-3 text-sm text-on-surface placeholder:text-on-surface-variant/35 focus:outline-none transition-colors ${
             error
               ? 'border-red-400 focus:border-red-500'
               : 'border-outline focus:border-primary'
@@ -113,18 +109,18 @@ export function NewProjectModal({ isOpen, onCreate, onClose }: NewProjectModalPr
           </p>
         )}
 
-        <div className="flex items-center justify-end gap-2 mt-4">
+        <div className="flex items-center justify-end gap-2 mt-6">
           <button
             onClick={() => { if (!isCreating) onClose(); }}
             disabled={isCreating}
-            className="px-3 py-2 rounded-xl bg-primary/5 text-on-surface-variant hover:bg-primary/10 hover:text-on-surface transition-colors text-xs font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 rounded-[10px] bg-white border border-outline text-on-surface-variant hover:bg-[#faf8f4] transition-colors text-xs font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
           <button
             onClick={handleSubmit}
             disabled={!name.trim() || isCreating}
-            className="px-4 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 active:scale-[0.99] transition-all text-xs font-bold shadow-md shadow-primary/20 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
+            className="px-4 py-2 rounded-[10px] bg-primary text-on-primary hover:brightness-110 active:scale-[0.99] transition-all text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
           >
             <Plus className="w-3.5 h-3.5" />
             {isCreating ? 'Creating...' : 'Create Project'}

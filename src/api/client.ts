@@ -344,7 +344,7 @@ export const api = {
   // has NO client method here (documented discrepancy, see CHAT 5.x).
   processRequirements: (request: ProcessRequirementsRequest, signal?: AbortSignal) =>
     post<ProcessRequirementsResponse>('/api/process-requirements', request, undefined, signal),
-  startArchitectJob: (request: ProcessRequirementsRequest) =>
+  startAgentJob: (request: ProcessRequirementsRequest) =>
     post<GenerationJobPayload<ProcessRequirementsResponse>>('/api/process-requirements/background', request),
   getGenerationJob: <T>(projectId: string, jobId: string) =>
     get<GenerationJobPayload<T>>(`/api/projects/${projectId}/generation-jobs/${jobId}`),

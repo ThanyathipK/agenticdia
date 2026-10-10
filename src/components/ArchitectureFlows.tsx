@@ -91,15 +91,15 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
   const isWaitingForFirstDiagram = !source && (isLoading || isProcessing);
 
   return (
-    <div className="space-y-6 animate-fadeIn">
-      <div className="relative overflow-hidden rounded-3xl border border-outline bg-white p-4 shadow-sm sm:p-6">
+    <div className="space-y-3 animate-fadeIn">
+      <div className="relative overflow-hidden rounded-[12px] border border-outline bg-white p-4">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-black/5 pb-3">
           <div className="flex min-w-0 items-center gap-2">
             <Network className="h-5 w-5 shrink-0 text-primary" />
             <div className="min-w-0">
               <h3 className="text-sm font-bold text-on-surface">Project Flowchart</h3>
               <p className="break-words font-mono text-[11px] text-on-surface-variant">
-                Mermaid • Generated from saved requirements and user stories
+                Mermaid. Generated from saved requirements and user stories
               </p>
             </div>
           </div>
@@ -129,7 +129,7 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
           )}
         </div>
 
-        <div className="min-h-72 w-full overflow-auto rounded-2xl border border-outline bg-background p-4 custom-scrollbar sm:p-6">
+        <div className="min-h-72 w-full overflow-auto rounded-[10px] border border-outline bg-[#f8f6f2] p-4 custom-scrollbar sm:p-5">
           {isWaitingForFirstDiagram ? (
             <div className="flex min-h-72 flex-col items-center justify-center gap-2 text-center">
               <LoaderCircle className="h-7 w-7 animate-spin text-primary" />
@@ -164,7 +164,7 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
       </div>
 
       {source && (
-        <details className="rounded-3xl border border-outline bg-white p-6 shadow-sm">
+        <details className="rounded-[12px] border border-outline bg-white p-4">
           <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-bold text-on-surface">
             <FileCode className="h-4.5 w-4.5 text-primary" />
             Mermaid source
@@ -172,7 +172,7 @@ export function ArchitectureFlows({ state }: { state: ProjectState }) {
               Saved with project
             </span>
           </summary>
-          <pre className="mt-3 overflow-x-auto rounded-2xl border border-slate-800 bg-slate-900 p-4 font-mono text-xs text-slate-100">
+          <pre className="mt-3 overflow-x-auto rounded-[10px] border border-[#5b21b6] bg-[#2f343c] p-4 font-mono text-xs text-[#6fd08c]">
             <code>{source}</code>
           </pre>
         </details>

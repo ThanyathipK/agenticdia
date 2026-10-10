@@ -51,7 +51,7 @@ from app.prd_section_service import ensure_sections_seeded, assemble_document_ma
 from app.repositories.prd_section import PRDSectionRepository
 from app.prompt_loader import load_prd_template, load_prd_latex_template
 from app.event_manager import event_manager
-from app.review_service import ReviewTransitionError, get_review_history, transition_project
+from app.review_service import get_review_history
 from app.review_service import governed_state_changed, mark_revised_if_approved
 from app.repositories.base import serialize_project
 
@@ -441,23 +441,17 @@ async def set_project_status(
             detail=f"Invalid status '{payload.status}'. Allowed: {', '.join(sorted(allowed))}",
         )
 
-    # Lifecycle changes are commands, not arbitrary labels: the service enforces
-    # legal transitions and approval prerequisites and appends the review event.
-    try:
-        project = await transition_project(
-            project_id,
-            payload.status,
-            db,
-            actor_id=current_user.id,
-            actor_name=current_user.full_name,
-            actor_role=current_user.role,
-            comment=payload.comment,
-        )
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Project not found") from None
-    except ReviewTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    updated = serialize_project(project)
+    # Dashboard status is manually selected metadata. Any canonical status can
+    # be chosen directly; it is not inferred from project health or constrained
+    # to a workflow transition path.
+    updated = await ProjectRepository.update_status(
+        project_id,
+        payload.status,
+        db,
+        user_id=UUID(current_user.id),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Project not found")
     await event_manager.publish(project_id, "project_updated", {
         "project_id": project_id,
         "status": payload.status,

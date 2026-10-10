@@ -52,7 +52,7 @@ const INITIAL_MESSAGES: ChatMessage[] = [
     id: 'init-2',
     role: 'assistant',
     content:
-      'Hello! I am your Senior Business Analyst AI Agent. Share your raw, conversational, or messy requirement text and I will structure it, run a compliance audit, and compile a formal PRD for you.',
+      'Hello! I am your Technical Product Owner Assistant. Share your raw, conversational, or messy requirement text and I will structure it, run a compliance audit, and compile a formal PRD for you.',
     timestamp: BOOT_TIME,
   },
 ];
@@ -346,7 +346,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
         }));
         setSyncStatus(
           res.section.ai_generatable === false
-            ? 'Section saved — marked Manual, Generate PRD will preserve it.'
+            ? 'Section saved. Marked Manual; Generate PRD will preserve it.'
             : 'Section saved & versioned.',
         );
       } catch (err) {
@@ -354,7 +354,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
         // write on lock/conflict/network errors can overwrite newer remote edits.
         setSections(sections);
         handleError('Failed to save manual edits to the database.', err);
-        setSyncStatus('Save failed — the server copy was not changed.');
+        setSyncStatus('Save failed. The server copy was not changed.');
         return;
       }
 
@@ -429,7 +429,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
       // Reload the ledger + per-part metadata so the timeline shows the NEW
       // appended version and section lock/version info stays accurate.
       await Promise.all([loadVersionHistory(projectId), loadSectionLocks(projectId)]);
-      setSyncStatus(`Restored from version ${versionNumber} — new version ${res.new_version_number} created.`);
+      setSyncStatus(`Restored from version ${versionNumber}. New version ${res.new_version_number} created.`);
       return true;
     } catch (err) {
       handleError(`Failed to restore version ${versionNumber}.`, err);
@@ -463,10 +463,10 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
     try {
       if (wasLocked) {
         await api.unlockPrdSection(projectId, sectionId);
-        setSyncStatus('PRD part unlocked — AI can regenerate it again.');
+        setSyncStatus('PRD part unlocked. AI can regenerate it again.');
       } else {
         await api.lockPrdSection(projectId, sectionId);
-        setSyncStatus('PRD part locked — protected from edits and AI regeneration.');
+        setSyncStatus('PRD part locked. Protected from edits and AI regeneration.');
       }
     } catch (err) {
       // Revert on failure
@@ -511,7 +511,7 @@ export function useRequirementStore(projectId: string | null): RequirementStore 
           version_number: res.section.version_number ?? prev[sectionId]?.version_number ?? null,
         },
       }));
-      setSyncStatus('PRD part handed back to the AI — Generate PRD will refresh it.');
+      setSyncStatus('PRD part handed back to the AI. Generate PRD will refresh it.');
       await loadVersionHistory(projectId);
     } catch (err) {
       handleError('Failed to hand the PRD part back to the AI.', err);

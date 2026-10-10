@@ -5,7 +5,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  Network,
   Bot,
   Send,
   RefreshCw,
@@ -42,10 +41,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
     handleGeneratePRD,
     projects,
     projectId,
-    syncStatus,
-    // Finding #40: the header pill surfaces LLM status; the model name is dynamic.
-    lmStudioOnline,
     lmStudioModel,
+    lmStudioOnline,
+    lmStudioModelLoaded,
     documents,
     canRunAgentActions,
   } = state;
@@ -82,10 +80,15 @@ export function ChatPanel({ state }: { state: ProjectState }) {
   // documents and no gathered requirements has nothing for the Auditor /
   // Architect agents to work with, so Validate Requirements / Generate PRD
   // stay disabled until real content exists.
-  const agentActionsDisabled = isLoading || isProcessing || !canRunAgentActions;
+  const llmUnavailable = lmStudioOnline === false || !lmStudioModelLoaded;
+  const agentActionsDisabled = isLoading || isProcessing || !canRunAgentActions || llmUnavailable;
   const agentActionHint = !projectId
     ? 'Create or select a project first'
-    : 'Add requirements via chat or upload a knowledge document first';
+    : !canRunAgentActions
+      ? 'Add requirements via chat or upload a knowledge document first'
+      : llmUnavailable
+        ? 'Start LM Studio and load the configured model before running AI actions'
+        : '';
 
   // ---- Search-driven chat autoscroll --------------------------------------
   // The-sidebar search also matches conversation message content. When a query
@@ -171,36 +174,17 @@ export function ChatPanel({ state }: { state: ProjectState }) {
   }, [rawInput]);
 
   return (
-    <section className="chat-panel flex flex-col bg-surface border-r border-outline relative z-10" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${state.splitPct}%` }}>
+    <section className="chat-panel flex flex-col bg-white relative z-10" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${state.splitPct}%` }}>
       {/* Section Header */}
-      <div id="chat-panel-header" className="p-3 md:p-4 border-b border-outline flex items-center justify-between bg-glass-bg backdrop-blur-md">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
-            <Network className="text-primary w-4.5 h-4.5" />
-          </div>
-          <div className="min-w-0">
-            <h2 className="font-headline-md text-sm font-bold text-on-surface truncate">
-              {projects.find(p => p.id === projectId)?.name || "Conversational Analyst Workspace"}
-            </h2>
-            <div className="flex items-center gap-1.5 mt-0.5 hidden sm:flex">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-              <p className="text-[10.5px] text-on-surface-variant font-mono truncate">Agent Graph Ready • {syncStatus}</p>
-            </div>
-          </div>
-        </div>
-
-        <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider shrink-0 ml-3 hidden sm:inline-block">
-          {lmStudioOnline === false
-            ? 'LLM Offline'
-            : isProcessing
-              ? 'Processing'
-              : 'Idle'}
-        </span>
+      <div id="chat-panel-header" className="h-[50px] px-5 border-b border-outline flex items-center bg-white shrink-0">
+        <h2 className="text-[13px] font-bold text-on-surface truncate">
+          {projects.find(p => p.id === projectId)?.name || "New Project"}
+        </h2>
       </div>
 
       {/* Chat Logs scroll list — extra bottom padding on <sm screens because
           the action buttons stack into two rows and the composer grows taller. */}
-      <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-6 custom-scrollbar pb-44 sm:pb-32">
+      <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-5 custom-scrollbar pb-44 sm:pb-32 bg-white">
         {messages.length === 0 && (
           // CHAT 1.1 — Empty-state suggestion chips: `onPick` feeds the same
           // handler as the composer (CHAT 1.2), so a suggested prompt is just a
@@ -248,22 +232,22 @@ export function ChatPanel({ state }: { state: ProjectState }) {
               >
                 {/* Bot avatar */}
                 {!isUser && (
-                  <div className="w-8.5 h-8.5 rounded-xl bg-primary flex items-center justify-center shrink-0 shadow-md shadow-primary/20">
-                    <Bot className="text-on-primary w-5 h-5" />
+                  <div className="w-7 h-7 rounded-full bg-primary flex items-center justify-center shrink-0">
+                    <Bot className="text-on-primary w-3.5 h-3.5" />
                   </div>
                 )}
 
-                <div className={`flex flex-col gap-1.5 max-w-[85%] ${isUser ? 'items-end' : 'items-start'}`}>
+                <div className={`flex flex-col gap-1 max-w-[88%] ${isUser ? 'items-end' : 'items-start'}`}>
                   {/* Name card */}
-                  <span className="font-label-md text-[10px] text-on-surface-variant/70 font-mono">
-                    {isUser ? 'Product Owner' : 'Requirements Analyst Node'} • {msg.timestamp}
+                  <span className="text-[10px] text-[#a89b91] font-semibold tracking-[0.02em]">
+                    {isUser ? 'YOU' : 'AI'}, {msg.timestamp}
                   </span>
 
                   {/* Chat text box */}
-                  <div className={`p-4 rounded-2xl shadow-sm border text-sm leading-relaxed ${
+                  <div className={`px-4 py-3 rounded-[16px] border text-[13.5px] leading-[1.6] ${
                     isUser 
-                      ? 'bg-primary text-on-primary border-primary rounded-tr-none' 
-                      : 'bg-primary/5 text-on-surface border-primary/15 rounded-tl-none'
+                      ? 'bg-[#f4ece4] text-on-surface border-[#e8e2d9] rounded-tr-[4px]' 
+                      : 'bg-white text-on-surface border-[#e8e2d9] rounded-tl-[4px] shadow-[0_2px_3px_rgba(0,0,0,0.02)]'
                   }`}>
                     <p className="whitespace-pre-line break-words">
                       {renderInlineFormatting(msg.content, projectSearchQuery, bubbleHighlightClass)}
@@ -347,9 +331,9 @@ export function ChatPanel({ state }: { state: ProjectState }) {
           >
             <RefreshCw className="w-3.5 h-3.5 animate-spin text-primary" />
             <span>
-              {currentAgentNode === 'gatherer_node' && 'Agent: Agile Requirements Gatherer parsing core intent...'}
-              {currentAgentNode === 'auditor_node' && 'Agent: Risk Compliance Auditor checking BOT 7-point guidelines...'}
-              {currentAgentNode === 'architect_node' && 'Agent: Enterprise CTO Architect building markdown PRD...'}
+              {currentAgentNode === 'gatherer_node' && 'Technical Product Owner Assistant: structuring requirements...'}
+              {currentAgentNode === 'auditor_node' && 'Technical Product Owner Assistant: auditing requirements...'}
+              {currentAgentNode === 'architect_node' && 'Technical Product Owner Assistant: building markdown PRD...'}
               {!currentAgentNode && (lmStudioModel ? `Dispatched task to LM Studio Local LLM (${lmStudioModel})...` : 'Dispatched task to LM Studio Local LLM...')}
             </span>
           </motion.div>
@@ -378,10 +362,10 @@ export function ChatPanel({ state }: { state: ProjectState }) {
       </AnimatePresence>
 
       {/* Conversational Fixed Input Container */}
-      <div className="absolute bottom-0 w-full p-4 glass-panel border-t border-outline bg-white/90 z-20 space-y-3">
+      <div className="absolute bottom-0 w-full px-3.5 py-3 border-t border-outline bg-white z-20 space-y-2">
         {/* Agent Actions Row — buttons stack on very narrow panels instead of
             overflowing; the min-width keeps each label on one line. */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="grid grid-cols-1 min-[460px]:grid-cols-2 gap-2">
           {/* AUDIT 5.0 (UI trigger) — "Validate Requirements" button: on-demand
               auditor run (empty raw_input + target_agent=auditor). Disabled via
               agentActionsDisabled when there is nothing to audit. */}
@@ -389,7 +373,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             onClick={handleValidateRequirements}
             disabled={agentActionsDisabled}
             title={agentActionsDisabled ? agentActionHint : 'Validate current requirements and knowledge-base document content'}
-            className="min-w-[160px] flex-1 px-3 py-2 rounded-xl border border-outline hover:bg-black/5 font-label-md text-xs text-on-surface font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="min-w-0 w-full h-[42px] px-3 rounded-[10px] border border-primary hover:bg-[#faf8f4] font-label-md text-xs text-primary font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CheckCircle2 className="w-3.5 h-3.5 text-primary" />
             <span>Validate Requirements</span>
@@ -401,7 +385,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
             onClick={handleGeneratePRD}
             disabled={agentActionsDisabled}
             title={agentActionsDisabled ? agentActionHint : 'Compile the formal PRD and architecture diagram'}
-            className="min-w-[160px] flex-1 px-3 py-2 rounded-xl bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="min-w-0 w-full h-[42px] px-3 rounded-[10px] bg-primary text-on-primary hover:brightness-110 font-label-md text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <FileText className="w-3.5 h-3.5" />
             <span>Generate PRD</span>
@@ -415,7 +399,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
           </p>
         )}
 
-        <div className="flex items-end gap-3 bg-black/5 rounded-3xl px-4 py-2.5 border border-outline focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/10 transition-all">
+        <div className="flex items-end gap-2 bg-white rounded-[16px] pl-2 pr-1.5 py-1.5 border border-[#e8e2d9] shadow-[0_2px_4px_rgba(0,0,0,0.02)] focus-within:border-primary/50 transition-all">
           <Tooltip
             label={projectId ? 'Attach file (.docx / .pdf / .md / .txt)' : 'Create or select a project first'}
             side="top"
@@ -425,7 +409,7 @@ export function ChatPanel({ state }: { state: ProjectState }) {
               aria-label="Attach file"
               onClick={handleClipClick}
               disabled={!projectId || isLoading || isProcessing || documents.isUploading}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-8 h-8 rounded-full bg-[#f4ece4] flex items-center justify-center text-primary hover:bg-[#eadfd5] transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {documents.isUploading ? (
                 <Loader2 className="w-4.5 h-4.5 animate-spin" />

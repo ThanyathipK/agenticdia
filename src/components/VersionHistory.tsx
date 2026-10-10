@@ -1,7 +1,7 @@
 // VersionHistory
 // Renders the immutable change ledger timeline and diff viewer.
 import { useEffect, useState } from "react";
-import { GitCompare, Plus, Minus, Lock, FileText, RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, Minus, Lock, FileText, RotateCcw } from "lucide-react";
 import { ProjectState } from "../hooks/useProjectState";
 import { api } from "../api/client";
 import { ConfirmModal } from "./ConfirmModal";
@@ -196,143 +196,79 @@ export function VersionHistory({ state }: { state: ProjectState }) {
       .finally(() => setDiffLoading(false));
   }, [projectId, selectedHistVersion, diffBaseVersion]);
 
-  const selected = versionHistory.find(v => v.version === selectedHistVersion);
-  const base = diffBaseVersion != null ? versionHistory.find(v => v.version === diffBaseVersion) : null;
-  const totalAdded = diff ? diff.sections.reduce((a: number, s: PrdVersionDiffSectionPayload) => a + s.added, 0) : 0;
-  const totalRemoved = diff ? diff.sections.reduce((a: number, s: PrdVersionDiffSectionPayload) => a + s.removed, 0) : 0;
-  const changedSections = diff ? diff.sections.filter(s => s.changed).length : 0;
-
   return (
-    <div className="space-y-6 animate-fadeIn">
-      <div className="bg-white rounded-3xl border border-outline p-6 shadow-sm">
-        <h3 className="font-bold text-sm text-on-surface mb-6 flex items-center gap-2">
-          <GitCompare className="text-primary w-4.5 h-4.5" />
-          <span>Requirements Immutable Change Ledger</span>
-        </h3>
-        <div className="relative border-l-2 border-primary/20 pl-8 ml-4 space-y-8 pb-4">
+    <div className="space-y-3 animate-fadeIn">
+      <div className="space-y-2">
           {versionHistory.map((v, idx) => (
-            <div key={idx} className="relative">
+            <section key={idx} className={`rounded-[10px] border overflow-hidden bg-white ${selectedHistVersion === v.version ? 'border-primary' : 'border-outline'}`}>
               <button
-                onClick={() => setSelectedHistVersion(v.version)}
-                className={"absolute -left-12 w-8 h-8 rounded-full border-2 flex items-center justify-center font-mono text-xs font-bold transition-all " +
+                onClick={() => setSelectedHistVersion(selectedHistVersion === v.version ? 0 : v.version)}
+                className={"w-full px-4 py-3 flex items-center gap-3 text-left transition-colors " +
                   (selectedHistVersion === v.version
-                    ? 'bg-primary border-primary text-on-primary scale-110 shadow-md shadow-primary/20'
-                    : 'bg-white border-outline text-on-surface-variant hover:border-primary/50')}
+                    ? 'bg-[#faf8f4] text-on-surface'
+                    : 'bg-white text-on-surface hover:bg-[#faf8f4]')}
               >
-                v{v.semVersion || `${v.version}.0`}
+                <span className="min-w-0 flex-1">
+                  <strong className="block text-sm font-bold">v{v.semVersion || `${v.version}.0`}</strong>
+                  <span className="block mt-0.5 text-[11px] text-on-surface-variant font-normal">{v.timestamp}</span>
+                </span>
+                {selectedHistVersion === v.version
+                  ? <ChevronDown className="w-4 h-4 shrink-0" />
+                  : <ChevronRight className="w-4 h-4 shrink-0" />}
               </button>
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className="text-sm font-bold text-on-surface">Snapshot {v.semVersion || `#${v.version}.0`}</span>
-                  <span className="text-[10.5px] font-mono text-on-surface-variant bg-black/5 px-2 py-0.5 rounded whitespace-nowrap">{v.timestamp}</span>
+              {selectedHistVersion === v.version && <div className="space-y-3 px-4 py-3 border-t border-outline">
+                <div className="flex items-center gap-2">
                   <ChangeTypeBadge changeType={v.changeType} />
+                  <span className="text-[11px] text-on-surface-variant">Captured by {v.author}</span>
                 </div>
-                <p className="text-xs text-on-surface-variant leading-relaxed">
-                  Captured by: <strong className="text-on-surface font-semibold">{v.author}</strong> — <em>"{v.description}"</em>
-                </p>
-                {latestVersion !== null && v.version !== latestVersion && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRestoreTarget(v.version);
-                    }}
-                    className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-primary hover:text-primary/80 bg-primary/5 hover:bg-primary/10 border border-primary/20 rounded-lg px-2.5 py-1 transition-colors cursor-pointer"
-                    title={`Restore the PRD document to v${v.semVersion || `${v.version}.0`}`}
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    Restore this version
-                  </button>
+                <ul className="space-y-2 text-xs text-on-surface">
+                  <li className="flex gap-2 leading-relaxed">
+                    <span className="font-bold text-emerald-600">+</span>
+                    <span>{v.description || 'Saved product requirement document snapshot'}</span>
+                  </li>
+                  {diff?.sections.filter(section => section.changed).slice(0, 4).map(section => (
+                    <li key={section.section_key} className="flex gap-2 leading-relaxed">
+                      <span className={`font-bold ${section.change_kind === 'removed' ? 'text-red-600' : section.change_kind === 'locked_preserved' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                        {section.change_kind === 'removed' ? '−' : section.change_kind === 'locked_preserved' ? '~' : '+'}
+                      </span>
+                      <span>{section.change_kind === 'locked_preserved' ? 'Preserved' : section.change_kind === 'removed' ? 'Removed' : 'Updated'} {section.title}</span>
+                    </li>
+                  ))}
+                </ul>
+                {diffLoading && <p className="text-xs text-on-surface-variant">Loading version changes…</p>}
+                {diffError && <p className="text-xs text-red-700">Could not load version changes.</p>}
+                {diff && diff.sections.length > 0 && (
+                  <details className="rounded-[8px] border border-outline bg-[#faf8f4]">
+                    <summary className="cursor-pointer list-none px-3 py-2 text-[11px] font-semibold text-on-surface">View detailed line changes</summary>
+                    <div className="space-y-2 border-t border-outline p-3">
+                      {diff.sections.filter(section => section.changed).map(section => (
+                        <SectionDiffCard key={section.section_key} section={section} />
+                      ))}
+                    </div>
+                  </details>
                 )}
-              </div>
-            </div>
+                {latestVersion !== null && v.version !== latestVersion && (
+                  <div className="flex justify-end pt-1">
+                    <button
+                      onClick={() => setRestoreTarget(v.version)}
+                      className="inline-flex items-center gap-1.5 rounded-[8px] bg-orange-500 px-4 py-2 text-[11px] font-semibold text-white hover:bg-orange-600 transition-colors cursor-pointer"
+                      title={`Restore the PRD document to v${v.semVersion || `${v.version}.0`}`}
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Restore v{v.semVersion || `${v.version}.0`}
+                    </button>
+                  </div>
+                )}
+              </div>}
+            </section>
           ))}
 
-        </div>
-
         {versionHistory.length === 0 && (
-          <p className="text-sm text-on-surface-variant italic py-4 text-center">
+          <div className="rounded-[10px] border border-dashed border-outline bg-white px-4 py-10 text-center text-sm text-on-surface-variant">
             No version history yet. Generate a PRD to start tracking changes.
-          </p>
-        )}
-
-        {selected && base && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-4 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200">
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-xs text-slate-500">From:</span>
-              <span className="text-sm font-bold text-slate-700">v{base.semVersion || `${base.version}.0`}</span>
-              <span className="text-xs text-slate-400">({base.timestamp})</span>
-            </div>
-            <div className="text-slate-300 text-xs" aria-hidden="true">→</div>
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-xs text-slate-500">To:</span>
-              <span className="text-sm font-bold text-slate-700">v{selected.semVersion || `${selected.version}.0`}</span>
-              <span className="text-xs text-slate-400">({selected.timestamp})</span>
-            </div>
-            {diff && (
-              <div className="ml-auto flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono">
-                {totalAdded > 0 && <span className="text-emerald-600 font-semibold shrink-0">+{totalAdded} lines added</span>}
-                {totalRemoved > 0 && <span className="text-red-600 font-semibold shrink-0">-{totalRemoved} lines removed</span>}
-                {changedSections > 0 && <span className="text-slate-400">·</span>}
-                {changedSections > 0 && <span className="text-slate-500 shrink-0">{changedSections} sections changed</span>}
-              </div>
-            )}
           </div>
         )}
 
-        {diffLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="flex items-center gap-2 text-sm text-on-surface-variant">
-              <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-              Loading diff...
-            </div>
-          </div>
-        )}
-
-        {diffError && (
-          <div className="flex items-center gap-2 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
-            <Minus className="w-4 h-4 flex-shrink-0" />
-            Could not load diff: {diffError}
-          </div>
-        )}
-
-        {!diffLoading && !diffError && diff && (
-          <div className="space-y-4">
-            {diff.sections.length === 0 ? (
-              <p className="text-sm text-on-surface-variant italic py-8 text-center">No differences found between these versions.</p>
-            ) : (
-              diff.sections.map((section) => (
-                <SectionDiffCard key={section.section_key} section={section} />
-              ))
-            )}
-          </div>
-        )}
-
-        {!diffLoading && !diffError && !diff && selected && (
-          <p className="text-sm text-on-surface-variant italic py-8 text-center">
-            {selected.version === 1
-              ? 'This is the first version — nothing to compare against yet.'
-              : 'Select a prior version as the baseline to see the diff.'}
-          </p>
-        )}
-
-        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 mt-6 pt-4 border-t border-black/5 text-[10px] text-on-surface-variant">
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className="inline-block w-3 h-3 rounded bg-emerald-50 border border-emerald-300" />
-            Added lines
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className="inline-block w-3 h-3 rounded bg-red-50 border border-red-300" />
-            Removed lines
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className="inline-block w-3 h-3 rounded bg-slate-100 border border-slate-300" />
-            Unchanged context
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <Lock className="w-3 h-3 text-amber-500" />
-            Locked (preserved)
-          </div>
-        </div>
       </div>
 
       <ConfirmModal

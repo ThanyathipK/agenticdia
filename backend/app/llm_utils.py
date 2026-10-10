@@ -167,6 +167,11 @@ async def invoke_llm_structured(
             return result
         raw_failure = f"raw output failed validation for {description}"
         logger.warning(f"{raw_failure}. Falling back to structured output.")
+    except TimeoutError as e:
+        # A second structured-output request cannot repair a provider timeout;
+        # it only makes the user wait through the remaining total budget before
+        # failing the same way. Let the caller apply its safe fallback now.
+        raise RuntimeError(f"{description} timed out before returning structured output") from e
     except Exception as e:
         raw_failure = str(e)
         logger.warning(f"Raw parse failed for {description}: {e}. Falling back to structured output.")

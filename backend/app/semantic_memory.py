@@ -191,7 +191,7 @@ class ExtractedFacts(BaseModel):
 
 _FACT_EXTRACTION_SYSTEM_PROMPT = (
     "You extract durable project knowledge from a requirements-analysis chat turn. "
-    "Return ONLY facts that a business analyst would need in FUTURE conversations "
+    "Return ONLY facts that a technical product owner would need in FUTURE conversations "
     "(decisions, constraints, preferences, domain rules, rejected options). "
     "Never include transient small talk, question phrasing, or anything already "
     "implied by the requirements documents. Each fact: one short declarative "
@@ -484,4 +484,3 @@ def build_memory_block(memories: List[Dict[str, Any]]) -> str:
     if not lines:
         return ""
     return "Relevant project memory (from previous conversations):\n" + "\n".join(lines)
-

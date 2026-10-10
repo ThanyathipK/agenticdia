@@ -108,7 +108,7 @@ function ImpactAnalysisSection({
         <span className="text-xs font-bold text-on-surface">What changes vs what is affected</span>
         {state === 'ready' && impact && (
           <span className="text-[10px] font-mono text-on-surface-variant ml-auto shrink-0">
-            v{impact.current_version} → v{impact.proposed_version ?? impact.current_version}
+            v{impact.current_version} to v{impact.proposed_version ?? impact.current_version}
           </span>
         )}
       </div>
@@ -121,8 +121,8 @@ function ImpactAnalysisSection({
 
       {state === 'error' && (
         <p className="mt-2 text-[11px] text-amber-700">
-          Impact analysis is unavailable — the draft holds {draft.requirements} requirement
-          {draft.requirements === 1 ? '' : 's'} · {draft.stories} stor{draft.stories === 1 ? 'y' : 'ies'}
+          Impact analysis is unavailable. The draft holds {draft.requirements} requirement
+          {draft.requirements === 1 ? '' : 's'}, {draft.stories} stor{draft.stories === 1 ? 'y' : 'ies'}
           {draft.versionNumber !== undefined ? ` (v${draft.versionNumber})` : ''}. Nothing is saved until you click Save.
         </p>
       )}
@@ -142,7 +142,7 @@ function ImpactAnalysisSection({
               </div>
             ) : (
               <p className="text-[11px] text-slate-500">
-                Nothing — the draft matches the stored state.
+                Nothing. The draft matches the stored state.
               </p>
             )}
             {(changedRequirements.length > 0 || changedStories.length > 0) && (
@@ -309,19 +309,19 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
   const hasChanges = impact ? impact.has_changes : draft.requirements > 0 || draft.stories > 0;
 
   return (
-    <div className="bg-white border-2 border-amber-300 rounded-2xl shadow-sm my-4 overflow-hidden">
+    <div className="bg-white border border-orange-300 border-l-4 rounded-[12px] my-3 overflow-hidden">
       {/* Header */}
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-3 flex items-start gap-3">
+      <div className="bg-[#fffaf6] border-b border-outline px-4 py-3 flex items-start gap-3">
         <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
           <AlertTriangle className="text-amber-600 w-4 h-4" />
         </div>
         <div className="flex-1 min-w-0">
           <h3 className="font-bold text-sm text-amber-900">
-            Pending {action.action_type} — Review Before Saving
+            Pending {action.action_type}: Review Before Saving
           </h3>
           <p className="text-xs text-amber-800 mt-0.5 break-words">
             {hasChanges
-              ? 'Nothing is saved yet — below is what changes and what is affected. Save applies this version; Cancel rolls back to the version before.'
+              ? 'Nothing is saved yet. Below is what changes and what is affected. Save applies this version; Cancel rolls back to the version before.'
               : `You have a pending change based on: "${action.original_user_message}"`}
           </p>
         </div>
@@ -335,19 +335,19 @@ export const ConfirmationPanel: React.FC<ConfirmationPanelProps> = ({ action, on
         <button
           onClick={handleConfirm}
           disabled={isWorking}
-          className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-1 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-[8px] text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Check size={16} /> Save
         </button>
         <button
           onClick={handleCancel}
           disabled={isWorking}
-          className="flex items-center gap-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-1 bg-white hover:bg-[#faf8f4] text-gray-700 px-4 py-2 rounded-[8px] border border-outline text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <X size={16} /> Cancel
         </button>
         <span className="text-[10px] text-on-surface-variant ml-auto font-mono">
-          {isWorking ? 'Working…' : 'Save applies this version · Cancel rolls back'}
+          {isWorking ? 'Working…' : 'Save applies this version; Cancel rolls back'}
         </span>
       </div>
     </div>

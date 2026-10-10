@@ -52,7 +52,7 @@ async def test_structured_invoke_obeys_shared_total_timeout(monkeypatch):
     monkeypatch.setattr(settings, "LLM_REQUEST_TIMEOUT_SECONDS", 0.03)
     monkeypatch.setattr(settings, "LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS", 0.05)
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match="All parsing attempts failed"):
+    with pytest.raises(RuntimeError, match="timed out before returning structured output"):
         await invoke_llm_structured(
             llm,
             prompt,

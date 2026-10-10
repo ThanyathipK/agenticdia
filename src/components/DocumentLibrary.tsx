@@ -41,7 +41,7 @@ const formatBytes = (bytes: number): string => {
 const extractionChip = (status: string): { label: string; className: string } => {
   switch (status) {
     case 'extraction_applied':
-      return { label: 'extracted ✓', className: 'bg-emerald-100 text-emerald-800 border-emerald-300' };
+      return { label: 'extracted', className: 'bg-emerald-100 text-emerald-800 border-emerald-300' };
     case 'extraction_pending':
       return { label: 'draft awaiting confirm', className: 'bg-amber-100 text-amber-800 border-amber-300' };
     default:
@@ -77,14 +77,14 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-3 mt-3">
       {/* KNOWLEDGE BASE HEADER */}
-      <section className="bg-white border border-outline rounded-2xl p-5 shadow-sm">
+      <section className="bg-white border border-outline rounded-[10px] p-4">
         <div className="flex items-start gap-4 flex-wrap">
           <div>
             <h3 className="font-bold text-sm text-on-surface">Knowledge Base Documents</h3>
             <p className="text-xs text-on-surface-variant mt-1">
-              Documents in this project's knowledge base — requirements are never
+              Documents in this project's knowledge base. Requirements are never
               written until you explicitly run an extraction and confirm its merge preview.
             </p>
           </div>
@@ -111,7 +111,7 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
           const chip = extractionChip(doc.extraction_status);
           const isProcessing = docs.processingDocId === doc.id;
           return (
-            <article key={doc.id} className="bg-white border border-outline rounded-2xl p-4 shadow-sm">
+            <article key={doc.id} className="bg-white border border-outline rounded-[10px] p-3">
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0">
                   <FileText className="w-4 h-4" />
@@ -125,7 +125,7 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
                     {doc.original_filename}
                   </button>
                   <p className="text-[10px] font-mono text-on-surface-variant mt-0.5">
-                    {doc.original_format.toUpperCase()} · {formatBytes(doc.file_size_bytes)} · ~{doc.token_count} tokens · status {doc.status}
+                    {doc.original_format.toUpperCase()}, {formatBytes(doc.file_size_bytes)}, ~{doc.token_count} tokens, status {doc.status}
                   </p>
                 </div>
                 <span className={`text-[10px] px-2 py-1 rounded-full border font-bold ${chip.className}`}>
@@ -155,8 +155,8 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
                 <div className="mt-3 text-[11px] text-primary bg-primary/5 border border-primary/20 rounded-xl px-3 py-2 font-mono">
                   Running extraction in <b>{docs.extractionProgress.mode}</b> mode
                   {docs.extractionProgress.chunkCount > 0 &&
-                    ` · chunk ${Math.max(1, docs.extractionProgress.chunkIndex)}/${docs.extractionProgress.chunkCount}`}
-                  … nothing is saved until you confirm the draft.
+                    `, chunk ${Math.max(1, docs.extractionProgress.chunkIndex)}/${docs.extractionProgress.chunkCount}`}
+                  ; nothing is saved until you confirm the draft.
                 </div>
               )}
               {doc.status === 'failed' && doc.message && (
@@ -171,10 +171,10 @@ export const DocumentLibrary: React.FC<DocumentLibraryProps> = ({ projectId, doc
 
       {/* MARKDOWN PREVIEW — full canonical content from the knowledge store */}
       {(isLoadingPreview || previewDoc) && (
-        <section className="bg-white border border-outline rounded-2xl p-5 shadow-sm">
+        <section className="bg-white border border-outline rounded-[10px] p-4">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h4 className="font-bold text-xs text-on-surface min-w-0 flex-1 break-words">
-              {previewDoc?.original_filename ?? 'Loading…'} · stored markdown (~{previewDoc?.token_count ?? '…'} tokens)
+              {previewDoc?.original_filename ?? 'Loading…'}, stored markdown (~{previewDoc?.token_count ?? '…'} tokens)
             </h4>
             <button
               onClick={() => setPreviewDoc(null)}

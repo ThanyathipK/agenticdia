@@ -140,7 +140,7 @@ _GENERIC_MIME_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
 #             traceable `failed` record (2.1.5) rather than aborting the upload.
 NEEDS_OCR_MESSAGE = (
     "This PDF contains no extractable text and appears to be a scanned document. "
-    "OCR is out of scope — please upload a text-based PDF or a markdown/plain-text "
+    "OCR is out of scope. Please upload a text-based PDF or a markdown/plain-text "
     "rendition instead."
 )
 # DOC-UPLOAD 3.4 — Extension + MIME validation (step 2.1.2). Extension decides the
@@ -826,7 +826,7 @@ async def process_document(
         raise HTTPException(
             status_code=400,
             detail=(
-                "This document was not processed successfully — extraction is "
+                "This document was not processed successfully. Extraction is "
                 "only available for successfully converted documents."
             ),
         )
@@ -930,6 +930,6 @@ async def process_document(
         "message": (
             f"Extraction draft ready ({run['mode']} mode, {run['chunk_count']} "
             f"chunk(s), {run['processed_tokens']} tokens processed). Nothing has "
-            "been written — review the merge preview and confirm to apply."
+            "been written. Review the merge preview and confirm to apply."
         ),
     }

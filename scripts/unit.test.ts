@@ -75,10 +75,10 @@ test('formatDate: renders YYYY-MM-DD with zero padding', () => {
   assert.equal(formatDate('2024-03-05T09:07:00'), '2024-03-05');
 });
 
-test('formatRelativeUpdated: em dash for missing or invalid input', () => {
-  assert.equal(formatRelativeUpdated(null), '—');
-  assert.equal(formatRelativeUpdated(undefined), '—');
-  assert.equal(formatRelativeUpdated('garbage', NOW), '—');
+test('formatRelativeUpdated: hyphen for missing or invalid input', () => {
+  assert.equal(formatRelativeUpdated(null), '-');
+  assert.equal(formatRelativeUpdated(undefined), '-');
+  assert.equal(formatRelativeUpdated('garbage', NOW), '-');
 });
 
 test('formatRelativeUpdated: "Just now" under a minute', () => {

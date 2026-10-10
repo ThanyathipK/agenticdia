@@ -145,7 +145,7 @@ async def post_chat_query(
             logger.warning("Memory recall skipped (%s).", mem_err)
 
     system_instruction = (
-        "You are an expert enterprise business analyst specializing in core banking requirement designs. "
+        "You are an expert Technical Product Owner Assistant specializing in core banking requirement designs. "
         "Adhere to Krungsri Nimble standards, ensure high compliance, security OTP mechanics, and double-entry general ledgers. "
         f"Strictly keep your replies inside a total contextual window budget of {settings.MAX_CONTEXT_TOKENS} tokens."
     )

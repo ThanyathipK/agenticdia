@@ -861,11 +861,5 @@ export interface AuthMessageResponse {
 /** Roles offered by the sign-up form (mirrors the roles documented in init.sql
  *  and enforced server-side by POST /api/auth/register). */
 export const AUTH_ROLES = [
-  'Business Analyst',
-  'System Analyst',
-  'Product Owner',
   'Technical Product Owner',
-  'Project Manager',
-  'Developer',
-  'QA',
 ] as const;

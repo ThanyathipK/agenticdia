@@ -25,7 +25,7 @@ export function ChatEmptyState({ disabled = false, disabledReason, onPick }: Cha
       </div>
       <h3 className="text-sm font-bold text-on-surface">Turn a brief into audited requirements</h3>
       <p className="text-xs text-on-surface-variant max-w-xs mt-1.5 leading-relaxed">
-        Describe a product idea, paste a messy brief, or attach a document — the agents will
+        Describe a product idea, paste a messy brief, or attach a document. The agents will
         structure it, run the compliance audit, and compile the PRD.
       </p>
 

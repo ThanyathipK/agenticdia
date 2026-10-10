@@ -35,9 +35,9 @@ export interface UseWorkspaceUiResult {
 }
 
 export function useWorkspaceUi(): UseWorkspaceUiResult {
-  const [splitPct, setSplitPct] = useState<number>(42);
+  const [splitPct, setSplitPct] = useState<number>(49);
   const [isDraggingSplit, setIsDraggingSplit] = useState<boolean>(false);
-  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(true);
   const splitContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

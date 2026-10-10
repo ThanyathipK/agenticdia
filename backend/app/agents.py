@@ -392,7 +392,7 @@ async def requirement_matcher_node(state: AgentState) -> Dict[str, Any]:
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="assistant",
-            message=f"⚠️ **Clarification Needed (Requirement Matcher):**\n{clarification_text}",
+            message=f"Clarification needed (requirement matcher):\n{clarification_text}",
             workflow_state="requirement_matcher_node",
             intent="CLARIFICATION"
         )
@@ -805,18 +805,18 @@ def _build_change_summary(merge_report: Dict[str, Any]) -> str:
         if action in buckets:
             buckets[action].append(str(key))
 
-    lines = ["📥 **Requirements Gathered & Updated!**"]
+    lines = ["Requirements gathered and updated."]
     if buckets["created"]:
         lines.append(
-            f"**Added** {len(buckets['created'])} new user story(ies): {', '.join(sorted(buckets['created']))}"
+            f"Added {len(buckets['created'])} new user story(ies): {', '.join(sorted(buckets['created']))}"
         )
     if buckets["updated"]:
         lines.append(
-            f"**Updated** {len(buckets['updated'])} user story(ies): {', '.join(sorted(buckets['updated']))}"
+            f"Updated {len(buckets['updated'])} user story(ies): {', '.join(sorted(buckets['updated']))}"
         )
     if buckets["archived"]:
         lines.append(
-            f"**Archived** {len(buckets['archived'])} user story(ies): {', '.join(sorted(buckets['archived']))}"
+            f"Archived {len(buckets['archived'])} user story(ies): {', '.join(sorted(buckets['archived']))}"
         )
     if buckets["conflict"]:
         lines.append(
@@ -824,7 +824,7 @@ def _build_change_summary(merge_report: Dict[str, Any]) -> str:
             f"{', '.join(sorted(buckets['conflict']))}"
         )
     if len(lines) == 1:
-        lines.append("No changes were needed — the existing requirements already cover your input.")
+        lines.append("No changes were needed. The existing requirements already cover your input.")
     return "\n".join(lines)
 
 
@@ -1124,7 +1124,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
             target = c.get("target_requirement_id") or "a new requirement"
             reason = str(c.get("reason", "")).strip() or "the request is ambiguous"
             q_text = (
-                f"I detected a possible change to **{target}** but my confidence is low "
+                f"I detected a possible change to {target}, but my confidence is low "
                 f"({confidence:.2f}): {reason} Please confirm the ticket code to change, "
                 "or tell me if this is a brand-new requirement."
             )
@@ -1153,7 +1153,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         # looked like a silent failure. A repeated (already-asked) question is
         # not re-posted, so the chat does not fill up with duplicates.
         if new_cqs:
-            clarify_msg = "⚠️ **Clarification Needed (Requirements):**\n" + "\n".join(f"- {q['question_text']}" for q in new_cqs)
+            clarify_msg = "Clarification needed (requirements):\n" + "\n".join(f"- {q['question_text']}" for q in new_cqs)
             await ConversationMessageRepository.save_message(
                 project_id=project_id,
                 role="assistant",
@@ -1621,7 +1621,7 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
         # LOCK ENFORCEMENT: If the matched story is locked, block the deletion entirely
         if matched_story_found and matched_story_locked:
             lock_msg = (
-                f"🔒 **Cannot Delete Locked Requirement!**\n"
+                f"Cannot delete locked requirement.\n"
                 f"Requirement `{matched_req_id}` is locked and cannot be deleted. "
                 f"Unlock it before deleting."
             )
@@ -1675,7 +1675,7 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
                 all_ac.extend(story.get("acceptance_criteria", []))
         req_state["acceptance_criteria"] = all_ac
         
-        delete_msg = f"🗑️ **Requirement Deleted!**\nSuccessfully archived requirement `{matched_req_id}` as requested."
+        delete_msg = f"Requirement deleted.\nSuccessfully archived requirement `{matched_req_id}` as requested."
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="assistant",
@@ -1715,7 +1715,7 @@ async def delete_requirement_node(state: AgentState) -> Dict[str, Any]:
         await ConversationMessageRepository.save_message(
             project_id=project_id,
             role="assistant",
-            message=f"⚠️ **Clarification Needed (Delete):**\n{clarification_text}",
+            message=f"Clarification needed (delete):\n{clarification_text}",
             workflow_state="delete_requirement_node",
             intent="CLARIFY_REQUIREMENT"
         )
@@ -2082,14 +2082,14 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
 
         verdict = result.get("verdict")
         if verdict == "pass":
-            auditor_msg = "✅ **Requirements Audit Passed.**\nAll clearly applicable mandatory controls are covered."
+            auditor_msg = "Requirements audit passed.\nAll clearly applicable mandatory controls are covered."
         elif verdict == "pass_with_warnings":
-            auditor_msg = "✅ **Requirements Audit Passed with warnings.**\nNo mandatory blocking gap was found; review the non-blocking recommendations."
+            auditor_msg = "Requirements audit passed with warnings.\nNo mandatory blocking gap was found; review the non-blocking recommendations."
         elif verdict == "needs_clarification":
             q_texts = "\n".join([f"• {q.get('question_text')}" for q in combined_questions if isinstance(q, dict)])
-            auditor_msg = f"❓ **Requirements Audit Needs Clarification.**\nNo unsupported assumption was treated as a failure.\n\n**Questions:**\n{q_texts or 'Please review the uncertain applicability.'}"
+            auditor_msg = f"Requirements audit needs clarification.\nNo unsupported assumption was treated as a failure.\n\nQuestions:\n{q_texts or 'Please review the uncertain applicability.'}"
         else:
-            auditor_msg = "⛔ **Requirements Audit Failed.**\nOne or more clearly applicable mandatory controls have substantiated blocking gaps."
+            auditor_msg = "Requirements audit failed.\nOne or more clearly applicable mandatory controls have substantiated blocking gaps."
 
         # AUDIT 2.4 — Auditor chat turn (conversation_messages, role="auditor",
         #             intent="AUDIT"): pass or the bulleted clarification list. The
@@ -2109,8 +2109,57 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             "audit_result": result
         }
     except Exception:
-        logger.exception("Auditor could not complete; no verdict will be staged")
-        raise RuntimeError("Audit could not complete. Please run Validate again.") from None
+        # A local model can time out or return malformed JSON even while the
+        # gateway itself remains healthy.  Do not turn that into an empty 503
+        # (or, worse, reuse an old passing verdict). Return a conservative,
+        # explicitly non-valid fallback that the normal response/UI path can
+        # render. This is NOT a compliance verdict: AUDIT_PARSE_ERROR tells the
+        # client that no model-backed audit completed and invites a retry.
+        logger.exception("Auditor could not complete; returning a safe retryable result")
+        result = {
+            "is_valid": False,
+            "verdict": "needs_clarification",
+            "project_context": req_state.get("audit_project_context", {}),
+            "audit_version_reviewed": current_version,
+            "passed_checks": [],
+            "failed_checks": ["AUDIT_PARSE_ERROR"],
+            "findings": [{
+                "rule_id": "ADHOC",
+                "finding_type": "audit_unavailable",
+                "severity": "medium",
+                "category": "Audit execution",
+                "target_requirement_id": None,
+                "description": "The local model did not return a usable audit within the configured time limit.",
+                "source_references": [],
+                "evidence_status": "insufficient",
+                "applicability": "unknown",
+                "impact": "warning",
+                "confidence": 1.0,
+                "rationale": "No compliance conclusion can be drawn from an incomplete model response.",
+                "recommendation": {
+                    "summary": "Retry Validate after confirming the local model is responsive.",
+                    "proposed_requirement_text": None,
+                    "proposed_acceptance_criteria": [],
+                    "expected_benefit": "Returns a complete evidence-based audit instead of an indeterminate result.",
+                },
+            }],
+            "source_references": [],
+            "clarification_questions": [],
+            "checklist_id": ACTIVE_AUDIT_CHECKLIST.checklist_id,
+            "checklist_version": ACTIVE_AUDIT_CHECKLIST.version,
+        }
+        req_state["validation_status"] = "invalid"
+        req_state["passed_checks"] = []
+        req_state["failed_checks"] = result["failed_checks"]
+        req_state["audit_findings"] = result["findings"]
+        req_state["audit_source_references"] = []
+        req_state["audit_verdict"] = result["verdict"]
+        req_state["current_workflow_state"] = "auditor_node"
+        return {
+            "requirement_state": req_state,
+            "audit_result": result,
+            "agent_message": "Requirements audit could not complete within the local model time limit. Please retry Validate.",
+        }
 
 # ARCHITECT 2.0 — Architect node (graph position: ROUTING 1.2 for
 #             target_agent="architect", ROUTING 4.1 for a COMMAND, or the on-demand
@@ -2457,7 +2506,7 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     # ARCHITECT 7.0 — Architect chat turn (conversation_messages, role="architect",
     #             intent="PRD_GENERATION"), and ARCHITECT 8.0 — the return contract
     #             consumed by the pipeline → ARCHITECT 1.5 (store + PRD tab switch).
-    architect_msg = "📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system sequence flows in the preview panel."
+    architect_msg = "Enterprise PRD compiled successfully.\nThe Technical Product Owner Assistant has generated the formal PRD and interactive system sequence flows in the preview panel."
     await ConversationMessageRepository.save_message(
         project_id=project_id,
         role="architect",

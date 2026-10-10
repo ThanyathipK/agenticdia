@@ -1,4 +1,4 @@
-"""Persistent background-job API for Architect and partial regeneration."""
+"""Persistent background-job API for long-running agents and regeneration."""
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 @router.post("/api/process-requirements/background", status_code=status.HTTP_202_ACCEPTED)
-async def start_architect_job(
+async def start_agent_job(
     payload: ProcessRequirementsRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -29,10 +29,12 @@ async def start_architect_job(
     from app.auth import verify_project_access
 
     await verify_project_access(str(payload.project_id), current_user, db)
-    if payload.target_agent != "architect":
-        raise HTTPException(status_code=400, detail="Only Architect runs support this background endpoint.")
+    if payload.target_agent not in {"architect", "auditor"}:
+        raise HTTPException(status_code=400, detail="Only Architect and Auditor runs support this background endpoint.")
     try:
-        job = await create_job(str(payload.project_id), current_user.id, "architect", payload.model_dump(), db)
+        job = await create_job(
+            str(payload.project_id), current_user.id, str(payload.target_agent), payload.model_dump(), db,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     await db.commit()

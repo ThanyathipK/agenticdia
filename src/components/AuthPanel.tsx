@@ -63,7 +63,7 @@ export function AuthPanel({
   if (collapsed) {
     return (
       <div className="p-2 border-t border-outline flex flex-col items-center gap-1.5">
-        <Tooltip label={`${user.full_name} · ${user.role}`} side="right">
+        <Tooltip label={`${user.full_name}, ${user.role}`} side="right">
           <div
             className="w-8 h-8 rounded-full bg-primary text-on-primary flex items-center justify-center text-[11px] font-bold shrink-0"
             aria-label={`Signed in as ${user.full_name}`}
@@ -104,7 +104,7 @@ export function AuthPanel({
           </div>
           <div className="flex items-center gap-1 text-[11px] text-on-surface-variant truncate">
             <ShieldCheck className="w-3 h-3 shrink-0 text-primary/70" />
-            <span className="truncate" title={`${user.role} · ${user.email}`}>{user.role}</span>
+            <span className="truncate" title={`${user.role}, ${user.email}`}>{user.role}</span>
           </div>
         </div>
         {/* AUTH 4.1 — Same sign-out trigger, expanded-sidebar rendering

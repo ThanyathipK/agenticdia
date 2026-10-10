@@ -80,11 +80,11 @@ async def _execute(job: GenerationJobModel, session) -> dict[str, Any]:
     user = await session.get(UserModel, job.requested_by_user_id)
     if user is None:
         raise RuntimeError("The user who requested this job no longer exists.")
-    if job.job_type == "architect":
+    if job.job_type in {"architect", "auditor"}:
         from app.routes.requirements import _process_requirements_pipeline
 
         request = ProcessRequirementsRequest.model_validate(job.request_payload)
-        request.target_agent = "architect"
+        request.target_agent = job.job_type
         current_user = AuthenticatedUser(
             id=str(user.id), email=user.email, full_name=user.full_name, role=user.role,
         )

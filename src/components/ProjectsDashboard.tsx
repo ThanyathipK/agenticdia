@@ -6,9 +6,8 @@
 // Tooltip) and reuses the shared project state so sidebar and dashboard never
 // disagree:
 //
-//   - KPI cards   -> All projects / PRDs generated / Pending in review / Approved
-//                    ("PRDs generated" probes each project's requirement state
-//                    once per visit and counts non-empty generated_prd bodies)
+//   - KPI cards   -> Total projects / Pending in review / Revised or rework /
+//                    Approved, all derived from the user-selected project status
 //   - Tab pills   -> All / In review with HPO / In review with PO / Draft /
 //                    Approved / Revised / ★ Flagged (dashboard-only marker —
 //                    independent of the sidebar pin)
@@ -25,10 +24,10 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  FileText,
   History,
   LayoutGrid,
   BookOpenCheck,
+  RotateCcw,
   Search,
   Star,
   X,
@@ -48,8 +47,8 @@ import { BankingKnowledgeModal } from './BankingKnowledgeModal';
 
 const STATUS_OPTIONS: ReadonlyArray<{ value: ProjectStatus; label: string }> = [
   { value: 'draft', label: 'Draft' },
-  { value: 'in_review_hpo', label: 'In review · HPO' },
-  { value: 'in_review_po', label: 'In review · PO' },
+  { value: 'in_review_hpo', label: 'In review: HPO' },
+  { value: 'in_review_po', label: 'In review: PO' },
   { value: 'approved', label: 'Approved' },
   { value: 'revised', label: 'Revised' },
 ];
@@ -70,14 +69,6 @@ const STATUS_BADGE: Record<ProjectStatus, string> = {
 /** Projects created before the status column default to 'draft' at the UI layer. */
 const normalizeStatus = (status: string | undefined): ProjectStatus =>
   (STATUS_OPTIONS.some((s) => s.value === status) ? (status as ProjectStatus) : 'draft');
-
-const NEXT_STATUS: Record<ProjectStatus, readonly ProjectStatus[]> = {
-  draft: ['in_review_hpo'],
-  in_review_hpo: ['draft', 'in_review_po'],
-  in_review_po: ['revised', 'approved'],
-  approved: ['revised'],
-  revised: ['in_review_hpo'],
-};
 
 // Tab pills: filter shortcuts over the same dimensions as the dropdowns.
 type TableTab = 'all' | ProjectStatus | 'flagged';
@@ -201,7 +192,7 @@ function PaginationControls({
   return (
     <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-5 py-3.5 border-t border-outline">
       <span className="text-[12.5px] text-on-surface-variant whitespace-nowrap">
-        Showing {from}–{to} of {totalRows} {totalRows === 1 ? 'project' : 'projects'}
+        Showing {from} to {to} of {totalRows} {totalRows === 1 ? 'project' : 'projects'}
       </span>
       <nav className="flex items-center gap-1" aria-label="Pagination">
         <button
@@ -271,59 +262,10 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
 
   // ---- Table filters (pure presentation state) -----------------------------
   const [query, setQuery] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<'all' | ProjectStatus>('all');
   const [sortKey, setSortKey] = useState<SortKey>('updated');
   const [activeTab, setDashboardTab] = useState<TableTab>('all');
 
-  // ---- "PRDs generated" KPI --------------------------------------------------
-  // The generated PRD body lives in each project's requirement state, so the
-  // dashboard probes every project once per visit (tiny JSON rows fetched in
-  // parallel) and counts the non-empty ones. Failures (e.g. a project whose
-  // state is not initialized yet) simply don't count — the KPI is informational.
-  const [prdGeneratedCount, setPrdGeneratedCount] = useState<number>(0);
-  const [prdCountLoaded, setPrdCountLoaded] = useState<boolean>(false);
-  const [healthByProject, setHealthByProject] = useState<Record<string, ProjectHealthPayload>>({});
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
-
-  // Stable dependency key: re-probe when the *set* of projects changes, not on
-  // every optimistic status/pin mutation that clones the projects array.
-  const projectIdsKey = useMemo(() => projects.map((p) => p.id).join('|'), [projects]);
-
-  useEffect(() => {
-    const ids = projectIdsKey ? projectIdsKey.split('|') : [];
-    if (ids.length === 0) {
-      setPrdGeneratedCount(0);
-      setPrdCountLoaded(true);
-      return;
-    }
-    let cancelled = false;
-    setPrdCountLoaded(false);
-    (async () => {
-      const states = await Promise.all(
-        // PROJECT 2.6 — Fan-out read: the "PRD generated" KPI issues one
-        // GET /api/project/{id} (PROJECT 2.2/2.3) per table row, tolerating
-        // individual failures so a single unreadable project cannot blank the KPI.
-        ids.map((id) => api.getProjectState(id).catch(() => null)),
-      );
-      if (cancelled) return;
-      setPrdGeneratedCount(states.filter((s) => !!s && !!s.generated_prd?.trim()).length);
-      setPrdCountLoaded(true);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projectIdsKey]);
-
-  useEffect(() => {
-    const ids = projectIdsKey ? projectIdsKey.split('|') : [];
-    let cancelled = false;
-    void Promise.all(ids.map(async (id) => [id, await api.getProjectHealth(id).catch(() => null)] as const))
-      .then((entries) => {
-        if (cancelled) return;
-        setHealthByProject(Object.fromEntries(entries.filter((entry): entry is readonly [string, ProjectHealthPayload] => entry[1] !== null)));
-      });
-    return () => { cancelled = true; };
-  }, [projectIdsKey]);
 
   // ---- KPI cards -------------------------------------------------------------
   const kpis = useMemo(() => {
@@ -331,21 +273,21 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
       const s = normalizeStatus(p.status);
       return s === 'in_review_hpo' || s === 'in_review_po';
     }).length;
+    const revised = projects.filter((p) => normalizeStatus(p.status) === 'revised').length;
     const approved = projects.filter((p) => normalizeStatus(p.status) === 'approved').length;
     return [
-      { icon: LayoutGrid, value: String(projects.length), label: 'All projects' },
-      { icon: FileText, value: prdCountLoaded ? String(prdGeneratedCount) : '…', label: 'PRDs generated' },
-      { icon: AlertTriangle, value: String(inReview), label: 'Pending in review' },
-      { icon: CheckCircle2, value: String(approved), label: 'Approved' },
+      { icon: LayoutGrid, value: String(projects.length), label: 'Total Projects', iconClass: 'bg-blue-50 text-blue-600' },
+      { icon: AlertTriangle, value: String(inReview), label: 'Pending in Review', iconClass: 'bg-amber-50 text-amber-600' },
+      { icon: RotateCcw, value: String(revised), label: 'Revised / Rework', iconClass: 'bg-orange-50 text-orange-600' },
+      { icon: CheckCircle2, value: String(approved), label: 'Approved', iconClass: 'bg-emerald-50 text-emerald-600' },
     ];
-  }, [projects, prdGeneratedCount, prdCountLoaded]);
+  }, [projects]);
 
   // ---- Filter + sort pipeline -------------------------------------------------
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = projects.filter((p) => {
       if (q && !p.name.toLowerCase().includes(q) && !(p.description ?? '').toLowerCase().includes(q)) return false;
-      if (statusFilter !== 'all' && normalizeStatus(p.status) !== statusFilter) return false;
       if (activeTab === 'flagged' && !p.is_flagged) return false;
       if (activeTab !== 'all' && activeTab !== 'flagged' && normalizeStatus(p.status) !== activeTab) return false;
       return true;
@@ -356,7 +298,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
       const tb = new Date(b.updated_at ?? 0).getTime();
       return tb - ta;
     });
-  }, [projects, query, statusFilter, activeTab, sortKey]);
+  }, [projects, query, activeTab, sortKey]);
 
   // ---- Pagination (10 per page) ---------------------------------------------
   // `safePage` clamps the raw page state to the last valid page so the slice is
@@ -372,7 +314,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
 
   useEffect(() => {
     setPage(0);
-  }, [query, statusFilter, activeTab, sortKey]);
+  }, [query, activeTab, sortKey]);
 
   useEffect(() => {
     setPage((cur) => Math.min(cur, totalPages - 1));
@@ -394,14 +336,6 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
   const [historyProject, setHistoryProject] = useState<{ id: string; name: string } | null>(null);
   const [reviewHistory, setReviewHistory] = useState<ProjectReviewEventPayload[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [transitionRequest, setTransitionRequest] = useState<{
-    projectId: string;
-    projectName: string;
-    from: ProjectStatus;
-    to: ProjectStatus;
-  } | null>(null);
-  const [transitionComment, setTransitionComment] = useState('');
-  const [transitionWorking, setTransitionWorking] = useState(false);
   const [healthProject, setHealthProject] = useState<{ id: string; name: string } | null>(null);
   const [healthDetail, setHealthDetail] = useState<ProjectHealthPayload | null>(null);
   const [auditHistory, setAuditHistory] = useState<AuditRunPayload[]>([]);
@@ -460,8 +394,8 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
   return (
     <section className="flex-1 min-w-0 min-h-0 flex flex-col bg-background overflow-hidden">
       <div className="flex-1 overflow-y-auto custom-scrollbar">
-        <div id="projects-dashboard-content" className="w-full max-w-5xl mx-auto px-4 sm:px-6 md:px-10 py-7">
-          <h1 className="text-[24px] font-bold text-on-surface mb-6">Dashboard</h1>
+        <div id="projects-dashboard-content" className="w-full max-w-6xl mx-auto px-4 sm:px-6 md:px-10 py-8">
+          <h1 className="text-[24px] font-bold text-on-surface mb-7">Dashboard</h1>
 
           {/* TOP SEARCH AND FILTERS */}
           <div className="flex flex-wrap items-center gap-3 mb-6">
@@ -488,12 +422,6 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                 </button>
               )}
             </div>
-            <Dropdown<'all' | ProjectStatus>
-              ariaLabel="Filter by status"
-              value={statusFilter}
-              onChange={setStatusFilter}
-              options={[{ value: 'all' as const, label: 'All statuses' }, ...STATUS_OPTIONS]}
-            />
             <Dropdown<SortKey>
               ariaLabel="Sort projects"
               value={sortKey}
@@ -513,13 +441,13 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
           </div>
 
           {/* KPI METRICS GRID */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-8">
-            {kpis.map(({ icon: Icon, value, label }) => (
+          <div className="flex flex-wrap sm:flex-nowrap items-stretch gap-3 sm:gap-4 mb-9">
+            {kpis.map(({ icon: Icon, value, label, iconClass }) => (
               <div
                 key={label}
-                className="bg-surface border border-outline rounded-xl p-4 sm:p-5 flex flex-col items-start min-w-0"
+                className="basis-[calc(50%_-_0.375rem)] sm:basis-0 sm:flex-1 min-w-0 bg-surface border border-outline rounded-[12px] p-4 sm:p-5 flex flex-col items-start"
               >
-                <div className="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center mb-3 sm:mb-4">
+                <div className={`w-9 h-9 rounded-lg flex items-center justify-center mb-3 sm:mb-4 ${iconClass}`}>
                   <Icon className="w-4.5 h-4.5" />
                 </div>
                 <div className="text-[24px] sm:text-[28px] font-bold leading-tight text-on-surface">{value}</div>
@@ -529,7 +457,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
           </div>
 
           {/* PROJECTS TABLE CONTAINER */}
-          <div className="bg-surface border border-outline rounded-xl overflow-hidden">
+          <div className="bg-surface border border-outline rounded-[12px] overflow-hidden">
             {/* HEADER TABS */}
             <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-outline">
               <span className="text-[15px] font-bold text-on-surface mr-2">Projects</span>
@@ -565,7 +493,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                       <span className="inline-flex items-center gap-1">Project <ArrowUpDown className="w-3 h-3" /></span>
                     </th>
                     <th className="px-5 py-3 text-[12px] font-semibold text-on-surface-variant border-b border-outline">
-                      <span className="inline-flex items-center gap-1">Status (User editable) <ArrowUpDown className="w-3 h-3" /></span>
+                      <span className="inline-flex items-center gap-1">Status <ArrowUpDown className="w-3 h-3" /></span>
                     </th>
                     <th className="px-5 py-3 text-[12px] font-semibold text-on-surface-variant border-b border-outline">
                       <span className="inline-flex items-center gap-1">Updated <ArrowUpDown className="w-3 h-3" /></span>
@@ -597,19 +525,6 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                           <span className="font-bold text-[14px] text-on-surface block truncate" title={p.name}>
                             {p.name}
                           </span>
-                          {healthByProject[p.id] && (
-                            <button
-                              type="button"
-                              onClick={() => void openHealth(p.id, p.name)}
-                              className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
-                                healthByProject[p.id].status === 'blocked' ? 'bg-red-50 text-red-700' :
-                                healthByProject[p.id].status === 'attention_required' ? 'bg-amber-50 text-amber-700' :
-                                'bg-emerald-50 text-emerald-700'
-                              }`}
-                            >
-                              {healthByProject[p.id].status.replaceAll('_', ' ')} · {healthByProject[p.id].coverage_breakdown.requirement_traceability_percent}% fully traced
-                            </button>
-                          )}
                         </td>
                         <td className="px-5 py-4 border-b border-outline">
                           <div className="relative" data-status-menu>
@@ -625,27 +540,28 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                             </button>
                             {statusMenuFor === p.id && (
                               <div className="absolute left-0 top-full mt-1.5 z-30 min-w-[180px] bg-surface border border-outline rounded-xl shadow-lg py-1">
-                                {STATUS_OPTIONS.filter((o) => NEXT_STATUS[status].includes(o.value)).map((o) => (
+                                {STATUS_OPTIONS.map((o) => {
+                                  const isCurrent = o.value === status;
+                                  return (
                                   <button
                                     key={o.value}
                                     type="button"
+                                    disabled={isCurrent}
                                     onClick={() => {
                                       setStatusMenuFor(null);
-                                      if (o.value !== status) {
-                                        setTransitionComment('');
-                                        setTransitionRequest({ projectId: p.id, projectName: p.name, from: status, to: o.value });
-                                      }
+                                      if (!isCurrent) void handleUpdateProjectStatus(p.id, o.value);
                                     }}
                                     className={`w-full text-left px-3.5 py-2 text-[13px] transition-colors flex items-center justify-between gap-3 ${
-                                      o.value === status
+                                      isCurrent
                                         ? 'text-primary font-semibold bg-primary/5'
                                         : 'text-on-surface hover:bg-black/5'
                                     }`}
                                   >
                                     <span>{o.label}</span>
-                                    {o.value === status && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                    {isCurrent && <Check className="w-3.5 h-3.5 shrink-0" />}
                                   </button>
-                                ))}
+                                  );
+                                })}
                                 <button
                                   type="button"
                                   onClick={() => void openReviewHistory(p.id, p.name)}
@@ -704,19 +620,6 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                           <span className="text-[12px] text-on-surface-variant">
                             {formatRelativeUpdated(p.updated_at)}
                           </span>
-                          {healthByProject[p.id] && (
-                            <button
-                              type="button"
-                              onClick={() => void openHealth(p.id, p.name)}
-                              className={`mt-1 block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
-                                healthByProject[p.id].status === 'blocked' ? 'bg-red-50 text-red-700' :
-                                healthByProject[p.id].status === 'attention_required' ? 'bg-amber-50 text-amber-700' :
-                                'bg-emerald-50 text-emerald-700'
-                              }`}
-                            >
-                              {healthByProject[p.id].status.replaceAll('_', ' ')} · {healthByProject[p.id].coverage_breakdown.requirement_traceability_percent}% fully traced
-                            </button>
-                          )}
                         </div>
                       </div>
                       <button
@@ -741,27 +644,28 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                       </button>
                       {statusMenuFor === p.id && (
                         <div className="absolute left-0 top-full mt-1.5 z-30 min-w-[180px] bg-surface border border-outline rounded-xl shadow-lg py-1">
-                          {STATUS_OPTIONS.filter((o) => NEXT_STATUS[status].includes(o.value)).map((o) => (
+                          {STATUS_OPTIONS.map((o) => {
+                            const isCurrent = o.value === status;
+                            return (
                             <button
                               key={o.value}
                               type="button"
+                              disabled={isCurrent}
                               onClick={() => {
                                 setStatusMenuFor(null);
-                                if (o.value !== status) {
-                                  setTransitionComment('');
-                                  setTransitionRequest({ projectId: p.id, projectName: p.name, from: status, to: o.value });
-                                }
+                                if (!isCurrent) void handleUpdateProjectStatus(p.id, o.value);
                               }}
                               className={`w-full text-left px-3.5 py-2 text-[13px] transition-colors flex items-center justify-between gap-3 ${
-                                o.value === status
+                                isCurrent
                                   ? 'text-primary font-semibold bg-primary/5'
                                   : 'text-on-surface hover:bg-black/5'
                               }`}
                             >
                               <span>{o.label}</span>
-                              {o.value === status && <Check className="w-3.5 h-3.5 shrink-0" />}
+                              {isCurrent && <Check className="w-3.5 h-3.5 shrink-0" />}
                             </button>
-                          ))}
+                            );
+                          })}
                           <button
                             type="button"
                             onClick={() => void openReviewHistory(p.id, p.name)}
@@ -780,7 +684,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
             {visibleRows.length === 0 && (
               <div className="px-5 py-12 text-center text-[13px] text-on-surface-variant">
                 {projects.length === 0
-                  ? 'No projects yet — create one from the sidebar to see it here.'
+                  ? 'No projects yet. Create one from the sidebar to see it here.'
                   : 'No projects match the current filters.'}
               </div>
             )}
@@ -813,66 +717,20 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                 <div key={event.id} className="rounded-xl border border-outline p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-sm font-semibold text-on-surface">
-                      {STATUS_LABEL[event.from_status]} → {STATUS_LABEL[event.to_status]}
+                      {STATUS_LABEL[event.from_status]} to {STATUS_LABEL[event.to_status]}
                     </span>
                     <span className="text-[11px] text-on-surface-variant">
                       {event.created_at ? new Date(event.created_at).toLocaleString() : ''}
                     </span>
                   </div>
                   <p className="mt-1 text-xs text-on-surface-variant">
-                    {event.actor_name} · {event.actor_role}
-                    {event.prd_version_number ? ` · PRD v${event.prd_version_number}` : ''}
-                    {event.audit_version_reviewed ? ` · Audit v${event.audit_version_reviewed}` : ''}
+                    {event.actor_name}, {event.actor_role}
+                    {event.prd_version_number ? `, PRD v${event.prd_version_number}` : ''}
+                    {event.audit_version_reviewed ? `, Audit v${event.audit_version_reviewed}` : ''}
                   </p>
                   {event.comment && <p className="mt-2 text-sm text-on-surface">{event.comment}</p>}
                 </div>
               ))}
-            </div>
-          </div>
-        </div>
-      )}
-      {transitionRequest && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-2xl border border-outline bg-surface p-5 shadow-xl">
-            <h2 className="font-bold text-on-surface">Confirm review transition</h2>
-            <p className="mt-1 text-sm text-on-surface-variant">
-              {transitionRequest.projectName}: {STATUS_LABEL[transitionRequest.from]} → {STATUS_LABEL[transitionRequest.to]}
-            </p>
-            <label className="mt-4 block text-xs font-semibold text-on-surface" htmlFor="review-transition-comment">
-              {transitionRequest.to === 'draft' || transitionRequest.to === 'revised'
-                ? 'Reason for requested changes'
-                : 'Review comment (optional)'}
-            </label>
-            <textarea
-              id="review-transition-comment"
-              value={transitionComment}
-              onChange={(event) => setTransitionComment(event.target.value)}
-              rows={4}
-              maxLength={2000}
-              className="mt-2 w-full resize-y rounded-xl border border-outline bg-background p-3 text-sm text-on-surface outline-none focus:border-primary"
-              placeholder="Record the decision context for the review history."
-            />
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" disabled={transitionWorking} onClick={() => setTransitionRequest(null)} className="rounded-xl px-3 py-2 text-xs font-semibold text-on-surface-variant hover:bg-black/5 disabled:opacity-50">
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={transitionWorking || ((transitionRequest.to === 'draft' || transitionRequest.to === 'revised') && !transitionComment.trim())}
-                onClick={async () => {
-                  setTransitionWorking(true);
-                  const ok = await handleUpdateProjectStatus(
-                    transitionRequest.projectId,
-                    transitionRequest.to,
-                    transitionComment.trim() || undefined,
-                  );
-                  setTransitionWorking(false);
-                  if (ok) setTransitionRequest(null);
-                }}
-                className="rounded-xl bg-primary px-4 py-2 text-xs font-bold text-on-primary disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {transitionWorking ? 'Saving…' : 'Confirm transition'}
-              </button>
             </div>
           </div>
         </div>
@@ -932,16 +790,16 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                     {auditHistory.length === 0 ? <p className="mt-2 text-sm text-on-surface-variant">No confirmed audit run yet.</p> : auditHistory.slice(0, 5).map((run) => (
                       <div key={run.id} className="mt-2 rounded-xl border border-outline p-3">
                         <div className="flex flex-wrap justify-between gap-2 text-xs">
-                          <span className="font-bold text-on-surface">Audit v{run.audit_version_reviewed} · {run.verdict}</span>
+                          <span className="font-bold text-on-surface">Audit v{run.audit_version_reviewed}: {run.verdict}</span>
                           <span className="text-on-surface-variant">{run.created_at ? new Date(run.created_at).toLocaleString() : ''}</span>
                         </div>
                         <p className="mt-1 text-[11px] text-on-surface-variant">
-                          {run.comparison.new.length} new · {run.comparison.reopened.length} reopened · {run.comparison.resolved.length} resolved
+                          {run.comparison.new.length} new, {run.comparison.reopened.length} reopened, {run.comparison.resolved.length} resolved
                         </p>
                         {run.findings.map((finding) => (
                           <div key={finding.finding_key} className="mt-2 border-t border-outline pt-2 text-xs">
                             <div className="flex items-start justify-between gap-3">
-                              <p><span className="font-bold uppercase">{finding.lifecycle}</span> · {finding.rule_id} · {finding.description}</p>
+                              <p><span className="font-bold uppercase">{finding.lifecycle}</span>, {finding.rule_id}: {finding.description}</p>
                               {!finding.waiver && (
                                 <button type="button" onClick={() => { setWaiverFinding(finding); setWaiverReason(''); setWaiverControl(''); }} className="shrink-0 text-primary font-semibold">Waive</button>
                               )}
@@ -956,7 +814,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
                   {waivers.length > 0 && (
                     <div>
                       <h3 className="text-sm font-bold text-on-surface">Waivers</h3>
-                      {waivers.map((waiver) => <p key={waiver.id} className="mt-1 text-xs text-on-surface-variant">{waiver.rule_id} · {waiver.status} · {waiver.owner}</p>)}
+                      {waivers.map((waiver) => <p key={waiver.id} className="mt-1 text-xs text-on-surface-variant">{waiver.rule_id}, {waiver.status}, {waiver.owner}</p>)}
                     </div>
                   )}
                 </div>
@@ -969,7 +827,7 @@ export function ProjectsDashboard({ state }: { state: ProjectState }) {
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-2xl bg-surface p-5 shadow-xl">
             <h2 className="font-bold text-on-surface">Create finding waiver</h2>
-            <p className="mt-1 text-xs text-on-surface-variant">{waiverFinding.rule_id} · {waiverFinding.target_requirement_id || 'Project level'}</p>
+            <p className="mt-1 text-xs text-on-surface-variant">{waiverFinding.rule_id}: {waiverFinding.target_requirement_id || 'Project level'}</p>
             <input value={waiverOwner} onChange={(e) => setWaiverOwner(e.target.value)} placeholder="Waiver owner" className="mt-4 w-full rounded-xl border border-outline p-3 text-sm" />
             <textarea value={waiverReason} onChange={(e) => setWaiverReason(e.target.value)} placeholder="Business reason" rows={3} className="mt-2 w-full rounded-xl border border-outline p-3 text-sm" />
             <textarea value={waiverControl} onChange={(e) => setWaiverControl(e.target.value)} placeholder="Compensating control (optional)" rows={2} className="mt-2 w-full rounded-xl border border-outline p-3 text-sm" />

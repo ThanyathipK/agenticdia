@@ -28,7 +28,6 @@ import {
   CheckCircle2,
   LayoutGrid,
   Lock,
-  Unlock,
   Pin,
   PinOff,
   Menu,
@@ -59,7 +58,7 @@ import { highlightMatch } from '../utils/highlight';
 const TAB_ITEMS: ReadonlyArray<{ id: WorkspaceTab; label: string; icon: typeof FileText }> = [
   { id: 'prd', label: 'PRD Documents', icon: FileText },
   { id: 'trace', label: 'Requirements', icon: GitBranch },
-  { id: 'flows', label: 'Diagram', icon: Network },
+  { id: 'flows', label: 'Flows', icon: Network },
   { id: 'history', label: 'Versions', icon: Clock },
 ];
 
@@ -145,12 +144,7 @@ export default function Dashboard() {
   // drawer via a hamburger button in the top-left, so it never eats horizontal
   // space on small screens.
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
-  // Tablet/mobile tab selector (<lg): the horizontal pill is replaced by a compact
-  // active-tab dropdown. Selection still routes through the usual setActiveTab
-  // handler; this state only owns the dropdown's open/close + outside-click/Escape
-  // dismissal (same pattern as the dashboard's dropdowns).
-  const [mobileTabsOpen, setMobileTabsOpen] = useState<boolean>(false);
-  const mobileTabsRef = useRef<HTMLDivElement>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState<boolean>(false);
   const collapsed = historyCollapsed && !mobileSidebarOpen;
   const expanded = !collapsed;
 
@@ -165,29 +159,21 @@ export default function Dashboard() {
       ? lockableRequirements
       : structuredRequirements.requirements ?? [];
 
-  // Story counts per requirement (only the in-memory groups carry stories).
-  const storiesByRequirement: Record<string, number> = {};
-  for (const req of structuredRequirements.requirements ?? []) {
-    storiesByRequirement[req.requirement_code] = req.user_stories?.length ?? 0;
-  }
-
   useEffect(() => {
     if (isSearchOpen) {
       searchInputRef.current?.focus();
     }
   }, [isSearchOpen]);
 
-  // Close the tablet/mobile tab dropdown on outside click or Escape so it never
-  // lingers over the document (matches the dashboard dropdown dismissal pattern).
   useEffect(() => {
-    if (!mobileTabsOpen) return;
+    if (!exportMenuOpen) return;
     const handlePointer = (e: MouseEvent) => {
-      if (mobileTabsRef.current && !mobileTabsRef.current.contains(e.target as Node)) {
-        setMobileTabsOpen(false);
-      }
+      const target = e.target;
+      if (target instanceof Element && target.closest('[data-export-menu]')) return;
+      setExportMenuOpen(false);
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMobileTabsOpen(false);
+      if (e.key === 'Escape') setExportMenuOpen(false);
     };
     document.addEventListener('mousedown', handlePointer);
     document.addEventListener('keydown', handleKey);
@@ -195,7 +181,7 @@ export default function Dashboard() {
       document.removeEventListener('mousedown', handlePointer);
       document.removeEventListener('keydown', handleKey);
     };
-  }, [mobileTabsOpen]);
+  }, [exportMenuOpen]);
 
   const handleToggleProjectSearch = () => {
     // Search is a per-user, server-scoped query — meaningless (and 401) before
@@ -218,35 +204,41 @@ export default function Dashboard() {
   // separated sections ("Pinned" vs "Recent Projects") instead of one blend.
   const visibleProjects = [...projects].sort((a, b) => Number(!!b.is_pinned) - Number(!!a.is_pinned));
 
-  // Current tab metadata, reused by the tablet/mobile dropdown trigger.
-  const currentTab = TAB_ITEMS.find((t) => t.id === activeTab) ?? TAB_ITEMS[0];
-
-  // DOCX/PDF export buttons — shared by the desktop pill and the tablet/mobile
-  // bar so both stay identical (same handlers, same style; only sizing varies).
-  const exportButtons = (btnCls: string) => (
-    <>
-      <Tooltip label="Export Word (DOCX)" side="bottom">
-        <button
-          onClick={handleDownloadDocx}
-          aria-label="Export Word (DOCX)"
-          className={btnCls}
-        >
-          <Download className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span>DOCX</span>
-        </button>
-      </Tooltip>
-
-      <Tooltip label="Export PDF" side="bottom">
-        <button
-          onClick={handlePrintPDF}
-          aria-label="Export PDF"
-          className={btnCls}
-        >
-          <Printer className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span>PDF</span>
-        </button>
-      </Tooltip>
-    </>
+  const exportMenu = () => (
+    <div data-export-menu className="relative shrink-0 no-print">
+      <button
+        type="button"
+        onClick={() => setExportMenuOpen((open) => !open)}
+        aria-label="Export document"
+        aria-haspopup="menu"
+        aria-expanded={exportMenuOpen}
+        className="workspace-export-button h-[38px] px-2.5 rounded-[8px] bg-white border border-export-border hover:bg-export-hover text-xs font-semibold text-export-text transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+      >
+        <Download className="w-3.5 h-3.5 shrink-0" />
+        <span className="workspace-export-label">Export</span>
+        <ChevronDown className={`workspace-export-chevron w-3 h-3 shrink-0 transition-transform ${exportMenuOpen ? 'rotate-180' : ''}`} />
+      </button>
+      {exportMenuOpen && (
+        <div role="menu" className="absolute right-0 top-full mt-1.5 z-50 w-40 rounded-[10px] border border-outline bg-white p-1 shadow-xl">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { setExportMenuOpen(false); handleDownloadDocx(); }}
+            className="w-full rounded-[7px] px-3 py-2 text-left text-xs font-semibold text-on-surface hover:bg-tab-hover flex items-center gap-2"
+          >
+            <Download className="w-3.5 h-3.5 text-primary" /> DOCX
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { setExportMenuOpen(false); handlePrintPDF(); }}
+            className="w-full rounded-[7px] px-3 py-2 text-left text-xs font-semibold text-on-surface hover:bg-tab-hover flex items-center gap-2"
+          >
+            <Printer className="w-3.5 h-3.5 text-primary" /> PDF
+          </button>
+        </div>
+      )}
+    </div>
   );
 
   return (
@@ -260,16 +252,16 @@ export default function Dashboard() {
       {/* PROJECT HISTORY SIDEBAR */}
       <aside
         id="project-sidebar"
-        className={`${mobileSidebarOpen ? 'mobile-open' : ''} hidden lg:flex lg:flex-col lg:bg-background lg:border-r lg:border-outline lg:shrink-0 lg:transition-[width] lg:duration-200 lg:ease-out ${historyCollapsed ? 'lg:w-[68px]' : 'lg:w-[248px]'}`}
+        className={`${mobileSidebarOpen ? 'mobile-open' : ''} hidden lg:flex lg:flex-col lg:bg-white lg:border-r lg:border-outline lg:shrink-0 lg:transition-[width] lg:duration-200 lg:ease-out ${historyCollapsed ? 'lg:w-[52px]' : 'lg:w-[280px]'}`}
       >
-        <div className="p-3 flex items-center justify-between">
+        <div className={`py-4 flex items-center ${collapsed ? 'justify-center px-2' : 'justify-between px-5'} border-b border-outline`}>
           <div className={`flex items-center gap-2 overflow-hidden ${collapsed ? 'w-0 opacity-0' : 'opacity-100'}`}>
             <div className="w-6.5 h-6.5 rounded-lg bg-primary flex items-center justify-center text-on-primary text-[10px] font-bold shrink-0">Ai</div>
             <span className="text-[13px] font-bold text-on-surface whitespace-nowrap">Agentic-AI</span>
           </div>
           <Tooltip label={expanded ? 'Hide sidebar' : 'Show sidebar'} side="right">
             <button
-              className="w-8 h-8 rounded-xl border border-outline bg-surface flex items-center justify-center text-on-surface-variant hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-variant hover:bg-[#f6f1ea] hover:text-primary transition-colors shrink-0"
               onClick={() => setHistoryCollapsed((v: boolean) => !v)}
               aria-label={expanded ? 'Hide sidebar' : 'Show sidebar'}
             >
@@ -278,7 +270,7 @@ export default function Dashboard() {
           </Tooltip>
         </div>
 
-        <div className="px-2">
+        <div className="px-1.5 pt-2">
           {/* AUTH 1.6 — Signed-out visitors are pushed into the LOGIN entry
               point (AUTH 1.1) instead of the create-project modal; project
               creation itself is authorized server-side in AUTH 7.4. */}
@@ -638,7 +630,7 @@ export default function Dashboard() {
           The sidebar itself is re-positioned as an overlay by #project-sidebar.mobile-open. */}
       <button
         type="button"
-        className={`group/tt fixed ${mobileSidebarOpen ? 'left-[292px]' : 'left-3'} top-[76px] z-30 w-9 h-9 rounded-xl bg-white border border-outline shadow-md flex items-center justify-center text-on-surface hover:bg-primary/10 hover:text-primary transition-colors lg:hidden`}
+        className={`group/tt fixed ${mobileSidebarOpen ? 'left-[292px]' : 'left-3'} top-3 z-30 w-9 h-9 rounded-lg bg-white border border-outline shadow-sm flex items-center justify-center text-on-surface hover:bg-primary/10 hover:text-primary transition-colors lg:hidden`}
         onClick={() => setMobileSidebarOpen((v) => !v)}
         aria-label={mobileSidebarOpen ? 'Close project sidebar' : 'Open project sidebar'}
       >
@@ -663,7 +655,7 @@ export default function Dashboard() {
         // open (PROJECT 2.1) all write through the hooks documented above.
         <ProjectsDashboard state={state} />
       ) : (
-      <div id="split-container" className="flex-1 flex flex-col lg:flex-row overflow-hidden" ref={splitContainerRef}>
+      <div id="split-container" className="flex-1 min-w-0 min-h-0 flex flex-col md:flex-row overflow-hidden bg-white" ref={splitContainerRef}>
         
         {/* LEFT PANEL: Conversational Timeline & Human-In-The-Loop */}
         <ChatPanel state={state} />
@@ -675,98 +667,39 @@ export default function Dashboard() {
         />
 
         {/* RIGHT PANEL: Live Workspace Previews (Tabbed System) */}
-        <section className="flex-1 min-w-0 min-h-0 flex flex-col bg-background relative overflow-hidden">
+        <section className="flex-[1_1_0%] min-w-0 min-h-0 flex flex-col bg-background relative overflow-hidden">
           {/* Tabs bar — warm pill navigation (PRD Documents / Requirements / Flows /
               Versions) modeled on the PRD nav reference; each tab is wired to its
               live workspace panel, and the DOCX/PDF exports sit at the pill's right
               edge (inside it) like the reference's Export button. */}
-          <div className="min-h-13 bg-glass-bg border-b border-outline shrink-0 select-none">
-            {/* DESKTOP (lg+): the existing horizontal pill navigation — unchanged. */}
-            <div className="hidden lg:flex flex flex-col sm:flex-row items-stretch sm:items-center gap-1 px-3 sm:px-4 md:px-6 overflow-x-auto custom-scrollbar">
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1 p-1 sm:h-[53px] bg-tab-pill border border-tab-pill-border rounded-[10px]">
-              {TAB_ITEMS.map((tab) => (
-                <Tooltip key={tab.id} label={tab.label} side="bottom">
-                  <button
-                    onClick={() => setActiveTab(tab.id)}
-                    aria-label={`${tab.label} tab`}
-                    className={`w-full sm:w-auto h-[43px] px-2.5 sm:px-3.5 rounded-lg font-label-md text-xs font-semibold whitespace-nowrap transition-colors duration-200 flex items-center justify-start gap-1.5 ${
-                      activeTab === tab.id
-                        ? 'bg-tab-active text-white shadow-sm'
-                        : 'text-tab-text hover:bg-tab-hover'
-                    }`}
-                  >
-                    <tab.icon className="w-3.5 h-3.5 shrink-0" />
-                    <span>{tab.label}</span>
-                  </button>
-                </Tooltip>
-              ))}
-
-              {/* Export actions — kept inside the pill, pushed to the far right like
-                  the reference's Export button. Both compile server-side (LaTeX
-                  service), so these only trigger the existing handlers. */}
-              <div className="flex items-center gap-1 sm:ml-auto shrink-0 no-print">
-                {exportButtons('w-full sm:w-auto h-[39px] px-2.5 sm:px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap')}
-              </div>
-              </div>
-            </div>
-
-            {/* TABLET/MOBILE (<lg): compact dropdown selector showing the active tab.
-                The menu is absolutely anchored left/right against this relative bar so
-                it spans the content width and can never overflow the viewport. The same
-                setActiveTab handler drives it, so active state + navigation are unchanged. */}
-            <div ref={mobileTabsRef} className="lg:hidden relative flex items-center gap-1.5 px-3 sm:px-4 md:px-6">
-              <div className="flex-1 min-w-0">
-                <button
-                  type="button"
-                  onClick={() => setMobileTabsOpen((v) => !v)}
-                  aria-label={`Tab selector (currently ${currentTab.label})`}
-                  aria-haspopup="menu"
-                  aria-expanded={mobileTabsOpen}
-                  className={`w-full h-[43px] rounded-[10px] font-label-md text-xs font-semibold transition-colors duration-200 flex items-center justify-between gap-2 px-2.5 bg-tab-active text-white shadow-sm ${
-                    mobileTabsOpen ? 'ring-2 ring-primary/30' : ''
-                  }`}
-                >
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <currentTab.icon className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">{currentTab.label}</span>
-                  </span>
-                  <ChevronDown className={`w-4 h-4 shrink-0 text-white transition-transform duration-200 ${mobileTabsOpen ? 'rotate-180' : ''}`} />
-                </button>
-              </div>
-
-              <div className="flex items-center gap-1.5 shrink-0 no-print">
-                {exportButtons('h-[39px] px-2.5 sm:px-3.5 rounded-lg bg-white border border-export-border hover:bg-export-hover font-label-md text-xs font-semibold text-export-text transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0')}
-              </div>
-
-              {mobileTabsOpen && (
-                <div role="menu" aria-label="Available tabs" className="absolute left-0 right-0 top-full mt-1 z-50 rounded-[10px] bg-surface border border-tab-pill-border shadow-xl py-1">
-                  {TAB_ITEMS.map((tab) => (
+          <div className="h-[50px] bg-white border-b border-outline shrink-0 select-none flex items-center">
+            <div className="workspace-toolbar flex flex-1 min-w-0 items-center gap-1.5 px-2 sm:px-3">
+              <nav aria-label="Workspace views" className="flex flex-[1_1_0%] min-w-0 items-center gap-0.5 p-[3px] h-[38px] bg-tab-pill border border-tab-pill-border rounded-[8px] overflow-hidden">
+                {TAB_ITEMS.map((tab) => (
+                  <Tooltip key={tab.id} label={tab.label} side="bottom" className="flex-[1_1_0%] min-w-0 h-full">
                     <button
-                      key={tab.id}
                       type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setActiveTab(tab.id);
-                        setMobileTabsOpen(false);
-                      }}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg text-[13px] font-semibold transition-colors duration-200 flex items-center gap-2.5 ${
+                      onClick={() => setActiveTab(tab.id)}
+                      aria-label={`${tab.label} tab`}
+                      aria-current={activeTab === tab.id ? 'page' : undefined}
+                      className={`flex w-full min-w-0 h-full px-1 rounded-[6px] text-[11px] leading-none font-semibold whitespace-nowrap transition-colors duration-200 items-center justify-center gap-1 overflow-hidden ${
                         activeTab === tab.id
-                          ? 'bg-tab-active text-white'
+                          ? 'bg-tab-active text-white shadow-sm'
                           : 'text-tab-text hover:bg-tab-hover'
                       }`}
                     >
-                      <tab.icon className="w-4 h-4 shrink-0" />
-                      <span className="flex-1 truncate">{tab.label}</span>
-                      {activeTab === tab.id && <Check className="w-4 h-4 shrink-0" />}
+                      <tab.icon className="w-3.5 h-3.5 shrink-0" />
+                      <span className="workspace-tab-label min-w-0 truncate">{tab.label}</span>
                     </button>
-                  ))}
-                </div>
-              )}
+                  </Tooltip>
+                ))}
+              </nav>
+              {exportMenu()}
             </div>
           </div>
 
           {/* RIGHT VIEW WINDOW */}
-          <div id="printable-document" className="flex-1 min-w-0 overflow-y-auto p-4 md:p-8 lg:p-12 custom-scrollbar">
+          <div id="printable-document" className="flex-1 min-w-0 overflow-y-auto p-3 md:p-4 custom-scrollbar">
 {/* CONFIRM 1.0 / 1.1 — Human-in-the-loop gate mount: one ConfirmationPanel per staged
     action. onConfirm drops the card and re-reads the authoritative project state +
     lock list; onCancel just closes it (nothing was written). */}
@@ -785,7 +718,7 @@ export default function Dashboard() {
                         setMessages(prev => [...prev, {
                             id: `merge-saved-${Date.now()}`,
                             role: 'system',
-                            content: `✅ **Changes saved.** The merged requirements were applied${savedVersion ? ` as version ${savedVersion}` : ''} and logged in the Version History.`,
+                            content: `Changes saved. The merged requirements were applied${savedVersion ? ` as version ${savedVersion}` : ''} and logged in the Version History.`,
                             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                         }]);
                     }}
@@ -798,7 +731,7 @@ export default function Dashboard() {
                         setMessages(prev => [...prev, {
                             id: `merge-cancelled-${Date.now()}`,
                             role: 'system',
-                            content: `↩️ **Merge discarded.** Rolled back to the previous version (v${currentVersion}) — nothing was saved.`,
+                            content: `Merge discarded. Rolled back to the previous version (v${currentVersion}). Nothing was saved.`,
                             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                         }]);
                     }}
@@ -875,18 +808,13 @@ export default function Dashboard() {
 
             {/* Requirement Lock Status Panel — only shown on the Requirements tab */}
             {activeTab === 'trace' && lockTargets.length > 0 && (
-              <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-outline rounded-2xl shadow-sm">
-                <div className="flex flex-wrap items-center gap-2 mb-3">
-                  <Lock className="text-primary w-4 h-4 shrink-0" />
-                  <h3 className="font-bold text-sm text-on-surface min-w-0">
-                    Requirement Lock Status
-                    <span className="ml-1.5 text-[10.5px] font-mono font-normal text-on-surface-variant">
-                      ({lockTargets.length})
-                    </span>
-                  </h3>
-                  <span className="text-[10px] text-on-surface-variant font-mono basis-full sm:basis-auto sm:ml-auto">
-                    Locked requirements cannot be updated, deleted, merged, or modified by AI
-                  </span>
+              <div className="max-w-4xl mx-auto mb-3 px-1 py-2">
+                <div className="flex items-center gap-1.5 mb-3 text-[10px] font-bold tracking-[0.08em] text-[#716860] uppercase">
+                  <span>{lockTargets.length} requirements</span>
+                  <span>·</span>
+                  <span>0 manual</span>
+                  <span>·</span>
+                  <span>{lockTargets.filter((req) => Boolean(req.is_locked || lockedRequirements[req.requirement_code]?.is_locked)).length} locked</span>
                 </div>
                 <div className="space-y-2">
                   {lockTargets.map((req) => {
@@ -897,60 +825,43 @@ export default function Dashboard() {
                     const canLock =
                       isLockableRequirementId(req.id) ||
                       isLockableRequirementId(lockedRequirements[req.requirement_code]?.artifact_id);
-                    const lockedBy = req.locked_by || lockedRequirements[req.requirement_code]?.locked_by || 'user';
-                    const lockedAt = req.locked_at || lockedRequirements[req.requirement_code]?.locked_at || '';
-                    const lockReason = req.lock_reason || lockedRequirements[req.requirement_code]?.lock_reason || '';
-                    const storyCount = req.user_stories?.length ?? storiesByRequirement[req.requirement_code] ?? 0;
                     const isArchived = req.status?.toLowerCase() === 'archived';
                     return (
-                      <div key={req.requirement_code} className={`flex items-center justify-between gap-2 sm:gap-3 p-3 rounded-xl border ${isLocked ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
-                        <div className="flex items-center gap-3 min-w-0">
-                          <span className={`w-2 h-2 rounded-full shrink-0 ${isLocked ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
-                              <span className="text-xs font-mono font-bold text-on-surface shrink-0">{req.requirement_code}</span>
-                              <span className="text-xs text-on-surface break-words min-w-0">{req.title}</span>
+                      <div key={req.requirement_code} className={`flex items-center justify-between gap-2 sm:gap-3 px-3 py-2.5 rounded-[10px] border ${isLocked ? 'bg-[#f0f8f2] border-[#cfe7d4]' : 'bg-white border-outline'}`}>
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          {isLocked && <Lock className="w-3 h-3 shrink-0 text-emerald-600" />}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 flex-1">
+                              <span className={`text-[11px] font-mono font-bold shrink-0 ${isLocked ? 'text-emerald-700' : 'text-[#a89b91]'}`}>{req.requirement_code}</span>
+                              <span className="text-xs font-semibold text-on-surface break-words min-w-0 flex-1">{req.title}</span>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-200 font-semibold">AI</span>
                               {isArchived && (
                                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">Archived</span>
                               )}
-                              {typeof storyCount === 'number' && storyCount > 0 && (
-                                <span className="text-[10px] font-mono text-on-surface-variant shrink-0">
-                                  · {storyCount} {storyCount === 1 ? 'story' : 'stories'}
-                                </span>
-                              )}
-                            </div>
-                            {isLocked && (
-                              <p className="text-[10px] text-amber-700 font-mono mt-0.5">
-                                🔒 Locked by {lockedBy}
-                                {lockedAt ? ` at ${new Date(lockedAt).toLocaleString()}` : ''}
-                                {lockReason ? ` — ${lockReason}` : ''}
-                              </p>
-                            )}
                           </div>
                         </div>
                         {canLock ? (
                           <button
                             onClick={() => isLocked ? handleUnlockRequirement(req.requirement_code) : handleLockRequirement(req.requirement_code)}
-                            className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                            className={`min-w-[70px] px-3 py-1.5 rounded-full text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 shrink-0 cursor-pointer ${
                               isLocked 
-                                ? 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200' 
-                                : 'bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20'
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200 hover:bg-emerald-200' 
+                                : 'bg-white text-on-surface border border-outline hover:bg-[#faf8f4]'
                             }`}
                           >
                             {isLocked ? (
                               <>
-                                <Unlock className="w-3.5 h-3.5" />
-                                <span>Unlock</span>
+                                <Lock className="w-3 h-3" />
+                                <span>Locked</span>
                               </>
                             ) : (
                               <>
-                                <Lock className="w-3.5 h-3.5" />
+                                <Lock className="w-3 h-3" />
                                 <span>Lock</span>
                               </>
                             )}
                           </button>
                         ) : (
-                          <Tooltip label="This requirement has no saved record yet — save the pending merge preview first, then lock it.">
+                          <Tooltip label="This requirement has no saved record yet. Save the pending merge preview first, then lock it.">
                             <button
                               disabled
                               className="px-3 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1.5 shrink-0 cursor-not-allowed bg-slate-100 text-slate-500 border border-slate-200"
@@ -968,14 +879,14 @@ export default function Dashboard() {
             )}
 
             {activeTab === 'trace' && lockTargets.length === 0 && (
-              <div className="max-w-4xl mx-auto mb-8 p-4.5 bg-white border border-dashed border-outline rounded-2xl">
+              <div className="max-w-4xl mx-auto mb-3 p-4 bg-white border border-dashed border-outline rounded-[10px]">
                 <div className="flex items-start gap-3 min-w-0">
                   <Lock className="text-on-surface-variant w-4 h-4 shrink-0 mt-0.5" />
                   <div className="min-w-0">
                     <h3 className="font-bold text-sm text-on-surface">Requirement Lock Status</h3>
                     <p className="text-xs text-on-surface-variant mt-0.5 break-words">
                       {(structuredRequirements.user_stories?.length ?? 0) > 0
-                        ? 'No requirement records are stored for this project yet, so there is nothing to lock. Save the pending merge preview to create the requirement records — they become lockable immediately afterwards.'
+                        ? 'No requirement records are stored for this project yet, so there is nothing to lock. Save the pending merge preview to create the requirement records; they become lockable immediately afterwards.'
                         : 'No requirements yet. Describe what you need in the chat and the Gatherer will create the requirement records you can lock here.'}
                     </p>
                   </div>
@@ -986,7 +897,20 @@ export default function Dashboard() {
             <div className="max-w-4xl mx-auto">
               {activeTab === 'prd' && <PRDEditor state={state} />}
               {activeTab === 'flows' && <ArchitectureFlows state={state} />}
-              {activeTab === 'trace' && <RequirementTraceability projectId={projectId} />}
+              {activeTab === 'trace' && (
+                <>
+                  <DocumentLibrary projectId={projectId} docs={documents} />
+                  <details className="mt-3 rounded-[10px] border border-outline bg-white">
+                    <summary className="cursor-pointer list-none px-4 py-3 text-xs font-semibold text-on-surface flex items-center justify-between">
+                      Advanced traceability
+                      <ChevronDown className="w-4 h-4 text-on-surface-variant" />
+                    </summary>
+                    <div className="border-t border-outline p-3">
+                      <RequirementTraceability projectId={projectId} />
+                    </div>
+                  </details>
+                </>
+              )}
               {activeTab === 'history' && (
                 <>
                   <VersionHistory state={state} />

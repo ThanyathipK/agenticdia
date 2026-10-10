@@ -99,8 +99,8 @@ const rateLimitedContent = (err: unknown): string => {
   const wait = extractRetryAfter(err);
   const suffix = wait === null
     ? 'A short time window will restore access.'
-    : `Please wait about **${wait} second(s)** before continuing.`;
-  return `⏳ **Rate Limit Reached:** Too many requests in a short window. ${suffix}`;
+    : `Please wait about ${wait} second(s) before continuing.`;
+  return `Rate limit reached. Too many requests in a short window. ${suffix}`;
 };
 
 // --- Payload-too-large (HTTP 413) awareness ---------------------------------
@@ -115,6 +115,11 @@ const isPayloadTooLargeError = (err: unknown): boolean => {
   return (err as { response?: { status?: number } }).response?.status === 413;
 };
 
+const isUnauthorizedError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  return (err as { response?: { status?: number } }).response?.status === 401;
+};
+
 const extractErrorDetail = (err: unknown): string | null => {
   if (!err || typeof err !== 'object') return null;
   const detail = (err as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
@@ -124,11 +129,11 @@ const extractErrorDetail = (err: unknown): string | null => {
 const payloadTooLargeContent = (err: unknown): string => {
   const measured = extractErrorDetail(err);
   return [
-    '📦 **Project Too Large for the Current Context Budget:**',
-    'The project\'s requirements, user stories and acceptance criteria exceed the LLM context budget (`MAX_CONTEXT_TOKENS`) — the request was rejected before any agent ran. Nothing was saved or changed.',
+    'Project too large for the current context budget.',
+    'The project\'s requirements, user stories and acceptance criteria exceed the LLM context budget (`MAX_CONTEXT_TOKENS`). The request was rejected before any agent ran. Nothing was saved or changed.',
     '',
-    '**How to resolve:**',
-    '- Trim the project: remove or merge redundant user stories / acceptance criteria, **or**',
+    'How to resolve:',
+    '- Trim the project: remove or merge redundant user stories or acceptance criteria, or',
     '- Raise `MAX_CONTEXT_TOKENS` in `backend/.env` (e.g. `16384`) if the loaded LM Studio model supports a larger context window.',
     measured ? `\n${measured}` : '',
   ].filter(Boolean).join('\n');
@@ -181,7 +186,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setMessages(prev => [...prev, {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        content: '**No Project Selected:** Please select or create a project before interacting.',
+        content: 'No project selected. Please select or create a project before interacting.',
         timestamp: nowTime(),
       }]);
       return;
@@ -273,7 +278,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           store.setMessages(prev => [...prev, {
             id: `merge-preview-${Date.now()}`,
             role: 'assistant',
-            content: `**Merge Preview Ready**\nI have analyzed your input and prepared the merged requirements. Please review the changes below and **Save** or **Cancel**.\n\n> *"${inputMsg}"*`,
+            content: `Merge preview ready.\nI have analyzed your input and prepared the merged requirements. Please review the changes below and select Save or Cancel.\n\n"${inputMsg}"`,
             timestamp: nowTime(),
           }]);
         } else if (receivedReqs && receivedReqs.epic_name) {
@@ -298,7 +303,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           store.setMessages(prev => [...prev, {
             id: `gatherer-passed-${Date.now()}`,
             role: 'assistant',
-            content: '**Requirements Gathered & Updated!**\nI have successfully structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, please click the **Validate Requirements** button. Or click **Generate PRD** to build the technical documentation.',
+            content: 'Requirements gathered and updated.\nI have structured your input into the Agile Requirements board.\n\nTo run compliance validation on these updated specifications, select Validate Requirements. Or select Generate PRD to build the technical documentation.',
             timestamp: nowTime(),
           }]);
         }
@@ -308,7 +313,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setMessages(prev => [...prev, {
           id: `stopped-${Date.now()}`,
           role: 'assistant',
-          content: '**Stopped.**\nYou cancelled this request — the server-side run was terminated and no requirement changes were applied.',
+          content: 'Stopped.\nYou cancelled this request. The server-side run was terminated and no requirement changes were applied.',
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Request stopped by user.');
@@ -321,7 +326,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           content: rateLimitedContent(err),
           timestamp: nowTime(),
         }]);
-        store.setSyncStatus('Rate limited — please wait before continuing.');
+        store.setSyncStatus('Rate limited. Please wait before continuing.');
         return;
       }
       if (isPayloadTooLargeError(err)) {
@@ -335,7 +340,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         return;
       }
       handleError('The requirement engine could not complete your request.', err);
-      const errorContent = `⚠️ **Request Failed — Nothing Was Saved.**\n\nThe requirement engine could not complete your message (${(err as Error)?.message || err}).\n\nYour input was **not** recorded as a user story, and no requirement state was changed.`;
+      const errorContent = `Request failed. Nothing was saved.\n\nThe requirement engine could not complete your message (${(err as Error)?.message || err}).\n\nYour input was not recorded as a user story, and no requirement state was changed.`;
       store.setMessages(prev => [...prev, {
         id: `api-error-${Date.now()}`,
         role: 'assistant',
@@ -362,7 +367,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     if (!deps.canRunAgentActions) {
       // Nothing to audit yet — mirror the disabled button instead of running
       // the auditor agent against an empty project.
-      store.setSyncStatus('Nothing to validate yet — add requirements or upload a knowledge document.');
+      store.setSyncStatus('Nothing to validate yet. Add requirements or upload a knowledge document.');
       return;
     }
     // prepare the UI for the audit run / clear any prior audit state
@@ -376,7 +381,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     abortRef.current = controller;
 
     try {
-      const data = await api.processRequirements({
+      const request = {
         project_id: projectId,
         raw_input: '',
         // AUDIT 5.1 — The on-demand trigger: empty raw_input + target_agent="auditor"
@@ -387,7 +392,19 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         structured_requirements: toGatheredRequirementsPayload(store.structuredRequirements),
         current_version: deps.currentVersion,
         version_history_summaries: 'No previous history.',
-      }, controller.signal);
+      };
+      let job = await api.startAgentJob(request);
+      backgroundJobRef.current = job.id;
+      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
+        await waitForPoll(controller.signal);
+        job = await api.getGenerationJob(projectId, job.id);
+        store.setSyncStatus(`Running Technical Audit… ${job.progress_stage.replaceAll('_', ' ')}`);
+      }
+      if (job.status === 'cancelled') throw new DOMException('Generation cancelled', 'AbortError');
+      if (job.status === 'failed' || !job.result) {
+        throw new Error(job.error_message || 'Background audit failed.');
+      }
+      const data = job.result;
 
       // AUDIT 5.2 — Verdict mapping (api/transforms): audit_result → UI model
       //            (is_valid, passed/failed checks, clarification questions).
@@ -410,19 +427,19 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
 
       const verdict = receivedAudit.verdict || (receivedAudit.is_valid ? 'pass' : 'fail');
       const questions = receivedAudit.clarification_questions || [];
-      const questionTexts = questions.map(q => `• ${q.question_text}`).join('\n');
+      const questionTexts = questions.map(q => `- ${q.question_text}`).join('\n');
       const findingTexts = (receivedAudit.findings || []).map(finding => {
         const sources = finding.source_references
-          .map(source => `${source.document_name}${source.section ? ` — ${source.section}` : ''}`)
+          .map(source => `${source.document_name}${source.section ? `: ${source.section}` : ''}`)
           .join(', ');
         const recommendation = finding.recommendation?.summary
-          ? `\n  ↳ **Suggested improvement:** ${finding.recommendation.summary}`
+          ? `\n  Suggested improvement: ${finding.recommendation.summary}`
           : '';
-        return `• **${finding.impact} · ${finding.category} (${finding.rule_id || 'ADHOC'}):** ${finding.description}${sources ? ` _(Source: ${sources})_` : ''}${recommendation}`;
+        return `- ${finding.impact}, ${finding.category} (${finding.rule_id || 'ADHOC'}): ${finding.description}${sources ? ` (Source: ${sources})` : ''}${recommendation}`;
       }).join('\n');
       const context = receivedAudit.project_context;
       const contextText = context
-        ? `**Inferred context:** ${context.business_segment} · ${context.product_domain} · ${context.solution_type} · ${context.delivery_stage} (${Math.round(context.confidence * 100)}% confidence)`
+        ? `Inferred context: ${context.business_segment}, ${context.product_domain}, ${context.solution_type}, ${context.delivery_stage} (${Math.round(context.confidence * 100)}% confidence)`
         : '';
       const auditCouldNotComplete = receivedAudit.failed_checks.includes('AUDIT_PARSE_ERROR');
       // AUDIT 5.3 — Failure branch: the assistant bubble carries the questions and
@@ -431,11 +448,11 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       //            status tells the user the audit is pending, not failed hard.
       if (verdict === 'fail' || verdict === 'needs_clarification') {
         const title = auditCouldNotComplete
-          ? '⚠️ Requirements Audit Could Not Complete'
-          : verdict === 'fail' ? '⛔ Requirements Audit Failed' : '❓ Requirements Audit Needs Clarification';
+          ? 'Requirements audit could not complete'
+          : verdict === 'fail' ? 'Requirements audit failed' : 'Requirements audit needs clarification';
         const warningContent = auditCouldNotComplete
-          ? `**${title}**\n\n${findingTexts || 'Please run Validate again.'}`
-          : `**${title}**\n${contextText}\n\n**Findings:**\n${findingTexts || 'No blocking finding was established.'}\n\n**Pending Clarifications:**\n${questionTexts || 'None specified'}`;
+          ? `${title}\n\n${findingTexts || 'Please run Validate again.'}`
+          : `${title}\n${contextText}\n\nFindings:\n${findingTexts || 'No blocking finding was established.'}\n\nPending clarifications:\n${questionTexts || 'None specified'}`;
 
         store.setMessages(prev => [...prev, {
           id: `audit-failed-${Date.now()}`,
@@ -453,7 +470,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         // AUDIT 5.4 — Success branch: a positive verdict bubble (no clarification
         //            form). The audit is still only STAGED — the user's Save in the
         //            ConfirmationPanel is what persists the verdict (CONFIRM 3.3).
-        const successContent = `**${verdict === 'pass_with_warnings' ? 'Requirements Audit Passed with Warnings' : 'Requirements Audit Passed'}**\n${contextText}\n\n${findingTexts || 'All clearly applicable mandatory controls are covered.'}`;
+        const successContent = `${verdict === 'pass_with_warnings' ? 'Requirements audit passed with warnings.' : 'Requirements audit passed.'}\n${contextText}\n\n${findingTexts || 'All clearly applicable mandatory controls are covered.'}`;
         store.setMessages(prev => [...prev, {
           id: `audit-passed-${Date.now()}`,
           role: 'assistant',
@@ -478,7 +495,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setMessages(prev => [...prev, {
           id: `stopped-${Date.now()}`,
           role: 'assistant',
-          content: '⏹**Stopped.**\nYou cancelled this request — the audit was terminated and no validation verdict was applied.',
+          content: 'Stopped.\nYou cancelled this request. The audit was terminated and no validation verdict was applied.',
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Validation stopped by user.');
@@ -491,7 +508,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           content: rateLimitedContent(err),
           timestamp: nowTime(),
         }]);
-        store.setSyncStatus('Rate limited — please wait before continuing.');
+        store.setSyncStatus('Rate limited. Please wait before continuing.');
         return;
       }
       if (isPayloadTooLargeError(err)) {
@@ -504,16 +521,28 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setSyncStatus('Audit skipped: project exceeds the LLM context budget.');
         return;
       }
-      handleError('Compliance audit did not complete.', err);
+      if (isUnauthorizedError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `audit-auth-expired-${Date.now()}`,
+          role: 'assistant',
+          content: 'The audit job is still stored, but your sign-in session expired while checking its result. Sign in again, then run Validate Requirements to retrieve a fresh audit.',
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Sign-in expired. Please sign in again.');
+        return;
+      }
+      const detail = extractErrorDetail(err);
+      handleError(detail ?? 'Compliance audit did not complete.', err);
       store.setMessages(prev => [...prev, {
         id: `audit-error-${Date.now()}`,
         role: 'assistant',
-        content: `**Audit Failed — No Validation Was Saved.**\n\nThe audit could not complete against the requirement engine (${(err as Error)?.message || err}).\n\nNo validation verdict was applied and no requirements were changed.`,
+        content: `Audit failed. No validation was saved.\n\n${detail ?? `The audit could not complete against the requirement engine (${(err as Error)?.message || err}).`}\n\nNo validation verdict was applied and no requirements were changed.`,
         timestamp: nowTime(),
       }]);
       store.setSyncStatus('Audit failed. No changes were saved.');
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      backgroundJobRef.current = null;
       store.setIsLoading(false);
       store.setIsProcessing(false);
       store.setCurrentAgentNode(null);
@@ -530,7 +559,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     if (!deps.canRunAgentActions) {
       // Nothing to compile yet — mirror the disabled button instead of asking
       // the architect agent to build a PRD from an empty project.
-      store.setSyncStatus('Nothing to compile yet — add requirements or upload a knowledge document.');
+      store.setSyncStatus('Nothing to compile yet. Add requirements or upload a knowledge document.');
       return;
     }
     const projectId = deps.projectId;
@@ -557,7 +586,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         current_version: deps.currentVersion,
         version_history_summaries: buildVersionHistorySummaries(),
       };
-      let job = await api.startArchitectJob(request);
+      let job = await api.startAgentJob(request);
       backgroundJobRef.current = job.id;
       while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
         await waitForPoll(controller.signal);
@@ -584,7 +613,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setMessages(prev => [...prev, {
         id: `prd-generated-${Date.now()}`,
         role: 'assistant',
-        content: '📄 **Enterprise PRD Compiled Successfully!**\nThe CTO Architect Agent has generated the formal PRD and interactive system flowchart in the preview panel.',
+        content: 'Enterprise PRD compiled successfully.\nThe Technical Product Owner Assistant has generated the formal PRD and interactive system flowchart in the preview panel.',
         timestamp: nowTime(),
       }]);
 
@@ -597,7 +626,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setMessages(prev => [...prev, {
           id: `stopped-${Date.now()}`,
           role: 'assistant',
-          content: '⏹️ **Stopped.**\nYou cancelled this request — PRD generation was terminated server-side; no document was produced.',
+          content: 'Stopped.\nYou cancelled this request. PRD generation was terminated server-side; no document was produced.',
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Generation stopped by user.');
@@ -610,7 +639,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
           content: rateLimitedContent(err),
           timestamp: nowTime(),
         }]);
-        store.setSyncStatus('Rate limited — please wait before continuing.');
+        store.setSyncStatus('Rate limited. Please wait before continuing.');
         return;
       }
       if (isPayloadTooLargeError(err)) {
@@ -627,7 +656,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       store.setMessages(prev => [...prev, {
         id: `prd-error-${Date.now()}`,
         role: 'assistant',
-        content: `⚠️ **PRD Generation Failed — No Document Saved.**\n\nThe document could not be generated (${(err as Error)?.message || err}).\n\nNo PRD or diagram was produced.`,
+        content: `PRD generation failed. No document was saved.\n\nThe document could not be generated (${(err as Error)?.message || err}).\n\nNo PRD or diagram was produced.`,
         timestamp: nowTime(),
       }]);
       store.setSyncStatus('PRD generation failed. No document saved.');

@@ -496,7 +496,7 @@ def _dedupe_changes(changes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             f"Conflicting recommendations for {key}: "
             f"'{loser['change_type']}' ({loser['recommended_action']}) vs "
             f"'{winner['change_type']}' ({winner['recommended_action']}); "
-            "the more conservative action was kept — please confirm the intent."
+            "the more conservative action was kept. Please confirm the intent."
         )
         logger.warning(conflict_note)
         winner = dict(winner)
@@ -1135,5 +1135,4 @@ async def classify_workflow(raw_input: str) -> Dict[str, Any]:
             "confidence": 0.85,
             "reason": "The user input describes a software requirement or functional modification."
         }
-
 

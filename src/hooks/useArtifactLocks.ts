@@ -262,7 +262,7 @@ export function useArtifactLocks(
       handleError(
         `Cannot lock ${requirementCode}: it has no saved requirement record yet. Save the pending merge preview first, then lock it.`,
       );
-      store.setSyncStatus(`Cannot lock ${requirementCode} — not saved yet.`);
+      store.setSyncStatus(`Cannot lock ${requirementCode}: not saved yet.`);
       return;
     }
     const lockedOk = await handleLockArtifact('requirement', reqId, requirementCode);
@@ -281,7 +281,7 @@ export function useArtifactLocks(
       handleError(
         `Cannot unlock ${requirementCode}: it has no saved requirement record yet.`,
       );
-      store.setSyncStatus(`Cannot unlock ${requirementCode} — not saved yet.`);
+      store.setSyncStatus(`Cannot unlock ${requirementCode}: not saved yet.`);
       return;
     }
     const unlockedOk = await handleUnlockArtifact('requirement', reqId, requirementCode);

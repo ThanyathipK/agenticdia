@@ -193,7 +193,7 @@ export function useAuth(): UseAuthResult {
       // unknown email and a wrong password (by design), so surface it as-is.
       return (
         detailFromJsonError(err) ??
-        'Login failed — check your email and password, and that the backend is running.'
+        'Login failed. Check your email and password, and confirm that the backend is running.'
       );
     } finally {
       setIsAuthenticating(false);
@@ -226,7 +226,7 @@ export function useAuth(): UseAuthResult {
       // credentials just created (one less round-trip for the user).
       const signInError = await login(email, password);
       if (signInError) {
-        notify('Account created — please sign in.', 'success');
+        notify('Account created. Please sign in.', 'success');
         return signInError;
       }
       return null;

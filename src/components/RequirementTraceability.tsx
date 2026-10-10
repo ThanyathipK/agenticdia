@@ -41,7 +41,7 @@ const chip = (label: string, className: string): React.ReactNode => (
 
 const tracedChip = (traced: boolean): React.ReactNode =>
   traced
-    ? chip('traced ✓', 'bg-emerald-100 text-emerald-800 border-emerald-300')
+    ? chip('traced', 'bg-emerald-100 text-emerald-800 border-emerald-300')
     : chip('gaps', 'bg-amber-100 text-amber-800 border-amber-300');
 
 const gapChips = (codes: string[]): React.ReactNode =>
@@ -53,7 +53,7 @@ const staleChips = (refs: StaleCodeReference[]): React.ReactNode =>
       key={ref.code}
       className="px-2.5 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold font-mono text-[10.5px]"
     >
-      {ref.code} → {[...(ref.section_keys ?? []), ...(ref.diagrams ?? [])].join(', ')}
+      {ref.code} maps to {[...(ref.section_keys ?? []), ...(ref.diagrams ?? [])].join(', ')}
     </span>
   ));
 
@@ -61,7 +61,7 @@ const staleChips = (refs: StaleCodeReference[]): React.ReactNode =>
 const RowCard: React.FC<{ row: TraceabilityRow }> = ({ row }) => {
   const { requirement: req } = row;
   return (
-    <div className="bg-white border border-outline rounded-2xl p-4.5 shadow-sm space-y-3">
+    <div className="bg-white border border-outline rounded-[10px] p-3 space-y-3">
       {/* Requirement node */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -70,7 +70,7 @@ const RowCard: React.FC<{ row: TraceabilityRow }> = ({ row }) => {
           <span className="text-sm font-semibold text-on-surface truncate">{req.title}</span>
           {req.epic_name && (
             <span className="text-[10.5px] text-on-surface-variant truncate">
-              · {req.epic_name}
+              ({req.epic_name})
             </span>
           )}
         </div>
@@ -80,7 +80,7 @@ const RowCard: React.FC<{ row: TraceabilityRow }> = ({ row }) => {
       {/* Traced artifacts */}
       <div className="grid md:grid-cols-3 gap-3">
         {/* User stories + acceptance criteria */}
-        <div className="bg-slate-50 border border-outline/60 rounded-xl p-3 space-y-2">
+        <div className="bg-[#faf8f4] border border-outline rounded-[8px] p-3 space-y-2">
           <div className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-on-surface-variant">
             <UserCircle2 className="w-3.5 h-3.5" /> User Stories ({row.user_stories.length})
           </div>
@@ -94,7 +94,7 @@ const RowCard: React.FC<{ row: TraceabilityRow }> = ({ row }) => {
                 <span className="text-xs text-on-surface-variant truncate">{story.story_title}</span>
               </div>
               {story.acceptance_criteria.length === 0 ? (
-                <p className="text-[10.5px] text-amber-700 pl-2">⚠ no acceptance criteria</p>
+                <p className="text-[10.5px] text-amber-700 pl-2">No acceptance criteria</p>
               ) : (
                 <ul className="pl-2 space-y-0.5">
                   {story.acceptance_criteria.map((ac, idx) => (
@@ -109,7 +109,7 @@ const RowCard: React.FC<{ row: TraceabilityRow }> = ({ row }) => {
         </div>
 
         {/* PRD sections */}
-        <div className="bg-slate-50 border border-outline/60 rounded-xl p-3 space-y-2">
+        <div className="bg-[#faf8f4] border border-outline rounded-[8px] p-3 space-y-2">
           <div className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-on-surface-variant">
             <ScrollText className="w-3.5 h-3.5" /> PRD Sections ({row.prd_sections.length})
           </div>
@@ -123,7 +123,7 @@ const RowCard: React.FC<{ row: TraceabilityRow }> = ({ row }) => {
         </div>
 
         {/* Diagrams */}
-        <div className="bg-slate-50 border border-outline/60 rounded-xl p-3 space-y-2">
+        <div className="bg-[#faf8f4] border border-outline rounded-[8px] p-3 space-y-2">
           <div className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-on-surface-variant">
             <Network className="w-3.5 h-3.5" /> Diagrams ({row.diagrams.length})
           </div>
@@ -302,9 +302,9 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
 
 
   return (
-    <div className="space-y-4 mb-8">
+    <div className="space-y-3 mb-4">
       {/* Coverage summary + rebuild */}
-      <div className="bg-white border border-outline rounded-2xl p-4.5 shadow-sm flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-white border border-outline rounded-[10px] p-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="bg-primary/15 text-primary text-[10.5px] px-2.5 py-1 rounded border border-primary/25 font-bold uppercase tracking-wider font-mono">
             Traceability Matrix
@@ -325,14 +325,14 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
 
       {/* Persisted dependency graph + partial-regeneration controls */}
       {dependencyGraph && (
-        <div className="bg-white border border-outline rounded-2xl p-4.5 shadow-sm space-y-3">
+        <div className="bg-white border border-outline rounded-[10px] p-3 space-y-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex items-center gap-2 text-sm font-bold text-on-surface">
                 <Network className="w-4 h-4 text-primary" /> Artifact dependency graph
               </div>
               <p className="mt-1 text-xs text-on-surface-variant">
-                {dependencyGraph.summary.nodes} artifacts · {dependencyGraph.summary.edges} relationships. Select changed inputs to calculate their downstream write scope.
+                {dependencyGraph.summary.nodes} artifacts, {dependencyGraph.summary.edges} relationships. Select changed inputs to calculate their downstream write scope.
               </p>
             </div>
             <button
@@ -463,7 +463,7 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
       {/* Matrix rows */}
       {matrix.rows.length === 0 ? (
         <div className="p-8 text-sm text-on-surface-variant italic">
-          No requirements to trace yet — process banking requirements to populate the matrix.
+          No requirements to trace yet. Process banking requirements to populate the matrix.
         </div>
       ) : (
         <div className="space-y-3">
@@ -477,7 +477,7 @@ export const RequirementTraceability: React.FC<RequirementTraceabilityProps> = (
       {coverage.total_requirements > 0 && coverage.traced_requirements === coverage.total_requirements && (
         <div className="flex items-center gap-2 p-4.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-sm font-semibold text-emerald-800">
           <CheckCircle2 className="w-4.5 h-4.5" />
-          All requirements are traced end-to-end: story → criteria → PRD section.
+          All requirements are traced end-to-end: story, criteria, and PRD section.
         </div>
       )}
     </div>

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 
 interface ConfirmModalProps {
@@ -64,25 +63,22 @@ export function ConfirmModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
       onClick={() => { if (!isWorking) onClose(); }}
     >
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="w-[320px] max-w-[calc(100vw-1.5rem)] bg-white border border-outline rounded-2xl shadow-xl p-5 focus:outline-none"
+        className="w-[380px] max-w-[calc(100vw-1.5rem)] bg-white border border-outline rounded-[16px] shadow-[0_12px_28px_rgba(43,36,32,0.14)] p-6 focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-label={title}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-2.5 mb-4">
-          <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${danger ? 'bg-red-50' : 'bg-primary/10'}`}>
-            <AlertTriangle className={`w-4 h-4 ${danger ? 'text-red-500' : 'text-primary'}`} />
-          </div>
           <div className="min-w-0 flex-1">
-            <h3 className="text-[13px] font-bold text-on-surface break-words">{title}</h3>
-            <p className="text-[11px] text-on-surface-variant mt-0.5 leading-relaxed break-words">{description}</p>
+            <h3 className="text-[18px] font-bold text-on-surface break-words">{title}</h3>
+            <p className="text-sm text-on-surface-variant mt-1.5 leading-relaxed break-words">{description}</p>
           </div>
         </div>
 
@@ -90,7 +86,7 @@ export function ConfirmModal({
           <button
             onClick={() => { if (!isWorking) onClose(); }}
             disabled={isWorking}
-            className="px-3 py-2 rounded-xl bg-primary/5 text-on-surface-variant hover:bg-primary/10 hover:text-on-surface transition-colors text-xs font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 rounded-[10px] bg-white border border-outline text-on-surface-variant hover:bg-[#faf8f4] transition-colors text-xs font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
@@ -98,7 +94,7 @@ export function ConfirmModal({
             ref={confirmBtnRef}
             onClick={handleConfirm}
             disabled={isWorking}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+            className={`px-5 py-2 rounded-[10px] text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
               danger
                 ? 'bg-red-500 text-white hover:bg-red-600 shadow-md shadow-red-500/20'
                 : 'bg-primary text-on-primary hover:brightness-110 active:scale-[0.99] shadow-md shadow-primary/20'

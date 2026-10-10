@@ -1,11 +1,13 @@
 @import "tailwindcss";
 
 @theme {
+  --font-sans: "Inter", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   /* Clean, glam brown — deep enough to stay readable as text/borders,
      used for primary CTAs, active states, and key accents. Keep it rare: it should
      read as "the one warm accent on the screen", not a wash. */
-  --color-brand: #8a6a50;
-  --color-brand-bright: #a9835f;
+  --color-brand: #5c4033;
+  --color-brand-bright: #795849;
 
   /* Deep navy replaces generic Tailwind blue for secondary info / selection states —
      keeps the enterprise data-tool feel without competing with the brand accent. */
@@ -26,9 +28,9 @@
   --color-on-primary: #ffffff;
   --color-surface: #ffffff;
   --color-background: #faf8f4;
-  --color-on-surface: #171717;
-  --color-on-surface-variant: #8c8676;
-  --color-outline: #ece7dc;
+  --color-on-surface: #2b2420;
+  --color-on-surface-variant: #767e89;
+  --color-outline: #e9e2d6;
   --color-glass-bg: rgb(255 255 255 / 0.75);
 
   /* PRD workspace tab pill — warm paper-toned surface + espresso active state
@@ -43,6 +45,36 @@
   --color-export-border: #e2d8d0;
   --color-export-text: #5d514a;
   --color-export-hover: #f7f3ef;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  margin: 0;
+}
+
+html {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  overflow: hidden;
+  background: var(--color-background);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
 }
 
 /* Small type-scale + surface utilities referenced by Dashboard.tsx. */
@@ -85,7 +117,7 @@
 
 /* Soft resizable divider between the chat and PRD panels */
 .resize-divider {
-  width: 18px;
+  width: 1px;
   flex-shrink: 0;
   cursor: col-resize;
   display: flex;
@@ -94,28 +126,64 @@
   position: relative;
   z-index: 20;
 }
-.resize-divider::after {
-  content: "";
-  width: 5px;
-  height: 52px;
-  border-radius: 9999px;
-  background: var(--color-outline);
-  transition: background 0.15s ease, height 0.15s ease;
+
+#split-container {
+  min-width: 0;
+  min-height: 0;
 }
-.resize-divider:hover::after,
-.resize-divider.is-dragging::after {
+
+.chat-panel {
+  min-width: min(320px, 100%);
+  max-width: 68%;
+}
+
+#printable-document,
+#projects-dashboard-content {
+  container-type: inline-size;
+}
+
+.workspace-toolbar {
+  container-type: inline-size;
+}
+
+@container (max-width: 620px) {
+  .workspace-tab-label,
+  .workspace-export-label,
+  .workspace-export-chevron {
+    display: none;
+  }
+
+  .workspace-export-button {
+    width: 38px;
+    padding-inline: 0;
+  }
+}
+
+@container (max-width: 420px) {
+  .workspace-toolbar {
+    gap: 0.25rem;
+    padding-inline: 0.25rem;
+  }
+
+  .workspace-export-button {
+    width: 34px;
+  }
+}
+.resize-divider::after {
+  content: none;
+}
+.resize-divider:hover,
+.resize-divider.is-dragging {
   background: var(--color-brand);
-  height: 68px;
 }
 body.is-resizing {
   cursor: col-resize;
   user-select: none;
 }
 
-/* Responsive / narrow-window layout.
-   Below the `lg` breakpoint (1024px) the chat panel stacks above the PRD workspace
-   instead of sitting side-by-side, so nothing gets squashed on smaller windows. */
-@media (max-width: 1023px) {
+/* Responsive / narrow-window layout. Phones stack the workspace; tablets retain
+   the flexible split view so both working panes remain usable. */
+@media (max-width: 767px) {
   #split-container {
     flex-direction: column;
   }
@@ -130,7 +198,7 @@ body.is-resizing {
     display: flex;
     flex-direction: column;
     position: fixed;
-    top: 64px;
+    top: 0;
     bottom: 0;
     left: 0;
     width: 280px;
@@ -149,7 +217,8 @@ body.is-resizing {
     flex-grow: 0 !important;
     flex-shrink: 1 !important;
     width: 100% !important;
-    max-height: 70vh;
+    max-width: none;
+    max-height: 58vh;
   }
 
   .resize-divider {
@@ -165,7 +234,29 @@ body.is-resizing {
   }
 
   .chat-panel {
-    max-height: 55vh;
+    max-height: 56vh;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  #split-container {
+    flex-direction: row;
+  }
+
+  .chat-panel {
+    flex-basis: 46% !important;
+    min-width: 300px;
+    max-width: 56%;
+  }
+
+  .resize-divider {
+    display: flex;
+  }
+}
+
+@media (max-width: 639px) {
+  html {
+    font-size: 15px;
   }
 }
 

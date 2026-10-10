@@ -371,7 +371,7 @@ async def test_unchanged_stories_are_reviewed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auditor_parse_failure_returns_human_message_without_exception_details(monkeypatch):
+async def test_auditor_parse_failure_returns_safe_retryable_result(monkeypatch):
     board = copy.deepcopy(MULTI_GROUP_BOARD)
     board["user_stories"][0]["change_type"] = "updated"
     _patch(monkeypatch, board)
@@ -380,9 +380,13 @@ async def test_auditor_parse_failure_returns_human_message_without_exception_det
         raise RuntimeError("Unterminated string at secret parser line 213")
 
     monkeypatch.setattr(agents, "invoke_llm_structured", fail_parse)
-    with pytest.raises(RuntimeError, match="Please run Validate again") as exc:
-        await agents.auditor_node({
-            "project_id": "p1", "current_version": 3,
-            "structured_requirements": _legacy_payload(board["user_stories"]),
-        })
-    assert "line 213" not in str(exc.value)
+    result = await agents.auditor_node({
+        "project_id": "p1", "current_version": 3,
+        "structured_requirements": _legacy_payload(board["user_stories"]),
+    })
+    audit = result["audit_result"]
+    assert audit["is_valid"] is False
+    assert audit["verdict"] == "needs_clarification"
+    assert audit["failed_checks"] == ["AUDIT_PARSE_ERROR"]
+    assert audit["findings"][0]["finding_type"] == "audit_unavailable"
+    assert "line 213" not in result["agent_message"]

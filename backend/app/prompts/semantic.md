@@ -11,7 +11,7 @@ Your task is to compare the Current Project Context (existing user stories and r
 - Emit exactly ONE change entry per affected user story.
 - A pure question, greeting, status request or comment about the project is NOT a change: return a single NO_MEANINGFUL_CHANGE entry for it.
 - If the New User Message does not change anything, return exactly one entry with change_type "NO_MEANINGFUL_CHANGE" and recommended_action "NO_CHANGE". Never return an empty `changes` list.
-- `confidence` must reflect genuine certainty (0.0 - 1.0). Use a value below 0.70 when the target story, the requested behaviour or the intent is unclear — the system then asks the user for clarification instead of applying a guess.
+- `confidence` must reflect genuine certainty (0.0 - 1.0). Use a value below 0.70 when the target story, the requested behaviour or the intent is unclear; the system then asks the user for clarification instead of applying a guess.
 </system_constraints>
 
 <classifications>

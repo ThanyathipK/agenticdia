@@ -27,12 +27,12 @@ export function PRDEditor({ state }: { state: ProjectState }) {
   const editBaseRef = useRef<string>('');
 
   return (
-    <div className="space-y-8 animate-fadeIn">
+    <div className="space-y-3 animate-fadeIn">
       {/* Styled markdown content rendering */}
-      <article className="bg-white p-4 sm:p-6 md:p-10 rounded-3xl border border-outline shadow-sm prose prose-neutral max-w-none min-w-0">
+      <article className="bg-white p-4 sm:p-5 rounded-[12px] border border-outline prose prose-neutral max-w-none min-w-0">
         
         {/* Header decorative accent */}
-        <div className="h-1 w-24 bg-primary mb-6 rounded-full no-print"></div>
+        <div className="text-[10px] font-bold tracking-[0.12em] text-[#a89b91] mb-2 no-print">KRUNGSRI NIMBLE CONFIDENTIAL</div>
         
         {!prdMarkdown ? (
           <div className="flex flex-col items-center justify-center py-20 text-center text-on-surface-variant no-print">
@@ -41,7 +41,7 @@ export function PRDEditor({ state }: { state: ProjectState }) {
             <p className="text-xs max-w-sm mt-1">The Krungsri Nimble template could not be fetched. Enter your raw requirements in the chat or click Generate PRD to build the document.</p>
           </div>
         ) : (
-          <div className="space-y-6">
+          <div className="space-y-0">
             {sections.map((section, sectionIdx) => {
               const isEditing = editingSectionId === section.id;
               const safeTitle = getSafeSectionTitle(section.title);
@@ -52,13 +52,13 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                   key={section.id} 
                   className={`relative group rounded-2xl border transition-all duration-200 ${
                     isEditing 
-                      ? 'bg-slate-50/50 p-3.5 sm:p-6 border-primary/30 shadow-sm'
-                      : 'border-slate-200 bg-white p-3.5 sm:p-5 hover:border-slate-300 hover:shadow-sm'
+                      ? 'bg-[#faf8f4] p-3.5 sm:p-4 border-primary/30'
+                      : 'border-x-0 border-t-0 border-outline bg-white px-0 py-4 rounded-none'
                   }`}
                 >
                   {/* Header Area with Title & Edit button */}
-                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-100 pb-2.5 mb-5">
-                    <h3 className="text-xs font-bold font-mono text-primary uppercase tracking-wider flex items-center gap-2 min-w-0 break-words">
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-outline pb-2.5 mb-4">
+                    <h3 className="text-xs font-bold text-on-surface uppercase tracking-[0.02em] flex items-center gap-2 min-w-0 break-words">
                       <span className="opacity-40 font-semibold text-[10px] shrink-0">#0{sectionIdx + 1}</span>
                       <span className="min-w-0">{safeTitle}</span>
                     </h3>
@@ -101,8 +101,8 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                             onClick={() => handleToggleSectionLock(section.id)}
                             title={
                               isLocked
-                                ? 'This part is locked — edits and AI regeneration are blocked.'
-                                : 'Lock this part — the Architect will never overwrite it again.'
+                                ? 'This part is locked. Edits and AI regeneration are blocked.'
+                                : 'Lock this part. The Architect will never overwrite it again.'
                             }
                             className={`opacity-60 hover:opacity-100 group-hover:opacity-100 transition-opacity text-[11px] px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 border shadow-sm cursor-pointer z-10 font-semibold ${
                               isLocked
@@ -172,12 +172,12 @@ export function PRDEditor({ state }: { state: ProjectState }) {
                           e.target.style.height = 'auto';
                           e.target.style.height = `${e.target.scrollHeight}px`;
                         }}
-                        className="w-full text-sm font-sans text-slate-800 bg-white border border-slate-200 rounded-2xl p-4.5 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all resize-y custom-scrollbar shadow-inner min-h-[120px]"
+                        className="w-full text-sm font-sans text-slate-800 bg-white border border-outline rounded-[8px] p-4 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all resize-y custom-scrollbar min-h-[120px]"
                         placeholder="Enter section content in markdown..."
                       />
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100 mt-2">
                         <p className="text-[11px] text-slate-500 italic min-w-0">
-                          Saved & versioned per part — lock an approved part and the Architect will never overwrite it.
+                          Saved and versioned per part. Lock an approved part and the Architect will never overwrite it.
                         </p>
                         <div className="flex items-center gap-2">
                           <button

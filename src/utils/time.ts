@@ -7,9 +7,9 @@
 
 /** Coarse dashboard "Updated" cell: humanized age for fresh edits, calendar date otherwise. */
 export function formatRelativeUpdated(iso: string | null | undefined, now: Date = new Date()): string {
-  if (!iso) return '—';
+  if (!iso) return '-';
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '—';
+  if (Number.isNaN(date.getTime())) return '-';
 
   const diffMs = now.getTime() - date.getTime();
   if (diffMs < 0) return formatDate(iso);
