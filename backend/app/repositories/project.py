@@ -418,22 +418,28 @@ class ProjectRepository:
                 p,
                 message=f"Project '{p.name}' is locked by {p.locked_by or 'unknown'}. Unlock it before deleting."
             )
-            await session.delete(p)
-            await session.flush()
-            # Log DELETE event
+            # Log while the parent row still exists. The previous order deleted
+            # and flushed the project first, then inserted an event whose
+            # project_id FK referenced that deleted row. PostgreSQL rejected
+            # the insert and poisoned the outer transaction, so get_db's commit
+            # rolled the deletion back even though the endpoint had returned
+            # success. A savepoint makes audit logging genuinely fail-open.
             try:
-                await ArtifactEventLogRepository.log_event(
-                    artifact_type="project",
-                    artifact_id=str(project_id),
-                    action="DELETE",
-                    session=session,
-                    old_value={"name": p.name, "description": p.description},
-                    new_value=None,
-                    performed_by="automated_agent",
-                    project_id=str(project_id),
-                    user_id=str(p.user_id),
-                )
+                async with session.begin_nested():
+                    await ArtifactEventLogRepository.log_event(
+                        artifact_type="project",
+                        artifact_id=str(project_id),
+                        action="DELETE",
+                        session=session,
+                        old_value={"name": p.name, "description": p.description},
+                        new_value=None,
+                        performed_by="automated_agent",
+                        project_id=str(project_id),
+                        user_id=str(p.user_id),
+                    )
             except Exception as log_err:
                 logger.warning(f"[EVENT LOG] Failed to log project delete: {log_err}")
+            await session.delete(p)
+            await session.flush()
             return True
         return False

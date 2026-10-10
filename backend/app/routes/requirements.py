@@ -410,29 +410,26 @@ async def post_clarification_submit(payload: Dict[str, Any], current_user: Authe
     if not req_state:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # CLARIFY 3.4 — Positional answer mapping (the fragile contract): the frontend
-    #             keys answers `q-0`, `q-1`, … by the index of the question in THIS
-    #             stored list, so an answer only lands on the right question while the
-    #             list order is unchanged between render (CLARIFY 1.1/1.2) and submit.
-    #             Unknown keys are silently ignored; a question without an answer stays
-    #             unresolved (which 3.5 then reports as invalid).
+    # Stable question UUIDs are the primary contract. Keep q-<index> support for
+    # older clients, but never depend on list position when an id is available.
     questions = req_state.get("clarification_questions", [])
     for idx, q in enumerate(questions):
-        ans_key = f"q-{idx}"
-        if ans_key in answers:
-            q["user_answer"] = answers[ans_key]
+        stable_key = str(q.get("id") or "")
+        legacy_key = f"q-{idx}"
+        answer = answers.get(stable_key) if stable_key else None
+        if answer is None:
+            answer = answers.get(legacy_key)
+        if isinstance(answer, str) and answer.strip():
+            q["user_answer"] = answer.strip()
             q["is_resolved"] = True
 
     req_state["clarification_questions"] = questions
 
-    # CLARIFY 3.5 — Verdict recompute (deterministic, no LLM): any question still
-    #             unresolved ⇒ validation_status "invalid" + workflow state
-    #             WAITING_CLARIFICATION; all answered ⇒ "valid" + REVIEWING. This is the
-    #             value the UI shows after submitting (and what ROUTING/GATHERING gate on).
+    # Answers are evidence for a future audit, not proof that blocking findings
+    # are fixed. Keep the project pending/invalid until a fresh Auditor run.
     unresolved = [q for q in questions if not q.get("is_resolved", False)]
-    is_valid = len(unresolved) == 0
-    req_state["validation_status"] = "valid" if is_valid else "invalid"
-    req_state["current_workflow_state"] = "REVIEWING" if is_valid else "WAITING_CLARIFICATION"
+    req_state["validation_status"] = "invalid"
+    req_state["current_workflow_state"] = "WAITING_CLARIFICATION" if unresolved else "AUDIT_PENDING"
 
     # CLARIFY 3.6 — THE WRITE (PROJECT 8.2.2): the whole state (with the answered
     #             questions) is persisted, which also re-derives the child rows. Note
@@ -616,6 +613,7 @@ async def _process_requirements_pipeline(
     # Load the centralized RequirementState from Supabase (single source of truth)
     logger.info(f"[DB LOG] Loading RequirementState for processing project {request.project_id}")
     req_state = await RequirementStateRepository.get_by_project_id(request.project_id, session)
+    persisted_version_at_start = req_state.get("version_number") if req_state else None
     logger.info(f"[DB LOG] Loading RequirementState for processing project {request.project_id} complete. Found: {req_state is not None}")
 
     # Detect intent on the raw input
@@ -944,6 +942,11 @@ async def _process_requirements_pipeline(
     }
 
     try:
+        # End the read transaction before potentially minutes of local-model
+        # inference. The same AsyncSession can safely autobegin a short write
+        # transaction when the graph saves its message/result afterwards; this
+        # avoids reserving a database connection for the entire generation.
+        await session.commit()
         # Run state graph asynchronously (merges and generates in memory)
         final_state = await prd_workflow.ainvoke(initial_state)
 
@@ -961,11 +964,27 @@ async def _process_requirements_pipeline(
 
         workflow_routing = final_state.get("workflow_routing") or {}
 
+        # A completed result remains useful even if the board changed during a
+        # long model run, but it must be read-only and never merge into the newer
+        # state. Return it with a stale marker instead of failing the whole job.
+        stale_result = False
+        if persisted_version_at_start is not None:
+            latest_state = await RequirementStateRepository.get_by_project_id(request.project_id, session)
+            latest_version = latest_state.get("version_number") if latest_state else None
+            if latest_version != persisted_version_at_start:
+                stale_result = True
+                logger.warning(
+                    "AI result for project %s is stale (started at version %s, latest is %s); returning without a pending merge",
+                    request.project_id, persisted_version_at_start, latest_version,
+                )
+
         # ==========================================
         # IN-MEMORY MERGE: Store merged state as a pending action instead of directly persisting to DB.
         # The user must confirm before changes are committed to the database.
         # ==========================================
 
+        audit_operational_error = bool(final_state.get("audit_operational_error"))
+        audit_auto_persisted = False
         logger.info(f"[IN-MEMORY MERGE] Storing merged state as pending action for project {request.project_id}...")
 
         # GATHERING 8.0 — Handoff to the CONFIRMATION flow: the merged state is NOT
@@ -975,23 +994,55 @@ async def _process_requirements_pipeline(
         #             DB: pending_actions INSERT. The response then triggers the
         #             debounced SSE refresh and the client's merge preview (8.1).
         # Create a pending action with the full merged state as proposed changes
-        pending_action = await PendingActionRepository.create(
-            project_id=request.project_id,
-            data={
-                "action_type": "MERGE",
-                "target_requirement_id": None,
-                "original_user_message": request.raw_input or "",
-                "proposed_changes": req_state,
-                "affected_user_story_ids": [],
-                "affected_acceptance_criteria_ids": [],
-                "workflow_stage": req_state.get("current_workflow_state", "gatherer_node")
-            },
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
-            session=session
-        )
-
-        pending_action_id = pending_action.get("id")
-        logger.info(f"[IN-MEMORY MERGE] Pending action {pending_action_id} created. Awaiting user confirmation.")
+        pending_action_id = None
+        if request.target_agent == "auditor" and not audit_operational_error and not stale_result:
+            # An audit changes only audit metadata and clarification questions;
+            # it is not a proposed requirements edit. Persist those fields
+            # immediately so questions are answerable by stable database IDs,
+            # without forcing a redundant Save/Merge confirmation.
+            saved_audit_state = await RequirementStateRepository.save_or_update(
+                request.project_id,
+                {
+                    "validation_status": req_state.get("validation_status", "invalid"),
+                    "current_workflow_state": req_state.get("current_workflow_state", "WAITING_CLARIFICATION"),
+                    "clarification_questions": req_state.get("clarification_questions", []),
+                    "passed_checks": req_state.get("passed_checks", []),
+                    "failed_checks": req_state.get("failed_checks", []),
+                    "audit_findings": req_state.get("audit_findings", []),
+                    "audit_source_references": req_state.get("audit_source_references", []),
+                    "audit_verdict": req_state.get("audit_verdict", "needs_clarification"),
+                    "audit_project_context": req_state.get("audit_project_context", {}),
+                    "audit_checklist_id": req_state.get("audit_checklist_id", "banking-core"),
+                    "audit_checklist_version": req_state.get("audit_checklist_version", "1.0.0"),
+                    "_record_audit_run": True,
+                },
+                session,
+            )
+            req_state = saved_audit_state
+            final_state["audit_result"]["clarification_questions"] = saved_audit_state.get("clarification_questions", [])
+            audit_auto_persisted = True
+            logger.info("Auditor result persisted directly for project %s; no merge confirmation required", request.project_id)
+        elif not audit_operational_error and not stale_result:
+            pending_action = await PendingActionRepository.create(
+                project_id=request.project_id,
+                data={
+                    "action_type": "MERGE",
+                    "target_requirement_id": None,
+                    "original_user_message": request.raw_input or "",
+                    "proposed_changes": req_state,
+                    "affected_user_story_ids": [],
+                    "affected_acceptance_criteria_ids": [],
+                    "workflow_stage": req_state.get("current_workflow_state", "gatherer_node")
+                },
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                session=session
+            )
+            pending_action_id = pending_action.get("id")
+            logger.info(f"[IN-MEMORY MERGE] Pending action {pending_action_id} created. Awaiting user confirmation.")
+        elif audit_operational_error:
+            logger.warning("Auditor operational failure: no pending action created for project %s", request.project_id)
+        else:
+            logger.warning("Stale AI result: no pending action created for project %s", request.project_id)
 
         # ==========================================
         # STEP 5: Persist assistant response for non-GENERAL_CHAT intents
@@ -1008,7 +1059,7 @@ async def _process_requirements_pipeline(
 
         # Determine status dynamically based on centralized validation status
         is_valid = req_state.get("validation_status") == "valid"
-        status_str = "completed" if is_valid else "audit_pending"
+        status_str = "stale" if stale_result else ("completed" if is_valid else "audit_pending")
 
         # Format structures back to preserve frontend compatibility
         reqs_data = req_state.get("requirements", [])
@@ -1069,8 +1120,10 @@ async def _process_requirements_pipeline(
             "prd_markdown": req_state.get("generated_prd", ""),
             "mermaid_diagram": req_state.get("generated_diagrams", ""),
             "message": agent_message,
-            "pending_merge": True,
-            "pending_action_id": pending_action_id
+            "pending_merge": not audit_operational_error and not stale_result and not audit_auto_persisted,
+            "pending_action_id": pending_action_id,
+            "stale_result": stale_result,
+            "audit_auto_persisted": audit_auto_persisted,
         }
     except HTTPException:
         # Preserve intentional 4xx responses (notably validation-context 413s)

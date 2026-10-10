@@ -424,6 +424,7 @@ export interface ProcessRequirementsResponse {
   message?: string | null;
   pending_merge?: boolean | null;
   pending_action_id?: string | null;
+  stale_result?: boolean | null;
   conversation_history?: ConversationMessagePayload[];
   [key: string]: unknown;
 }

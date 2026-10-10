@@ -55,6 +55,25 @@ async def test_background_job_persists_completed_result(job_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_background_job_has_one_global_timeout(job_db, monkeypatch):
+    factory, user_id, project_id = job_db
+    job_id = await _new_job(factory, user_id, project_id)
+
+    async def execute(_job, _session):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(jobs, "_execute", execute)
+    monkeypatch.setattr(jobs.settings, "LLM_BACKGROUND_JOB_TIMEOUT_SECONDS", 0.02)
+    jobs.launch_job(job_id)
+    await asyncio.wait_for(jobs._tasks[job_id], timeout=1)
+
+    async with factory() as session:
+        job = await session.get(GenerationJobModel, job_id)
+        assert job.status == "failed"
+        assert job.error_message.startswith("timeout:")
+
+
+@pytest.mark.asyncio
 async def test_user_cancel_is_terminal_but_shutdown_is_recoverable(job_db, monkeypatch):
     factory, user_id, project_id = job_db
     started = asyncio.Event()

@@ -15,12 +15,30 @@ from app.auth import AuthenticatedUser
 from app.database import AsyncSessionLocal
 from app.models import GenerationJobModel, UserModel
 from app.schemas import ProcessRequirementsRequest
+from app.config import settings
 
 logger = logging.getLogger("app.generation_jobs")
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 _tasks: dict[str, asyncio.Task] = {}
+_heavy_inference_semaphore = asyncio.Semaphore(
+    max(1, settings.LLM_MAX_CONCURRENT_HEAVY_JOBS)
+)
+
+
+def _public_failure(exc: Exception) -> str:
+    """Return a useful category without leaking parser prompts or DB details."""
+    message = str(exc).lower()
+    if isinstance(exc, asyncio.TimeoutError) or "timed out" in message or "timeout" in message:
+        return "timeout: The local model did not finish within the job deadline."
+    if "connect" in message or "lm studio" in message:
+        return "llm_unavailable: LM Studio is not reachable or has no responsive model loaded."
+    if "above the configured safe limit" in message or "context" in message and "limit" in message:
+        return "context_limit: The audit input is too large for a reliable local-model run. Narrow or split the knowledge documents."
+    if "parse" in message or "structured" in message or "auditor could not complete" in message:
+        return "invalid_model_output: The local model did not return a valid structured result."
+    return "workflow_error: The background workflow failed. Check the server log for details."
 
 
 def serialize_job(job: GenerationJobModel) -> dict[str, Any]:
@@ -126,7 +144,18 @@ async def _run_job(job_id: str) -> None:
         job.started_at = job.started_at or datetime.now(timezone.utc)
         await session.commit()
         try:
-            result = await _execute(job, session)
+            if job.job_type in {"architect", "auditor"}:
+                job.progress_stage = "waiting_for_local_model"
+                await session.commit()
+                async with _heavy_inference_semaphore:
+                    job.progress_stage = "model_processing"
+                    await session.commit()
+                    result = await asyncio.wait_for(
+                        _execute(job, session),
+                        timeout=settings.LLM_BACKGROUND_JOB_TIMEOUT_SECONDS,
+                    )
+            else:
+                result = await _execute(job, session)
             job.status = "completed"
             job.progress_stage = "completed"
             job.result_payload = result
@@ -159,7 +188,7 @@ async def _run_job(job_id: str) -> None:
             if job is not None:
                 job.status = "failed"
                 job.progress_stage = "failed"
-                job.error_message = str(exc)[:4000]
+                job.error_message = _public_failure(exc)
                 job.completed_at = datetime.now(timezone.utc)
                 await session.commit()
             logger.exception("Generation job %s failed", job_id)

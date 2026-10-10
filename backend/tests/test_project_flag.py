@@ -16,9 +16,12 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import Base
+from app.models import ProjectModel
+from app.repositories.event_log import ArtifactEventLogRepository
 from app.repositories.project import ProjectRepository
 
 
@@ -100,3 +103,37 @@ async def test_flag_does_not_float_to_sidebar_top(db_session):
     assert results[0]["is_flagged"] is False
     assert results[1]["is_pinned"] is False
     assert results[1]["is_flagged"] is True
+
+
+@pytest.mark.asyncio
+async def test_delete_logs_before_removing_project(monkeypatch, db_session):
+    """The delete audit FK must be written while its project still exists."""
+    pid = await _create_project(db_session, "Delete Me")
+
+    async def assert_parent_exists(**kwargs):
+        count = await kwargs["session"].scalar(
+            select(func.count()).select_from(ProjectModel).where(ProjectModel.id == uuid.UUID(pid))
+        )
+        assert count == 1
+        return {}
+
+    monkeypatch.setattr(ArtifactEventLogRepository, "log_event", assert_parent_exists)
+
+    assert await ProjectRepository.delete(pid, db_session) is True
+    await db_session.commit()
+    assert await ProjectRepository.get_by_id(pid, db_session) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_survives_audit_log_failure(monkeypatch, db_session):
+    """Audit logging is fail-open without poisoning the delete transaction."""
+    pid = await _create_project(db_session, "Delete Despite Audit Failure")
+
+    async def broken_log(**kwargs):
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(ArtifactEventLogRepository, "log_event", broken_log)
+
+    assert await ProjectRepository.delete(pid, db_session) is True
+    await db_session.commit()
+    assert await ProjectRepository.get_by_id(pid, db_session) is None

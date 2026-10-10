@@ -1,5 +1,6 @@
 """architect_node must ALWAYS fill the official Krungsri template from the
 project dataset - it must never merge with, or return, a previous PRD doc."""
+import copy
 import sys
 
 import pytest
@@ -137,17 +138,59 @@ async def test_architect_reuses_krungsri_prd_when_nothing_changed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_architect_raises_on_empty_dataset(monkeypatch):
-    """No stories anywhere -> fail loudly instead of producing a blank PRD."""
+    """No requirements or stories -> fail instead of producing a blank PRD."""
     empty = dict(REQ_STATE)
     empty["requirements"] = []
     _patch(monkeypatch, empty)
 
-    with pytest.raises(ValueError, match="no unlocked user stories"):
+    with pytest.raises(ValueError, match="no active requirements or user stories"):
         await agents.architect_node({
             "project_id": "p1",
             "current_version": 2,
             "structured_requirements": {},
         })
+
+
+@pytest.mark.asyncio
+async def test_architect_generates_from_requirement_without_user_stories(monkeypatch):
+    """A valid requirement must not be mistaken for an empty project."""
+    requirement_only = copy.deepcopy(REQ_STATE)
+    requirement_only["requirements"][0]["user_stories"] = []
+    requirement_only["requirements"][0]["description"] = "Customers can submit eligible refunds online"
+    requirement_only["user_stories"] = []
+    _patch(monkeypatch, requirement_only)
+
+    result = await agents.architect_node({
+        "project_id": "p1",
+        "current_version": 2,
+        "structured_requirements": {},
+        "stage_artifacts_only": True,
+    })
+
+    assert result["prd_markdown"]
+    assert "REQ-001: Refund Request Submission" in result["prd_markdown"]
+    assert "Customers can submit eligible refunds online" in result["prd_markdown"]
+
+
+@pytest.mark.asyncio
+async def test_architect_ignores_empty_client_snapshot_and_reads_locked_server_stories(monkeypatch):
+    locked = copy.deepcopy(REQ_STATE)
+    for story in locked["user_stories"]:
+        story["is_locked"] = True
+    for requirement in locked["requirements"]:
+        for story in requirement.get("user_stories", []):
+            story["is_locked"] = True
+    _patch(monkeypatch, locked)
+
+    result = await agents.architect_node({
+        "project_id": "p1",
+        "current_version": 2,
+        "structured_requirements": {"epic_name": "stale", "version": 2, "user_stories": []},
+        "stage_artifacts_only": True,
+    })
+
+    assert result["prd_markdown"]
+    assert "US-001" in result["prd_markdown"]
 
 
 @pytest.mark.asyncio

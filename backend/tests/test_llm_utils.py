@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 
 from app.config import settings
-from app.llm_utils import invoke_llm_structured, parse_json_object
+from app.llm_utils import extract_llm_content, invoke_llm_structured, parse_json_object
 
 
 class SmallOutput(BaseModel):
@@ -25,6 +25,32 @@ class SlowRunnable(RunnableLambda):
 def test_parse_json_object_repairs_fences_prose_and_trailing_commas():
     parsed = parse_json_object('Answer:\n```json\n{"name":"ok","items":[1,2,],}\n```')
     assert parsed == {"name": "ok", "items": [1, 2]}
+
+
+def test_extract_llm_content_supports_block_responses():
+    response = AIMessage(content=[{"type": "text", "text": '{"name":"ok","count":1}'}])
+    assert extract_llm_content(response) == '{"name":"ok","count":1}'
+
+
+@pytest.mark.asyncio
+async def test_structured_invoke_repairs_without_repeating_source_prompt():
+    calls = []
+
+    def respond(value):
+        calls.append(value)
+        if len(calls) == 1:
+            return AIMessage(content='Here is the result: name=ready, count=2')
+        return AIMessage(content='{"name":"ready","count":2}')
+
+    llm = RunnableLambda(respond)
+    prompt = PromptTemplate.from_template("Large source: {source}\n{format_instructions}")
+    result = await invoke_llm_structured(
+        llm, prompt, SmallOutput, {"source": "sensitive-large-input"},
+        format_instructions="Return name and count as JSON",
+    )
+    assert result == {"name": "ready", "count": 2}
+    assert len(calls) == 2
+    assert "sensitive-large-input" not in str(calls[1])
 
 
 @pytest.mark.asyncio

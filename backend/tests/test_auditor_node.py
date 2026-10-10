@@ -288,6 +288,16 @@ def test_recommendations_do_not_fail_audit():
     assert merged["failed_checks"] == []
 
 
+def test_unanswered_questions_cannot_produce_a_valid_audit():
+    merged = agents._merge_audit_passes([{
+        "findings": [],
+        "clarification_questions": [{"question_text": "Who approves the transfer?"}],
+    }], 1)
+
+    assert merged["is_valid"] is False
+    assert merged["verdict"] == "needs_clarification"
+
+
 def test_auditor_prompt_renders_without_accidental_template_variables():
     """Literal JSON/source examples must use escaped braces for LangChain."""
     prompt = agents.PromptTemplate(
@@ -358,6 +368,24 @@ def test_audit_rejects_unverifiable_citations(bad_field, bad_value):
     assert not agents._validate_audit_output(output, [document])
 
 
+@pytest.mark.parametrize("field,value", [
+    ("impact", "high"),
+    ("severity", "urgent"),
+    ("applicability", "required"),
+    ("confidence", 1.5),
+])
+def test_audit_rejects_invalid_finding_enums_and_bounds(field, value):
+    finding = {
+        "finding_type": "missing", "severity": "high", "category": "Approval",
+        "description": "Approval is missing.", "source_references": [],
+        "evidence_status": "supported", "applicability": "applicable_required",
+        "impact": "blocking", "confidence": 0.9,
+    }
+    finding[field] = value
+    output = {"is_valid": False, "findings": [finding], "clarification_questions": []}
+    assert not agents._validate_audit_output(output, [])
+
+
 @pytest.mark.asyncio
 async def test_unchanged_stories_are_reviewed(monkeypatch):
     _patch(monkeypatch, MULTI_GROUP_BOARD)
@@ -371,7 +399,7 @@ async def test_unchanged_stories_are_reviewed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auditor_parse_failure_returns_safe_retryable_result(monkeypatch):
+async def test_auditor_parse_failure_returns_unmergeable_operational_result(monkeypatch):
     board = copy.deepcopy(MULTI_GROUP_BOARD)
     board["user_stories"][0]["change_type"] = "updated"
     _patch(monkeypatch, board)
@@ -384,9 +412,6 @@ async def test_auditor_parse_failure_returns_safe_retryable_result(monkeypatch):
         "project_id": "p1", "current_version": 3,
         "structured_requirements": _legacy_payload(board["user_stories"]),
     })
-    audit = result["audit_result"]
-    assert audit["is_valid"] is False
-    assert audit["verdict"] == "needs_clarification"
-    assert audit["failed_checks"] == ["AUDIT_PARSE_ERROR"]
-    assert audit["findings"][0]["finding_type"] == "audit_unavailable"
+    assert result["audit_operational_error"] is True
+    assert result["audit_result"]["failed_checks"] == ["AUDIT_PARSE_ERROR"]
     assert "line 213" not in result["agent_message"]

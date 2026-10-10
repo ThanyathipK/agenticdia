@@ -24,8 +24,6 @@ import {
   Clock,
   Download,
   Printer,
-  AlertTriangle,
-  CheckCircle2,
   LayoutGrid,
   Lock,
   Pin,
@@ -120,11 +118,6 @@ export default function Dashboard() {
     setActiveView,
     handleDownloadDocx,
     handlePrintPDF,
-    currentAgentNode,
-    auditResult,
-    handleSubmitClarifications,
-    clarificationAnswers,
-    handleUpdateAnswerValue,
     structuredRequirements,
     lockedRequirements,
     handleLockRequirement,
@@ -737,74 +730,6 @@ export default function Dashboard() {
                     }}
                 />
             ))}
-
-            {/* Dedicated Clarification Section displayed ONLY when currentAgentNode === WAITING_CLARIFICATION */}
-            {currentAgentNode === "WAITING_CLARIFICATION" && auditResult.clarification_questions && auditResult.clarification_questions.some(q => !q.is_resolved) && (
-              <motion.div 
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="max-w-4xl mx-auto mb-8 bg-white border-2 border-primary/30 rounded-3xl p-6 shadow-xl relative overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none"></div>
-                <div className="flex items-center gap-3 mb-4 relative z-10 min-w-0">
-                  <div className="w-10 h-10 rounded-2xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                    <AlertTriangle className="w-5 h-5" />
-                  </div>
-                  <div className="min-w-0">
-                    <h2 className="font-heading font-bold text-base text-on-surface break-words">
-                      Compliance Audit Clarification Required (Waiting Clarification)
-                    </h2>
-                    <p className="text-xs text-on-surface-variant">
-                      Please provide answers to the unresolved clarification questions below to clear the technical audit roadblock.
-                    </p>
-                  </div>
-                </div>
-
-                {/* CLARIFY 1.1 — Dashboard clarification panel: unresolved questions
-                    (filtered only for DISPLAY) with position-keyed inputs (1.4) and the
-                    shared submit handler (1.3). Despite the button label, the backend
-                    does not re-run the auditor here — see CLARIFY 3.0. */}
-                <form onSubmit={handleSubmitClarifications} className="space-y-4 relative z-10">
-                  {auditResult.clarification_questions
-                    .map((q, idx) => ({ q, idx }))
-                    .filter(({ q }) => !q.is_resolved)
-                    .map(({ q, idx }) => (
-                      <div key={idx} className="bg-slate-50 border border-outline/60 p-4 rounded-2xl space-y-2 min-w-0">
-                        <div className="flex flex-wrap items-center justify-between gap-1.5">
-                          <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-2 py-0.5 rounded break-words">
-                            {q.checklist_category}
-                          </span>
-                          <span className="text-[10px] font-mono text-on-surface-variant font-semibold break-words min-w-0 text-right">
-                            Target: {q.target_user_story_id || "General"}
-                          </span>
-                        </div>
-                        <p className="text-sm font-medium text-on-surface break-words">
-                          {q.question_text}
-                        </p>
-                        {/* CLARIFY 1.4 — Position-keyed answer input (`q-<index>` over the
-                            FULL stored list, matching CLARIFY 3.4). */}
-                        <input
-                          type="text"
-                          required
-                          value={clarificationAnswers[`q-${idx}`] || ""}
-                          onChange={(e) => handleUpdateAnswerValue(`q-${idx}`, e.target.value)}
-                          placeholder="Enter your professional resolution or answer here..."
-                          className="w-full bg-white border border-outline rounded-xl px-3.5 py-2 text-xs text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
-                        />
-                      </div>
-                    ))}
-
-                  <button
-                    type="submit"
-                    className="w-full bg-primary hover:brightness-110 active:scale-[0.99] text-on-primary py-3 rounded-2xl font-label-md text-xs font-bold shadow-lg shadow-primary/20 flex items-center justify-center gap-2 cursor-pointer transition-all"
-                  >
-                    <CheckCircle2 className="w-4.5 h-4.5" />
-                    <span>Submit Answers & Re-Audit</span>
-                  </button>
-                </form>
-              </motion.div>
-            )}
-
 
             {/* Requirement Lock Status Panel — only shown on the Requirements tab */}
             {activeTab === 'trace' && lockTargets.length > 0 && (

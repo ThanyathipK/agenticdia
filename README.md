@@ -347,8 +347,12 @@ All backend configuration lives in `backend/.env`. Unlisted keys such as `GEMINI
 | `RATE_LIMIT_ENABLED` | `true` | Master switch for in-process sliding-window rate limiting on LLM-facing endpoints |
 | `RATE_LIMIT_CHAT_LIMIT` / `RATE_LIMIT_CHAT_WINDOW` | `30` / `60` | Max `/api/chat` requests per client IP per window (seconds) |
 | `RATE_LIMIT_WORKFLOW_LIMIT` / `RATE_LIMIT_WORKFLOW_WINDOW` | `60` / `60` | Max workflow-endpoint requests (`process-requirements`, `workflow-router`, `intent-detector`, `requirement-matcher`) per client IP per window (seconds) |
-| `LLM_REQUEST_TIMEOUT_SECONDS` | `180` | Maximum wall time for one local-model request before the structured-output fallback is attempted |
-| `LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS` | `300` | Shared wall-time budget across raw JSON parsing and the provider structured-output fallback |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `300` | Maximum wall time for one local-model request |
+| `LLM_STRUCTURED_TOTAL_TIMEOUT_SECONDS` | `330` | Shared wall-time budget across structured-output attempts |
+| `LLM_STRUCTURED_PROVIDER_FALLBACK` | `false` | Opt in to a second provider schema-output request after raw JSON parsing fails; disabled for LM Studio/Qwen to avoid repeating a full slow prompt |
+| `LLM_BACKGROUND_JOB_TIMEOUT_SECONDS` | `360` | Absolute deadline for an Auditor or Architect background job |
+| `LLM_MAX_CONCURRENT_HEAVY_JOBS` | `1` | Process-wide heavy-generation limit, sized for a local 9B model on 16GB RAM |
+| `AUDITOR_MAX_PASSES` | `4` | Maximum sequential document contexts evaluated by one audit |
 | `RATE_LIMIT_STORE` | `in-process` | Limiter backend. Only `in-process` exists today, and it **requires a single uvicorn worker** — the app refuses to boot with `--workers N` so the 429 budget can never silently scale by worker count |
 | `RATE_LIMIT_ALLOW_MULTI_PROCESS_IN_PROCESS` | `false` | Explicit opt-out: run N workers with the in-process store (each worker gets an independent budget — weaker posture; the app warns loudly at startup) |
 | `SSE_HISTORY_BUFFER_SIZE` | `1000` | Per-project ring buffer replayed to reconnecting SSE clients via `Last-Event-ID` |

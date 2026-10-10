@@ -7,7 +7,7 @@ import { useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import axios from 'axios';
 import { api } from '../api/client';
-import type { PendingActionPayload, ProjectSummary } from '../api/types';
+import type { PendingActionPayload, ProcessRequirementsResponse, ProjectSummary } from '../api/types';
 import {
   toAuditResultFromPayload,
   toGatheredRequirementsPayload,
@@ -55,6 +55,12 @@ export interface UseChatResult {
 }
 
 const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+const activeJobKey = (projectId: string, jobType: 'auditor' | 'architect') =>
+  `agenticdia:active-job:${projectId}:${jobType}`;
+
+const questionAnswerKey = (question: { id?: string }, index: number) =>
+  question.id || `q-${index}`;
 
 const waitForPoll = (signal: AbortSignal, delayMs = 1000): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -393,13 +399,30 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         current_version: deps.currentVersion,
         version_history_summaries: 'No previous history.',
       };
-      let job = await api.startAgentJob(request);
-      backgroundJobRef.current = job.id;
-      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
-        await waitForPoll(controller.signal);
-        job = await api.getGenerationJob(projectId, job.id);
-        store.setSyncStatus(`Running Technical Audit… ${job.progress_stage.replaceAll('_', ' ')}`);
+      const storageKey = activeJobKey(projectId, 'auditor');
+      const savedJobId = window.localStorage.getItem(storageKey);
+      let job;
+      if (savedJobId) {
+        try {
+          job = await api.getGenerationJob<ProcessRequirementsResponse>(projectId, savedJobId);
+        } catch (resumeError) {
+          if (isUnauthorizedError(resumeError)) throw resumeError;
+          window.localStorage.removeItem(storageKey);
+          job = await api.startAgentJob(request);
+        }
+      } else {
+        job = await api.startAgentJob(request);
       }
+      window.localStorage.setItem(storageKey, job.id);
+      backgroundJobRef.current = job.id;
+      let pollDelayMs = 1000;
+      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
+        await waitForPoll(controller.signal, pollDelayMs);
+        job = await api.getGenerationJob<ProcessRequirementsResponse>(projectId, job.id);
+        store.setSyncStatus(`Running Technical Audit… ${job.progress_stage.replaceAll('_', ' ')}`);
+        pollDelayMs = Math.min(5000, pollDelayMs + 500);
+      }
+      window.localStorage.removeItem(storageKey);
       if (job.status === 'cancelled') throw new DOMException('Generation cancelled', 'AbortError');
       if (job.status === 'failed' || !job.result) {
         throw new Error(job.error_message || 'Background audit failed.');
@@ -413,6 +436,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
       const receivedAudit = toAuditResultFromPayload(data.audit_result);
       const pendingActionId = data.pending_action_id;
       const isPendingMerge = data.pending_merge === true;
+      const isStaleResult = data.stale_result === true;
 
       // Handle pending merge for audit results (if applicable)
       if (isPendingMerge && pendingActionId) {
@@ -442,6 +466,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         ? `Inferred context: ${context.business_segment}, ${context.product_domain}, ${context.solution_type}, ${context.delivery_stage} (${Math.round(context.confidence * 100)}% confidence)`
         : '';
       const auditCouldNotComplete = receivedAudit.failed_checks.includes('AUDIT_PARSE_ERROR');
+      if (isStaleResult) {
+        store.setMessages(prev => [...prev, {
+          id: `audit-stale-${Date.now()}`,
+          role: 'assistant',
+          content: `The audit completed, but requirements changed while it was running. This result is read-only and was not applied.\n${contextText}\n\nFindings from the older version:\n${findingTexts || 'No findings were returned.'}\n\nRun Validate Requirements again for the latest version.`,
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Audit completed on an older version. Run Validate again.');
+        return;
+      }
       // AUDIT 5.3 — Failure branch: the assistant bubble carries the questions and
       //            `isPendingClarifications` + `auditResultSnapshot`, which is what
       //            renders the embedded clarification form (AUDIT 5.3.1). The sync
@@ -485,8 +519,8 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
 
       if (receivedAudit.clarification_questions) {
         const initialAnswers: Record<string, string> = {};
-        receivedAudit.clarification_questions.forEach((_q, idx) => {
-          initialAnswers[`q-${idx}`] = '';
+        receivedAudit.clarification_questions.forEach((q, idx) => {
+          initialAnswers[questionAnswerKey(q, idx)] = '';
         });
         store.setClarificationAnswers(initialAnswers);
       }
@@ -525,7 +559,7 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setMessages(prev => [...prev, {
           id: `audit-auth-expired-${Date.now()}`,
           role: 'assistant',
-          content: 'The audit job is still stored, but your sign-in session expired while checking its result. Sign in again, then run Validate Requirements to retrieve a fresh audit.',
+          content: 'The audit job is still stored, but your sign-in session expired while checking its result. Sign in again, then click Validate Requirements to resume this same job.',
           timestamp: nowTime(),
         }]);
         store.setSyncStatus('Sign-in expired. Please sign in again.');
@@ -586,13 +620,30 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         current_version: deps.currentVersion,
         version_history_summaries: buildVersionHistorySummaries(),
       };
-      let job = await api.startAgentJob(request);
-      backgroundJobRef.current = job.id;
-      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
-        await waitForPoll(controller.signal);
-        job = await api.getGenerationJob(projectId, job.id);
-        store.setSyncStatus(`Compiling enterprise PRD document… ${job.progress_stage.replaceAll('_', ' ')}`);
+      const storageKey = activeJobKey(projectId, 'architect');
+      const savedJobId = window.localStorage.getItem(storageKey);
+      let job;
+      if (savedJobId) {
+        try {
+          job = await api.getGenerationJob<ProcessRequirementsResponse>(projectId, savedJobId);
+        } catch (resumeError) {
+          if (isUnauthorizedError(resumeError)) throw resumeError;
+          window.localStorage.removeItem(storageKey);
+          job = await api.startAgentJob(request);
+        }
+      } else {
+        job = await api.startAgentJob(request);
       }
+      window.localStorage.setItem(storageKey, job.id);
+      backgroundJobRef.current = job.id;
+      let pollDelayMs = 1000;
+      while (!['completed', 'failed', 'cancelled'].includes(job.status)) {
+        await waitForPoll(controller.signal, pollDelayMs);
+        job = await api.getGenerationJob<ProcessRequirementsResponse>(projectId, job.id);
+        store.setSyncStatus(`Compiling enterprise PRD document… ${job.progress_stage.replaceAll('_', ' ')}`);
+        pollDelayMs = Math.min(5000, pollDelayMs + 500);
+      }
+      window.localStorage.removeItem(storageKey);
       if (job.status === 'cancelled') throw new DOMException('Generation cancelled', 'AbortError');
       if (job.status === 'failed' || !job.result) {
         throw new Error(job.error_message || 'Background PRD generation failed.');
@@ -652,6 +703,16 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
         store.setSyncStatus('PRD generation blocked: project exceeds the LLM context budget.');
         return;
       }
+      if (isUnauthorizedError(err)) {
+        store.setMessages(prev => [...prev, {
+          id: `prd-auth-expired-${Date.now()}`,
+          role: 'assistant',
+          content: 'The PRD job is still stored, but your sign-in session expired while checking it. Sign in again and click Generate PRD to resume the same job.',
+          timestamp: nowTime(),
+        }]);
+        store.setSyncStatus('Sign-in expired. The PRD job can be resumed after signing in.');
+        return;
+      }
       handleError('PRD generation did not complete.', err);
       store.setMessages(prev => [...prev, {
         id: `prd-error-${Date.now()}`,
@@ -708,16 +769,43 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
   //             The empty-answer guard makes the button a no-op until something is typed.
   const handleSubmitClarifications = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (Object.keys(store.clarificationAnswers).length === 0) return;
+    const submittedAnswers = Object.fromEntries(
+      Object.entries(store.clarificationAnswers)
+        .map(([key, value]) => [key, value.trim()])
+        .filter(([, value]) => value.length > 0)
+    );
+    if (Object.keys(submittedAnswers).length === 0) {
+      store.setSyncStatus('Enter at least one answer before saving.');
+      return;
+    }
 
     try {
       store.setSyncStatus('Submitting clarifications...');
       // CLARIFY 1.5 — API boundary: POST /api/clarification/submit (CLARIFY 2.1 /
       //             3.0) carrying the position-keyed answers (1.4). A failure leaves
       //             the typed answers in place so the user can retry.
-      const res = await api.submitClarifications(deps.projectId ?? '', store.clarificationAnswers);
+      const res = await api.submitClarifications(deps.projectId ?? '', submittedAnswers);
       if (res) {
-        store.setClarificationAnswers({});
+        const refreshedQuestions = res.clarification_questions || [];
+        const unresolvedQuestions = refreshedQuestions.filter(question => !question.is_resolved);
+        const remainingAnswers: Record<string, string> = {};
+        unresolvedQuestions.forEach((question, index) => {
+          remainingAnswers[questionAnswerKey(question, index)] = '';
+        });
+        store.setClarificationAnswers(remainingAnswers);
+        // Update the inline chat form in place: answered questions disappear,
+        // while unanswered questions remain available for a later submission.
+        store.setMessages(prev => prev.map(message =>
+          message.isPendingClarifications
+            ? {
+                ...message,
+                isPendingClarifications: unresolvedQuestions.length > 0,
+                auditResultSnapshot: message.auditResultSnapshot
+                  ? { ...message.auditResultSnapshot, clarification_questions: refreshedQuestions }
+                  : message.auditResultSnapshot,
+              }
+            : message
+        ));
         if (res.current_workflow_state) {
           store.setCurrentAgentNode(res.current_workflow_state);
         }
@@ -728,8 +816,13 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
             clarification_questions: res.clarification_questions,
           }));
         }
-        if (deps.projectId) deps.loadProjectState(deps.projectId);
-        store.setSyncStatus('Clarifications submitted successfully');
+        if (deps.projectId) await deps.loadProjectState(deps.projectId);
+        if (unresolvedQuestions.length > 0) {
+          store.setSyncStatus(`${unresolvedQuestions.length} clarification question(s) still unanswered.`);
+        } else {
+          store.setSyncStatus('Clarifications saved. Re-running the technical audit...');
+          await handleValidateRequirements();
+        }
       }
     } catch (err) {
       handleError('Failed to submit clarifications.', err);
@@ -737,11 +830,8 @@ export function useChat(store: RequirementStore, deps: ChatDeps): UseChatResult 
     }
   };
 
-  // CLARIFY 1.4 — Answer state writer: the input keys are POSITIONAL (`q-<index>`),
-  //             matching the backend's enumerate() in CLARIFY 3.4. This is why the UI
-  //             maps the questions WITHOUT filtering before assigning the index
-  //             (1.1 / 1.2) — filtering first would shift every answer onto the wrong
-  //             question.
+  // Stable persisted question IDs are used when available. The q-<index>
+  // fallback preserves compatibility for newly staged, not-yet-persisted audits.
   const handleUpdateAnswerValue = (key: string, value: string) => {
     store.setClarificationAnswers(prev => ({
       ...prev,

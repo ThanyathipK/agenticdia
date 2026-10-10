@@ -29,9 +29,24 @@ def extract_llm_content(response: Any) -> str:
     returning an empty string here used to make every structured generation
     fail and fall through to the error path.
     """
-    # Priority 1: top-level .content string
-    if hasattr(response, "content") and isinstance(response.content, str) and response.content.strip():
-        return response.content
+    # Priority 1: top-level .content. Newer OpenAI-compatible responses may
+    # expose content as blocks instead of one string.
+    if hasattr(response, "content"):
+        content = response.content
+        if isinstance(content, str) and content.strip():
+            return content
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                if isinstance(block, str):
+                    blocks.append(block)
+                elif isinstance(block, dict):
+                    value = block.get("text") or block.get("content") or block.get("value")
+                    if isinstance(value, str):
+                        blocks.append(value)
+            joined = "\n".join(part for part in blocks if part.strip())
+            if joined:
+                return joined
     # Priority 1b: reasoning models answering in reasoning_content with empty content
     if hasattr(response, "additional_kwargs"):
         kwargs = response.additional_kwargs or {}
@@ -116,6 +131,7 @@ async def invoke_llm_structured(
     description: str = "LLM structured output",
     format_instructions: str,
     validate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    native_json_schema: bool = False,
 ) -> Dict[str, Any]:
     """
     Invoke the LLM and return the parsed result as a plain dict.
@@ -154,19 +170,42 @@ async def invoke_llm_structured(
             timeout=min(settings.LLM_REQUEST_TIMEOUT_SECONDS, remaining),
         )
 
+    inference_llm = llm
+    if native_json_schema:
+        # LM Studio supports OpenAI-compatible response_format=json_schema.
+        # This constrains token generation itself, unlike prompt-only requests
+        # where a long local-model response may contain prose or no JSON.
+        schema_name = re.sub(r"[^a-zA-Z0-9_-]", "_", schema.__name__)[:64]
+        native_schema = schema.model_json_schema()
+        # Pydantic defaults make fields optional in generated JSON Schema.
+        # AuditorOutput uses defaults for backwards-compatible parsing, but a
+        # constrained generation must emit every top-level field; otherwise the
+        # model can legally return `{}` and the defaults resemble a real audit.
+        native_schema["required"] = list(native_schema.get("properties", {}).keys())
+        inference_llm = llm.bind(response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": False,
+                "schema": native_schema,
+            },
+        })
+
     # Attempt 1: single raw invocation + tolerant JSON parsing
     raw_failure = "unknown"
+    raw_text = ""
     try:
         raw_variables = {**variables, "format_instructions": format_instructions}
-        raw_chain = prompt_template | llm
+        raw_chain = prompt_template | inference_llm
         raw_response = await bounded(raw_chain.ainvoke(raw_variables))
-        result = parse_json_object(extract_llm_content(raw_response))
+        raw_text = extract_llm_content(raw_response)
+        result = parse_json_object(raw_text)
         result = schema.model_validate(result).model_dump()
         if validate is None or validate(result):
             logger.info(f"Successfully parsed {description} from raw LLM output.")
             return result
         raw_failure = f"raw output failed validation for {description}"
-        logger.warning(f"{raw_failure}. Falling back to structured output.")
+        logger.warning(f"{raw_failure}.")
     except TimeoutError as e:
         # A second structured-output request cannot repair a provider timeout;
         # it only makes the user wait through the remaining total budget before
@@ -174,9 +213,45 @@ async def invoke_llm_structured(
         raise RuntimeError(f"{description} timed out before returning structured output") from e
     except Exception as e:
         raw_failure = str(e)
-        logger.warning(f"Raw parse failed for {description}: {e}. Falling back to structured output.")
+        metadata = getattr(locals().get("raw_response"), "response_metadata", {}) or {}
+        logger.warning(
+            "Raw parse failed for %s: %s (content_chars=%s, finish_reason=%s)",
+            description, e, len(raw_text), metadata.get("finish_reason"),
+        )
 
-    # Attempt 2: provider structured output (fallback)
+    # A malformed but non-empty response can often be repaired cheaply without
+    # sending the large requirements/documents prompt a second time. This call
+    # sees only the broken output and the compact contract.
+    if raw_text.strip():
+        try:
+            repair_prompt = PromptTemplate.from_template(
+                "Repair the candidate into one valid JSON object. Preserve its facts; "
+                "do not invent evidence. Return JSON only.\n\nRequired contract:\n{contract}\n\n"
+                "Candidate:\n{candidate}"
+            )
+            repair_chain = repair_prompt | inference_llm
+            repair_response = await bounded(repair_chain.ainvoke({
+                "contract": format_instructions,
+                "candidate": raw_text[:20000],
+            }))
+            repaired = parse_json_object(extract_llm_content(repair_response))
+            result = schema.model_validate(repaired).model_dump()
+            if validate is None or validate(result):
+                logger.info("Successfully repaired %s without repeating the source prompt.", description)
+                return result
+            raw_failure = f"repaired output failed validation for {description}"
+        except TimeoutError as exc:
+            raise RuntimeError(f"{description} timed out during compact JSON repair") from exc
+        except Exception as exc:
+            raw_failure = f"{raw_failure}; compact repair failed: {exc}"
+            logger.warning("Compact JSON repair failed for %s: %s", description, exc)
+
+    if not settings.LLM_STRUCTURED_PROVIDER_FALLBACK:
+        raise RuntimeError(
+            f"Unable to parse {description} from the model response: {raw_failure}"
+        )
+
+    # Attempt 2: provider structured output (opt-in fallback)
     try:
         logger.info(f"Attempting .with_structured_output() for {description}.")
         chain = prompt_template | llm.with_structured_output(schema)

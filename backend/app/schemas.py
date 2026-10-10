@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Literal
 from uuid import UUID
 
 # ==========================================
@@ -369,10 +369,10 @@ class ClarificationQuestionDetail(BaseModel):
     project_id: Optional[str] = Field(None, description="Owning project UUID string.")
     checklist_category: Optional[str] = Field(None, description="Compliance checklist category.")
     target_user_story_id: Optional[str] = Field(None, description="Target story ticket code or UUID.")
-    question_text: Optional[str] = Field(None, description="Human-readable question.")
+    question_text: Optional[str] = Field(None, min_length=1, max_length=600, description="Human-readable question.")
     user_answer: Optional[str] = Field(None, description="Stakeholder resolution text, if answered.")
     is_resolved: Optional[bool] = Field(None, description="Whether the question has been resolved.")
-    source_references: List[Dict[str, Any]] = Field(default_factory=list, description="Knowledge-base evidence supporting the question.")
+    source_references: List[Dict[str, Any]] = Field(default_factory=list, max_length=4, description="Knowledge-base evidence supporting the question.")
 
 
 class RequirementDetail(BaseModel):
@@ -694,17 +694,17 @@ class StructuredRequirementsDetail(BaseModel):
 class AuditSourceReference(BaseModel):
     """A traceable citation into an uploaded knowledge-base document."""
     document_id: Optional[str] = None
-    document_name: str
-    section: Optional[str] = None
-    excerpt: Optional[str] = None
+    document_name: str = Field(max_length=255)
+    section: Optional[str] = Field(None, max_length=255)
+    excerpt: Optional[str] = Field(None, max_length=700)
 
 
 class AuditRecommendationDetail(BaseModel):
     """Actionable, non-authoritative wording proposed for one finding."""
-    summary: str
-    proposed_requirement_text: Optional[str] = None
-    proposed_acceptance_criteria: List[str] = Field(default_factory=list)
-    expected_benefit: Optional[str] = None
+    summary: str = Field(max_length=600)
+    proposed_requirement_text: Optional[str] = Field(None, max_length=1200)
+    proposed_acceptance_criteria: List[str] = Field(default_factory=list, max_length=5)
+    expected_benefit: Optional[str] = Field(None, max_length=600)
 
     @field_validator("proposed_acceptance_criteria", mode="before")
     @classmethod
@@ -725,16 +725,16 @@ class AuditFindingDetail(BaseModel):
     """One evidence-backed issue found by the Auditor."""
     rule_id: str = "ADHOC"
     finding_type: str
-    severity: str = "medium"
+    severity: Literal["critical", "high", "medium", "low"] = "medium"
     category: str
     target_requirement_id: Optional[str] = None
-    description: str
-    source_references: List[AuditSourceReference] = Field(default_factory=list)
-    evidence_status: str = "supported"
-    applicability: str = "unknown"
-    impact: str = "warning"
-    confidence: float = 0.5
-    rationale: Optional[str] = None
+    description: str = Field(max_length=1200)
+    source_references: List[AuditSourceReference] = Field(default_factory=list, max_length=4)
+    evidence_status: Literal["supported", "insufficient", "not_required"] = "supported"
+    applicability: Literal["applicable_required", "applicable_recommended", "not_applicable", "unknown"] = "unknown"
+    impact: Literal["blocking", "warning", "suggestion"] = "warning"
+    confidence: float = Field(0.5, ge=0.0, le=1.0)
+    rationale: Optional[str] = Field(None, max_length=1000)
     recommendation: Optional[AuditRecommendationDetail] = None
 
 
@@ -747,18 +747,18 @@ class AuditProjectContext(BaseModel):
     external_integration: Optional[bool] = None
     sensitive_data: Optional[bool] = None
     delivery_stage: str = "unknown"
-    confidence: float = 0.0
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
 
 
 class AuditorOutput(BaseModel):
     """Strict structured output expected from each Auditor LLM pass."""
     is_valid: bool = False
     audit_version_reviewed: int = 1
-    passed_checks: List[str] = Field(default_factory=list)
-    failed_checks: List[str] = Field(default_factory=list)
-    findings: List[AuditFindingDetail] = Field(default_factory=list)
-    clarification_questions: List[ClarificationQuestionDetail] = Field(default_factory=list)
-    verdict: str = "needs_clarification"
+    passed_checks: List[str] = Field(default_factory=list, max_length=30)
+    failed_checks: List[str] = Field(default_factory=list, max_length=30)
+    findings: List[AuditFindingDetail] = Field(default_factory=list, max_length=12)
+    clarification_questions: List[ClarificationQuestionDetail] = Field(default_factory=list, max_length=10)
+    verdict: Literal["pass", "pass_with_warnings", "needs_clarification", "fail"] = "needs_clarification"
     project_context: AuditProjectContext = Field(default_factory=AuditProjectContext)
     checklist_id: str = "banking-core"
     checklist_version: str = "1.0.0"

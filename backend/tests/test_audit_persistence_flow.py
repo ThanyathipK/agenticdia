@@ -1,4 +1,4 @@
-"""Exercise upload -> real Auditor workflow -> confirm -> reload in SQLite."""
+"""Exercise upload -> Auditor auto-persistence -> reload in SQLite."""
 import pytest
 from sqlalchemy import select, func
 from app.models import AuditRunModel, PendingActionModel
@@ -6,11 +6,9 @@ from tests.test_documents import db_session, client, seeded_project
 
 
 @pytest.mark.asyncio
-async def test_audit_confirmation_reload_and_failed_retry(client, db_session, seeded_project, monkeypatch):
+async def test_audit_auto_persistence_reload_and_failed_retry(client, db_session, seeded_project, monkeypatch):
     import app.agents as agents
     import app.semantic_service as semantic
-    from app.repositories import RequirementStateRepository
-
     await client.get(f"/api/project/{seeded_project}")
     upload = await client.post(
         f"/api/project/{seeded_project}/documents/upload",
@@ -51,11 +49,10 @@ async def test_audit_confirmation_reload_and_failed_retry(client, db_session, se
     payload = {"project_id": seeded_project, "raw_input": "", "target_agent": "auditor"}
     response = await client.post("/api/process-requirements", json=payload)
     assert response.status_code == 200, response.text
-    action_id = response.json()["pending_action_id"]
-    before = await RequirementStateRepository.get_by_project_id(seeded_project, db_session)
-    assert not before["audit_findings"]
-    confirmed = await client.post(f"/api/confirm-action/{action_id}", params={"project_id": seeded_project})
-    assert confirmed.status_code == 200, confirmed.text
+    assert response.json()["pending_merge"] is False
+    assert response.json()["pending_action_id"] is None
+    assert response.json()["audit_auto_persisted"] is True
+    assert response.json()["audit_result"]["clarification_questions"][0]["id"]
     saved = (await client.get(f"/api/project/{seeded_project}")).json()
     assert saved["audit_verdict"] == "fail"
     assert saved["audit_checklist_id"] == "banking-core"
@@ -70,8 +67,11 @@ async def test_audit_confirmation_reload_and_failed_retry(client, db_session, se
         raise RuntimeError("private model exception")
     monkeypatch.setattr(agents, "invoke_llm_structured", broken)
     failed = await client.post("/api/process-requirements", json=payload)
-    assert failed.status_code == 503
+    assert failed.status_code == 200
     assert "private model exception" not in failed.text
+    assert failed.json()["pending_merge"] is False
+    assert failed.json()["pending_action_id"] is None
+    assert failed.json()["audit_result"]["failed_checks"] == ["AUDIT_PARSE_ERROR"]
     assert await db_session.scalar(select(func.count()).select_from(PendingActionModel)) == count_before
     after = (await client.get(f"/api/project/{seeded_project}")).json()
     assert after["audit_findings"] == saved["audit_findings"]
@@ -81,11 +81,8 @@ async def test_audit_confirmation_reload_and_failed_retry(client, db_session, se
     monkeypatch.setattr(agents, "invoke_llm_structured", passing)
     rerun = await client.post("/api/process-requirements", json=payload)
     assert rerun.status_code == 200, rerun.text
-    accepted = await client.post(
-        f"/api/confirm-action/{rerun.json()['pending_action_id']}",
-        params={"project_id": seeded_project},
-    )
-    assert accepted.status_code == 200, accepted.text
+    assert rerun.json()["pending_merge"] is False
+    assert rerun.json()["audit_auto_persisted"] is True
     final = (await client.get(f"/api/project/{seeded_project}")).json()
     assert final["audit_verdict"] == "pass"
     assert final["failed_checks"] == []

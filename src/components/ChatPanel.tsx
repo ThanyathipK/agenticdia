@@ -282,8 +282,13 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                         onSubmit={handleSubmitClarifications}
                         className="space-y-3 relative z-10"
                       >
-                        {msg.auditResultSnapshot.clarification_questions.map((q, idx) => (
-                          <div key={idx} className="space-y-1.5 bg-black/5 p-3 rounded-xl border border-black/5 min-w-0">
+                        {msg.auditResultSnapshot.clarification_questions
+                          .map((q, idx) => ({ q, idx }))
+                          .filter(({ q }) => !q.is_resolved)
+                          .map(({ q, idx }) => {
+                          const answerKey = q.id || `q-${idx}`;
+                          return (
+                          <div key={answerKey} className="space-y-1.5 bg-black/5 p-3 rounded-xl border border-black/5 min-w-0">
                             <div className="flex flex-wrap items-center justify-between gap-1.5">
                               <span className="text-[10px] font-mono font-bold text-primary uppercase bg-primary/10 px-1.5 py-0.5 rounded break-words">
                                 {q.checklist_category}
@@ -297,21 +302,21 @@ export function ChatPanel({ state }: { state: ProjectState }) {
                             </p>
                             <input
                               type="text"
-                              required
-                              value={clarificationAnswers[`q-${idx}`] || ""}
-                              onChange={(e) => handleUpdateAnswerValue(`q-${idx}`, e.target.value)}
+                              value={clarificationAnswers[answerKey] || ""}
+                              onChange={(e) => handleUpdateAnswerValue(answerKey, e.target.value)}
                               placeholder="e.g. 180 seconds cached via Redis key prefix 'idemp:...'"
                               className="w-full bg-white border border-outline rounded-lg px-3 py-1.5 text-xs text-on-surface focus:ring-1 focus:ring-primary/40 focus:border-primary placeholder:text-on-surface-variant/40 outline-none"
                             />
                           </div>
-                        ))}
+                          );
+                        })}
 
                         <button
                           type="submit"
                           className="w-full bg-primary hover:brightness-110 active:scale-[0.99] text-on-primary py-2 rounded-xl font-label-md text-xs hover:brightness-110 transition-all font-bold shadow-md shadow-primary/20 flex items-center justify-center gap-1.5"
                         >
                           <CheckCircle2 className="w-4 h-4" />
-                          <span>Submit Clarifications & Re-Audit</span>
+                          <span>Save Answered Questions</span>
                         </button>
                       </form>
                     </motion.div>

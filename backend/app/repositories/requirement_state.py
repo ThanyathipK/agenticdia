@@ -706,6 +706,16 @@ class RequirementStateRepository:
         for r_id_str in touched_req_ids:
             first_active_req_id = uuid.UUID(r_id_str)
             break
+        if first_active_req_id is None:
+            # Audit-only saves deliberately omit requirement payload so they
+            # cannot rewrite the board. Resolve an existing requirement solely
+            # as the persistence anchor for audit questions/results.
+            first_active_req_id = await session.scalar(
+                select(RequirementModel.id).where(
+                    RequirementModel.project_id == project_id,
+                    func.lower(RequirementModel.status) == "active",
+                ).order_by(RequirementModel.created_at.asc()).limit(1)
+            )
 
         if "clarification_questions" in updates and updates["clarification_questions"] is not None:
             if first_active_req_id:

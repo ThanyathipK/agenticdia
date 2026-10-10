@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories import RequirementStateRepository, ConversationMessageRepository
 from app.schemas import AuditorOutput, GatheredRequirements, MermaidDiagramResult
 from app.document_processor import document_budget, split_markdown_into_chunks
+from app.config import settings
 from app.input_validation import count_body_tokens, count_tokens
 from app.audit_checklist import load_active_audit_checklist
 from app.prompt_loader import load_prompt
@@ -51,7 +52,7 @@ logger = logging.getLogger("app.agents")
 # headroom (truncated Mermaid is unrenderable).
 diagram_llm = build_llm(max_tokens=4096)
 # Keep generation bounded; incomplete responses fail without staging a verdict.
-auditor_llm = build_llm(max_tokens=3500)
+auditor_llm = build_llm(max_tokens=4096)
 ACTIVE_AUDIT_CHECKLIST = load_active_audit_checklist()
 
 AUDITOR_FORMAT_INSTRUCTIONS = """Return one compact JSON object with exactly these top-level keys:
@@ -63,7 +64,9 @@ finding_type, severity, category, target_requirement_id, description, source_ref
 applicability, impact, confidence, rationale, recommendation}. recommendation is either null or {summary,
 proposed_requirement_text, proposed_acceptance_criteria, expected_benefit}. Each source reference
 is {document_id, document_name, section, excerpt}. Each question is {checklist_category, target_user_story_id,
-question_text, is_resolved, source_references}. Use null when unknown. Output JSON only, with no markdown or commentary."""
+question_text, is_resolved, source_references}. Return at most 12 findings, 10 questions, 4 source references
+per item, and 5 proposed acceptance criteria per recommendation. Keep descriptions and rationales concise.
+Use null when unknown. Output JSON only, with no markdown or commentary."""
 
 # ==========================================
 # STATE MANAGEMENT
@@ -98,6 +101,7 @@ class AgentState(TypedDict, total=False):
     raw_input: str
     structured_requirements: dict
     audit_result: dict
+    audit_operational_error: bool
     prd_markdown: str
     mermaid_diagram: str
     current_version: int
@@ -1153,7 +1157,7 @@ async def gatherer_node(state: AgentState) -> Dict[str, Any]:
         # looked like a silent failure. A repeated (already-asked) question is
         # not re-posted, so the chat does not fill up with duplicates.
         if new_cqs:
-            clarify_msg = "Clarification needed (requirements):\n" + "\n".join(f"- {q['question_text']}" for q in new_cqs)
+            clarify_msg = "Clarification Needed (requirements):\n" + "\n".join(f"- {q['question_text']}" for q in new_cqs)
             await ConversationMessageRepository.save_message(
                 project_id=project_id,
                 role="assistant",
@@ -1823,8 +1827,10 @@ def _merge_audit_passes(results: List[Dict[str, Any]], current_version: int) -> 
     else:
         verdict = "pass"
     return {
-        # Compatibility boolean: only substantiated mandatory blockers fail.
-        "is_valid": not blocking,
+        # A pass requires both no substantiated blocker and no unanswered
+        # clarification. A question means the audit lacks enough information
+        # to establish a valid result.
+        "is_valid": not blocking and not questions,
         "verdict": verdict,
         "project_context": project_context,
         "audit_version_reviewed": current_version,
@@ -1843,7 +1849,10 @@ def _validate_audit_output(output, documents):
     required = {"is_valid", "findings", "clarification_questions"}
     if not isinstance(output, dict) or not required.issubset(output):
         return False
-    parsed = AuditorOutput.model_validate(output).model_dump()
+    try:
+        parsed = AuditorOutput.model_validate(output).model_dump()
+    except Exception:
+        return False
     allowed_rule_ids = ACTIVE_AUDIT_CHECKLIST.rule_ids | {"ADHOC"}
     if any(finding.get("rule_id", "ADHOC").upper() not in allowed_rule_ids for finding in parsed["findings"]):
         return False
@@ -1985,7 +1994,8 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         template=load_prompt("auditor"),
         input_variables=["structured_requirements", "current_version", "audit_scope", "format_instructions", "audit_checklist"]
     )
-    
+
+    audit_completed = False
     try:
         # Keep the existing token-aware document strategy: a normal project is
         # audited in one pass, while oversized knowledge documents are split
@@ -2015,6 +2025,12 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             contexts = [structured_reqs_for_prompt]
         else:
             contexts = [{**base_payload, "knowledge_base_documents": [part]} for part in document_parts]
+        if len(contexts) > settings.AUDITOR_MAX_PASSES:
+            raise RuntimeError(
+                "Auditor context requires "
+                f"{len(contexts)} model passes, above the configured safe limit "
+                f"of {settings.AUDITOR_MAX_PASSES}. Narrow or split the knowledge documents."
+            )
 
         # A full Pydantic JSON schema added thousands of prompt tokens and made
         # the local model generate long, slow answers. The compact contract is
@@ -2038,6 +2054,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
                 validate=lambda output: _validate_audit_output(
                     output, context["knowledge_base_documents"]
                 ),
+                native_json_schema=True,
             ))
             partial_results[-1] = AuditorOutput.model_validate(partial_results[-1]).model_dump()
 
@@ -2091,6 +2108,8 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
         else:
             auditor_msg = "Requirements audit failed.\nOne or more clearly applicable mandatory controls have substantiated blocking gaps."
 
+        audit_completed = True
+
         # AUDIT 2.4 — Auditor chat turn (conversation_messages, role="auditor",
         #             intent="AUDIT"): pass or the bulleted clarification list. The
         #             questions themselves stay in memory until the staged merge is
@@ -2108,14 +2127,16 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             "requirement_state": req_state,
             "audit_result": result
         }
-    except Exception:
-        # A local model can time out or return malformed JSON even while the
-        # gateway itself remains healthy.  Do not turn that into an empty 503
-        # (or, worse, reuse an old passing verdict). Return a conservative,
-        # explicitly non-valid fallback that the normal response/UI path can
-        # render. This is NOT a compliance verdict: AUDIT_PARSE_ERROR tells the
-        # client that no model-backed audit completed and invites a retry.
-        logger.exception("Auditor could not complete; returning a safe retryable result")
+    except Exception as exc:
+        if audit_completed:
+            # The model result was valid; a later database/conversation failure
+            # is an infrastructure error and must fail the job rather than be
+            # mislabeled as malformed model output.
+            raise RuntimeError("Auditor persistence failed after successful inference") from exc
+        # Operational failures are not compliance verdicts. Return an explicit
+        # non-valid UI result, but mark it so the pipeline does not create a
+        # merge action or overwrite the last good audit.
+        logger.exception("Auditor execution failed")
         result = {
             "is_valid": False,
             "verdict": "needs_clarification",
@@ -2129,7 +2150,7 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
                 "severity": "medium",
                 "category": "Audit execution",
                 "target_requirement_id": None,
-                "description": "The local model did not return a usable audit within the configured time limit.",
+                "description": "The local model returned no usable structured audit result.",
                 "source_references": [],
                 "evidence_status": "insufficient",
                 "applicability": "unknown",
@@ -2137,10 +2158,10 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
                 "confidence": 1.0,
                 "rationale": "No compliance conclusion can be drawn from an incomplete model response.",
                 "recommendation": {
-                    "summary": "Retry Validate after confirming the local model is responsive.",
+                    "summary": "Retry after confirming LM Studio has Qwen loaded and thinking mode is disabled.",
                     "proposed_requirement_text": None,
                     "proposed_acceptance_criteria": [],
-                    "expected_benefit": "Returns a complete evidence-based audit instead of an indeterminate result.",
+                    "expected_benefit": "Produces a complete evidence-based audit.",
                 },
             }],
             "source_references": [],
@@ -2148,17 +2169,11 @@ async def auditor_node(state: AgentState) -> Dict[str, Any]:
             "checklist_id": ACTIVE_AUDIT_CHECKLIST.checklist_id,
             "checklist_version": ACTIVE_AUDIT_CHECKLIST.version,
         }
-        req_state["validation_status"] = "invalid"
-        req_state["passed_checks"] = []
-        req_state["failed_checks"] = result["failed_checks"]
-        req_state["audit_findings"] = result["findings"]
-        req_state["audit_source_references"] = []
-        req_state["audit_verdict"] = result["verdict"]
-        req_state["current_workflow_state"] = "auditor_node"
         return {
             "requirement_state": req_state,
             "audit_result": result,
-            "agent_message": "Requirements audit could not complete within the local model time limit. Please retry Validate.",
+            "audit_operational_error": True,
+            "agent_message": "The local model returned no usable audit JSON. No validation result was applied.",
         }
 
 # ARCHITECT 2.0 — Architect node (graph position: ROUTING 1.2 for
@@ -2191,11 +2206,34 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     req_state = await get_or_init_requirement_state(project_id, session=db_session, current_version=state.get("current_version", 1))
     
     passed_structured = state.get("structured_requirements") or {}
+    # The frontend can briefly hold an empty/stale structured snapshot after a
+    # reload. Architect is read-only with respect to requirements, so an empty
+    # client snapshot must never erase the canonical server board in memory.
+    incoming_stories = passed_structured.get("user_stories") or []
+    incoming_requirements = passed_structured.get("requirements") or []
+    has_incoming_story_data = bool(incoming_stories) or any(
+        isinstance(requirement, dict) and bool(requirement.get("user_stories"))
+        for requirement in incoming_requirements
+    )
+    if passed_structured and not has_incoming_story_data:
+        logger.warning(
+            "Architect ignored an empty client requirement snapshot for project %s and retained server state",
+            project_id,
+        )
+        passed_structured = {}
     if passed_structured:
         # Locked source artifacts remain available as read-only Architect
         # context. Only generated targets (notably PRD sections) are excluded
         # from writes by their repository/service lock gates.
         passed_stories = list(passed_structured.get("user_stories", []))
+        if not passed_stories:
+            passed_stories = [
+                story
+                for requirement in passed_structured.get("requirements", [])
+                if isinstance(requirement, dict)
+                for story in (requirement.get("user_stories") or [])
+                if isinstance(story, dict)
+            ]
         # Preserve database identity from the previous requirement record(s).
         # The synthetic rebuild below must keep the ``id`` field — it is
         # REQUIRED by the RequirementDetail response schema; dropping it made
@@ -2298,21 +2336,19 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         isinstance(r, dict) and r.get("user_stories") for r in requirements
     )
 
-    # ARCHITECT 2.3 — FAIL LOUD: an empty dataset must never reach the LLM (it would
-    #             only hallucinate a PRD). Raises so /api/process-requirements maps it
-    #             to HTTP 500 and nothing is persisted. Stories may live flat in
-    #             user_stories OR nested inside requirements; a stored legacy PRD does
-    #             not excuse an empty dataset (it is never reused — see 2.2).
-    if not all_stories and not nested:
-        # FAIL LOUDLY: invoking the LLM with an empty story set would only
-        # produce a hallucinated PRD. Raise so /api/process-requirements maps
-        # this to HTTP 500 and nothing is persisted. Stories may live flat in
-        # user_stories OR nested inside requirements - both are valid. A
-        # stored LEGACY PRD does not excuse an empty dataset: it is never
-        # reused or merged, so there is nothing to regenerate from.
+    # ARCHITECT 2.3 — A requirement is already valid PRD source material even
+    # when the Gatherer has not expanded it into user stories yet. Previously
+    # this guard treated a requirement-only project as empty and returned a
+    # misleading HTTP 500. Only reject a genuinely empty board.
+    meaningful_requirements = [
+        requirement for requirement in requirements
+        if isinstance(requirement, dict)
+        and any(str(requirement.get(field) or "").strip() for field in ("title", "description"))
+    ]
+    if not all_stories and not nested and not meaningful_requirements:
         raise ValueError(
-            f"Cannot compile PRD for project {project_id}: no unlocked user stories "
-            "are available. Gather requirements before generating a PRD."
+            f"Cannot compile PRD for project {project_id}: no active requirements "
+            "or user stories are available. Gather requirements before generating a PRD."
         )
 
     version_history_summaries = state.get("version_history_summaries", "No previous revision logs available.")
@@ -2344,12 +2380,37 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
     #             (with their stories/ACs), flat boards contribute `user_stories` +
     #             `acceptance_criteria`; scope_in is derived from the story titles.
     #             This is exactly the same dataset the diagram prompt (4.1) receives.
+    # Preserve every active requirement in the generated document. A
+    # requirement without stories becomes one deterministic functional-
+    # requirement row; this is a presentation fallback only and is never
+    # written back as a fabricated user story.
+    document_requirements: List[Dict[str, Any]] = []
     stories_flat: List[Dict[str, Any]] = []
-    if nested:
-        for r in requirements:
-            if isinstance(r, dict):
-                stories_flat.extend(r.get("user_stories") or [])
-    else:
+    # A legacy flat state can contain a requirement shell plus top-level
+    # stories. Keep using those real stories rather than replacing them with a
+    # requirement-derived row.
+    if nested or not all_stories:
+        for index, requirement in enumerate(requirements, start=1):
+            if not isinstance(requirement, dict):
+                continue
+            document_requirement = dict(requirement)
+            requirement_stories = list(requirement.get("user_stories") or [])
+            if not requirement_stories and any(
+                str(requirement.get(field) or "").strip() for field in ("title", "description")
+            ):
+                title = str(requirement.get("title") or requirement.get("description") or f"Requirement {index}").strip()
+                description = str(requirement.get("description") or "").strip()
+                requirement_stories = [{
+                    "ticket_code": requirement.get("requirement_code") or _default_requirement_code(index - 1),
+                    "story_title": f"{title}: {description}" if description and description != title else title,
+                    "acceptance_criteria": [],
+                }]
+            document_requirement["user_stories"] = requirement_stories
+            document_requirements.append(document_requirement)
+            stories_flat.extend(requirement_stories)
+
+    # Legacy flat states have no requirement container.
+    if not stories_flat:
         stories_flat = all_stories
 
     epic_name = requirements[0].get("title", "") if requirements else ""
@@ -2357,9 +2418,9 @@ async def architect_node(state: AgentState) -> Dict[str, Any]:
         "epic_name": epic_name,
         "business_goals": req_state.get("business_goals", []),
         "actors": req_state.get("actors", []),
-        "requirements": requirements if nested else [],
-        "user_stories": [] if nested else all_stories,
-        "acceptance_criteria": [] if nested else req_state.get("acceptance_criteria", []),
+        "requirements": document_requirements,
+        "user_stories": [] if document_requirements else all_stories,
+        "acceptance_criteria": [] if document_requirements else req_state.get("acceptance_criteria", []),
         "problem_statement": req_state.get("problem_statement", []),
         "scope_in": [s.get("story_title", "") for s in stories_flat if s.get("story_title")],
         "scope_out": req_state.get("scope_out", []),
